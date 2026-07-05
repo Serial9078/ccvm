@@ -1,69 +1,99 @@
-import DashboardIcon from '@mui/icons-material/Dashboard';
-import BusinessIcon from '@mui/icons-material/Business';
-import DnsIcon from '@mui/icons-material/Dns';
-import RadarIcon from '@mui/icons-material/Radar';
-import BugReportIcon from '@mui/icons-material/BugReport';
-import AssessmentIcon from '@mui/icons-material/Assessment';
-import SettingsIcon from '@mui/icons-material/Settings';
-import { Box, Drawer, List, ListItemButton, ListItemIcon, ListItemText, Toolbar, Typography, AppBar, Chip } from '@mui/material';
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import {
+  Box,
+  Drawer,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+  Toolbar,
+  AppBar,
+  Typography,
+  Chip,
+} from '@mui/material'
+import DashboardIcon from '@mui/icons-material/Dashboard'
+import BusinessIcon from '@mui/icons-material/Business'
+import DevicesIcon from '@mui/icons-material/Devices'
+import RadarIcon from '@mui/icons-material/Radar'
+import BugReportIcon from '@mui/icons-material/BugReport'
+import AssessmentIcon from '@mui/icons-material/Assessment'
+import SettingsIcon from '@mui/icons-material/Settings'
+import { NavLink, Outlet } from 'react-router-dom'
 
-const drawerWidth = 260;
+const drawerWidth = 260
 
-const nav = [
-  { label: 'Dashboard', icon: <DashboardIcon />, path: '/' },
-  { label: 'Customers', icon: <BusinessIcon />, path: '/customers' },
-  { label: 'Assets', icon: <DnsIcon />, path: '/assets' },
-  { label: 'Scans', icon: <RadarIcon />, path: '/scans' },
-  { label: 'Findings', icon: <BugReportIcon />, path: '/findings' },
-  { label: 'Reports', icon: <AssessmentIcon />, path: '/reports' },
-  { label: 'Settings', icon: <SettingsIcon />, path: '/settings' },
-];
+const navItems = [
+  { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
+  { label: 'Customers', path: '/customers', icon: <BusinessIcon /> },
+  { label: 'Assets', path: '/assets', icon: <DevicesIcon /> },
+  { label: 'Scans', path: '/scans', icon: <RadarIcon /> },
+  { label: 'Findings', path: '/findings', icon: <BugReportIcon /> },
+  { label: 'Reports', path: '/reports', icon: <AssessmentIcon /> },
+  { label: 'Settings', path: '/settings', icon: <SettingsIcon /> },
+]
 
 export function AppLayout() {
-  const location = useLocation();
-
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh' }}>
-      <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, bgcolor: '#020617', borderBottom: '1px solid #1e293b' }} elevation={0}>
+      <AppBar
+        position="fixed"
+        sx={{
+          zIndex: 1300,
+          bgcolor: '#020617',
+          borderBottom: '1px solid #1e293b',
+          boxShadow: 'none',
+        }}
+      >
         <Toolbar>
-          <Typography variant="h6" sx={{ fontWeight: 900, flexGrow: 1 }}>
+          <Typography variant="h6" sx={{ flexGrow: 1 }}>
             CloudCollab Vulnerability Manager
           </Typography>
-          <Chip label="v0.4.0 Phoenix" color="primary" variant="outlined" />
+          <Chip label="v0.4 Phoenix" color="primary" size="small" />
         </Toolbar>
       </AppBar>
+
       <Drawer
         variant="permanent"
         sx={{
           width: drawerWidth,
-          flexShrink: 0,
-          [`& .MuiDrawer-paper`]: { width: drawerWidth, boxSizing: 'border-box', bgcolor: '#020617', borderRight: '1px solid #1e293b' },
+          '& .MuiDrawer-paper': {
+            width: drawerWidth,
+            bgcolor: '#020617',
+            borderRight: '1px solid #1e293b',
+          },
         }}
       >
         <Toolbar />
         <Box sx={{ p: 2 }}>
-          <Typography variant="overline" color="text.secondary">Navigation</Typography>
-          <List>
-            {nav.map((item) => (
-              <ListItemButton
-                key={item.path}
-                component={Link}
-                to={item.path}
-                selected={location.pathname === item.path}
-                sx={{ borderRadius: 2, mb: 0.5 }}
-              >
-                <ListItemIcon sx={{ color: 'inherit' }}>{item.icon}</ListItemIcon>
-                <ListItemText primary={item.label} />
-              </ListItemButton>
-            ))}
-          </List>
+          <Typography variant="overline" color="text.secondary">
+            Navigation
+          </Typography>
         </Box>
+        <List>
+          {navItems.map((item) => (
+            <ListItemButton
+              key={item.path}
+              component={NavLink}
+              to={item.path}
+              sx={{
+                mx: 1,
+                mb: 0.5,
+                borderRadius: 2,
+                '&.active': {
+                  bgcolor: 'rgba(56,189,248,0.14)',
+                  color: '#38bdf8',
+                },
+              }}
+            >
+              <ListItemIcon sx={{ color: 'inherit' }}>{item.icon}</ListItemIcon>
+              <ListItemText primary={item.label} />
+            </ListItemButton>
+          ))}
+        </List>
       </Drawer>
-      <Box component="main" sx={{ flexGrow: 1, p: 4, bgcolor: '#020617' }}>
-        <Toolbar />
+
+      <Box component="main" sx={{ flexGrow: 1, p: 4, mt: 8 }}>
         <Outlet />
       </Box>
     </Box>
-  );
+  )
 }

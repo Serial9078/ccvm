@@ -1,38 +1,52 @@
-import { Grid, Typography, Card, CardContent, Box } from '@mui/material';
-import { useQuery } from '@tanstack/react-query';
-import { getDashboardStats } from '../api/queries';
-import { StatCard } from '../components/StatCard';
+import { Box, Card, CardContent, Typography } from '@mui/material'
+
+const stats = [
+  { label: 'Customers', value: 0 },
+  { label: 'Assets', value: 0 },
+  { label: 'Critical', value: 0 },
+  { label: 'High', value: 0 },
+]
 
 export function Dashboard() {
-  const { data, isLoading } = useQuery({ queryKey: ['dashboard-stats'], queryFn: getDashboardStats });
-
-  const stats = data ?? { customers: 0, assets: 0, scans: 0, findings: 0, critical: 0, high: 0, medium: 0, low: 0 };
-
   return (
     <Box>
-      <Typography variant="h4" gutterBottom>Dashboard</Typography>
-      <Typography color="text.secondary" sx={{ mb: 3 }}>Operational overview for customers, assets, scans and exposure risk.</Typography>
-      {isLoading && <Typography>Loading dashboard...</Typography>}
-      <Grid container spacing={2}>
-        <Grid item xs={12} md={3}><StatCard label="Customers" value={stats.customers} /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="Assets" value={stats.assets} /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="Scans" value={stats.scans} /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="Findings" value={stats.findings} /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="Critical" value={stats.critical} tone="#ef4444" /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="High" value={stats.high} tone="#f97316" /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="Medium" value={stats.medium} tone="#f59e0b" /></Grid>
-        <Grid item xs={12} md={3}><StatCard label="Low" value={stats.low} tone="#38bdf8" /></Grid>
-        <Grid item xs={12}>
-          <Card sx={{ border: '1px solid #1e293b' }}>
+      <Typography variant="h4" gutterBottom>
+        Dashboard
+      </Typography>
+      <Typography color="text.secondary" sx={{ mb: 4 }}>
+        Security exposure overview for managed customers and assets.
+      </Typography>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3, mb: 3 }}>
+        {stats.map((stat) => (
+          <Card key={stat.label}>
             <CardContent>
-              <Typography variant="h6">Phoenix milestone</Typography>
-              <Typography color="text.secondary" sx={{ mt: 1 }}>
-                CCVM now has a real React application shell, API integration and a backend prepared for scanner plugins.
-              </Typography>
+              <Typography color="text.secondary">{stat.label}</Typography>
+              <Typography variant="h3">{stat.value}</Typography>
             </CardContent>
           </Card>
-        </Grid>
-      </Grid>
+        ))}
+      </Box>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 3 }}>
+        <Card>
+          <CardContent>
+            <Typography variant="h6">Risk Overview</Typography>
+            <Typography color="text.secondary" sx={{ mt: 2 }}>
+              Charts will appear here once findings are available.
+            </Typography>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent>
+            <Typography variant="h6">Recent Activity</Typography>
+            <Typography color="text.secondary" sx={{ mt: 2 }}>
+              No scans yet.
+            </Typography>
+          </CardContent>
+        </Card>
+      </Box>
     </Box>
-  );
+  )
 }
