@@ -1,0 +1,69 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ccvm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ccvm
+      POSTGRES_USER: ccvm
+      POSTGRES_PASSWORD: ChangeMeStrongPassword
+      TZ: Europe/Berlin
+    volumes:
+      - ccvm_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: ccvm-redis
+    restart: unless-stopped
+
+  backend:
+    image: python:3.12-slim
+    container_name: ccvm-backend
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "pip install fastapi uvicorn psycopg2-binary && uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DB_HOST: postgres
+      DB_NAME: ccvm
+      DB_USER: ccvm
+      DB_PASS: ChangeMeStrongPassword
+      TZ: Europe/Berlin
+    volumes:
+      - /opt/ccvm/backend:/app
+    ports:
+      - "8088:8000"
+    depends_on:
+      - postgres
+      - redis
+
+  frontend:
+    image: nginx:alpine
+    container_name: ccvm-frontend
+    restart: unless-stopped
+    volumes:
+      - /opt/ccvm/frontend:/usr/share/nginx/html:ro
+    ports:
+      - "8090:80"
+    depends_on:
+      - backend
+
+  nuclei:
+    image: projectdiscovery/nuclei:latest
+    container_name: ccvm-nuclei
+    restart: unless-stopped
+    entrypoint: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ccvm_scanner_data:/data
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: ccvm-gotenberg
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+
+volumes:
+  ccvm_postgres_data:
+  ccvm_scanner_data:
