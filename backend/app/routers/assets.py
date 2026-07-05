@@ -15,12 +15,7 @@ def list_assets(db: Session = Depends(get_db)):
 
 @router.post("", response_model=AssetOut)
 def create_asset(payload: AssetCreate, db: Session = Depends(get_db)):
-    asset = Asset(
-        customer_id=payload.customer_id,
-        target=payload.target,
-        type=payload.type,
-        exposure=payload.exposure,
-    )
+    asset = Asset(**payload.model_dump())
     db.add(asset)
     db.commit()
     db.refresh(asset)

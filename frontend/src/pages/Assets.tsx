@@ -23,14 +23,27 @@ export function Assets() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
     customer_id: "",
+    name: "",
     target: "",
+    hostname: "",
+    fqdn: "",
+    ip_address: "",
     type: "url",
     exposure: "external",
+    environment: "production",
+    criticality: "medium",
+    owner: "",
+    tags: "",
+    description: "",
   });
 
   const columns: GridColDef[] = [
-    { field: "target", headerName: "Target", flex: 1.6 },
+    { field: "name", headerName: "Name", flex: 1 },
+    { field: "target", headerName: "Target", flex: 1.5 },
+    { field: "ip_address", headerName: "IP", flex: 1 },
     { field: "type", headerName: "Type", flex: 1 },
+    { field: "environment", headerName: "Environment", flex: 1 },
+    { field: "criticality", headerName: "Criticality", flex: 1 },
     { field: "exposure", headerName: "Exposure", flex: 1 },
     {
       field: "customer_id",
@@ -46,12 +59,35 @@ export function Assets() {
   const saveAsset = async () => {
     await createAsset.mutateAsync({
       customer_id: Number(form.customer_id),
+      name: form.name || undefined,
       target: form.target,
+      hostname: form.hostname || undefined,
+      fqdn: form.fqdn || undefined,
+      ip_address: form.ip_address || undefined,
       type: form.type,
       exposure: form.exposure,
+      environment: form.environment,
+      criticality: form.criticality,
+      owner: form.owner || undefined,
+      tags: form.tags || undefined,
+      description: form.description || undefined,
     });
 
-    setForm({ customer_id: "", target: "", type: "url", exposure: "external" });
+    setForm({
+      customer_id: "",
+      name: "",
+      target: "",
+      hostname: "",
+      fqdn: "",
+      ip_address: "",
+      type: "url",
+      exposure: "external",
+      environment: "production",
+      criticality: "medium",
+      owner: "",
+      tags: "",
+      description: "",
+    });
     setOpen(false);
   };
 
@@ -66,7 +102,7 @@ export function Assets() {
         </Button>
       </Box>
 
-      <Box sx={{ height: 520, width: "100%" }}>
+      <Box sx={{ height: 560, width: "100%" }}>
         <DataGrid
           rows={assets}
           columns={columns}
@@ -81,10 +117,10 @@ export function Assets() {
         />
       </Box>
 
-      <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="sm">
+      <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>New Asset</DialogTitle>
         <DialogContent>
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2, mt: 1 }}>
             <TextField
               select
               label="Customer"
@@ -99,37 +135,62 @@ export function Assets() {
               ))}
             </TextField>
 
+            <TextField label="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+
             <TextField
               label="Target"
               value={form.target}
               onChange={(e) => setForm({ ...form, target: e.target.value })}
-              placeholder="https://example.com oder 192.168.1.10"
               required
             />
 
-            <TextField
-              select
-              label="Type"
-              value={form.type}
-              onChange={(e) => setForm({ ...form, type: e.target.value })}
-            >
+            <TextField label="Hostname" value={form.hostname} onChange={(e) => setForm({ ...form, hostname: e.target.value })} />
+            <TextField label="FQDN" value={form.fqdn} onChange={(e) => setForm({ ...form, fqdn: e.target.value })} />
+            <TextField label="IP Address" value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} />
+
+            <TextField select label="Type" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
               <MenuItem value="url">URL</MenuItem>
               <MenuItem value="fqdn">FQDN</MenuItem>
               <MenuItem value="ip">IP</MenuItem>
               <MenuItem value="network">Network</MenuItem>
               <MenuItem value="server">Server</MenuItem>
+              <MenuItem value="windows_server">Windows Server</MenuItem>
+              <MenuItem value="linux_server">Linux Server</MenuItem>
               <MenuItem value="network_device">Network Device</MenuItem>
+              <MenuItem value="firewall">Firewall</MenuItem>
+              <MenuItem value="vmware">VMware</MenuItem>
             </TextField>
 
-            <TextField
-              select
-              label="Exposure"
-              value={form.exposure}
-              onChange={(e) => setForm({ ...form, exposure: e.target.value })}
-            >
+            <TextField select label="Exposure" value={form.exposure} onChange={(e) => setForm({ ...form, exposure: e.target.value })}>
               <MenuItem value="external">External</MenuItem>
               <MenuItem value="internal">Internal</MenuItem>
             </TextField>
+
+            <TextField select label="Environment" value={form.environment} onChange={(e) => setForm({ ...form, environment: e.target.value })}>
+              <MenuItem value="production">Production</MenuItem>
+              <MenuItem value="staging">Staging</MenuItem>
+              <MenuItem value="development">Development</MenuItem>
+              <MenuItem value="lab">Lab</MenuItem>
+            </TextField>
+
+            <TextField select label="Criticality" value={form.criticality} onChange={(e) => setForm({ ...form, criticality: e.target.value })}>
+              <MenuItem value="critical">Critical</MenuItem>
+              <MenuItem value="high">High</MenuItem>
+              <MenuItem value="medium">Medium</MenuItem>
+              <MenuItem value="low">Low</MenuItem>
+            </TextField>
+
+            <TextField label="Owner" value={form.owner} onChange={(e) => setForm({ ...form, owner: e.target.value })} />
+            <TextField label="Tags" value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
+
+            <TextField
+              label="Description"
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              multiline
+              minRows={3}
+              sx={{ gridColumn: "1 / -1" }}
+            />
           </Box>
         </DialogContent>
         <DialogActions>
