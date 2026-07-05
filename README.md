@@ -1,14 +1,16 @@
 # CCVM - CloudCollab Vulnerability Manager
 
-Open vulnerability management platform for MSPs, IT service providers and security teams.
+Sprint 0.3 foundation release.
 
-## Sprint 0.1
-
-- Project structure
-- Portainer-ready stack
+## Services
 - FastAPI backend
 - PostgreSQL
 - Redis
-- React frontend placeholder
-- Nuclei service placeholder
+- React + Vite + TypeScript frontend
+- Nuclei placeholder service
 - Gotenberg PDF service
+
+## URLs
+- Frontend: http://SERVER-IP:8090
+- Backend: http://SERVER-IP:8088/health
+- API docs: http://SERVER-IP:8088/docs

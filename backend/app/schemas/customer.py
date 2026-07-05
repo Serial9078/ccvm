@@ -7,5 +7,4 @@ class CustomerCreate(BaseModel):
 class CustomerOut(CustomerCreate):
     id: int
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}

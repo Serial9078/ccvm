@@ -19,19 +19,17 @@ services:
     restart: unless-stopped
 
   backend:
-    image: python:3.12-slim
+    build:
+      context: ./backend
     container_name: ccvm-backend
     restart: unless-stopped
-    working_dir: /app
-    command: sh -c "pip install fastapi uvicorn psycopg2-binary && uvicorn main:app --host 0.0.0.0 --port 8000"
     environment:
       DB_HOST: postgres
+      DB_PORT: 5432
       DB_NAME: ccvm
       DB_USER: ccvm
       DB_PASS: ChangeMeStrongPassword
       TZ: Europe/Berlin
-    volumes:
-      - /opt/ccvm/backend:/app
     ports:
       - "8088:8000"
     depends_on:
@@ -39,11 +37,10 @@ services:
       - redis
 
   frontend:
-    image: nginx:alpine
+    build:
+      context: ./frontend
     container_name: ccvm-frontend
     restart: unless-stopped
-    volumes:
-      - /opt/ccvm/frontend:/usr/share/nginx/html:ro
     ports:
       - "8090:80"
     depends_on:
