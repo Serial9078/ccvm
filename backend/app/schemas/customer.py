@@ -1,14 +1,25 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
-
-class CustomerCreate(BaseModel):
+class CustomerBase(BaseModel):
     name: str
-    email: EmailStr | None = None
+    company: str | None = None
+    street: str | None = None
+    zip: str | None = None
+    city: str | None = None
+    country: str | None = "Germany"
+    contact_name: str | None = None
+    contact_email: str | None = None
+    contact_phone: str | None = None
 
+class CustomerCreate(CustomerBase):
+    pass
 
-class CustomerOut(BaseModel):
+class CustomerUpdate(CustomerBase):
+    name: str | None = None
+
+class CustomerOut(CustomerBase):
     id: int
-    name: str
-    email: str | None = None
+    uuid: str
 
-    model_config = {"from_attributes": True}
+    class Config:
+        from_attributes = True

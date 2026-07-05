@@ -1,19 +1,28 @@
-import { Box, Button, Card, CardContent, Typography } from '@mui/material'
+import { Box, Card, CardContent, Typography } from "@mui/material";
+import { useCustomers } from "../hooks/useCustomers";
 
 export function Customers() {
+  const { data, isLoading, error } = useCustomers();
+
+  if (isLoading) return <Typography>Lade Kunden...</Typography>;
+  if (error) return <Typography color="error">Fehler beim Laden.</Typography>;
+
   return (
     <Box>
       <Typography variant="h4" gutterBottom>
         Customers
       </Typography>
-      <Card>
-        <CardContent>
-          <Button variant="contained">Add Customer</Button>
-          <Typography color="text.secondary" sx={{ mt: 3 }}>
-            Customer management will be connected to the backend API next.
-          </Typography>
-        </CardContent>
-      </Card>
+
+      {data?.map((customer) => (
+        <Card key={customer.uuid} sx={{ mb: 2 }}>
+          <CardContent>
+            <Typography variant="h6">{customer.name}</Typography>
+            <Typography color="text.secondary">{customer.company}</Typography>
+            <Typography color="text.secondary">{customer.city}</Typography>
+            <Typography color="text.secondary">{customer.contact_email}</Typography>
+          </CardContent>
+        </Card>
+      ))}
     </Box>
-  )
+  );
 }

@@ -1,15 +1,31 @@
-from sqlalchemy import DateTime, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+import uuid
+from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database.session import Base
-
 
 class Customer(Base):
     __tablename__ = "customers"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id = Column(Integer, primary_key=True, index=True)
+    uuid = Column(String, unique=True, index=True, default=lambda: str(uuid.uuid4()))
 
-    assets = relationship("Asset", back_populates="customer", cascade="all, delete-orphan")
+    name = Column(String, nullable=False)
+    company = Column(String, nullable=True)
+    street = Column(String, nullable=True)
+    zip = Column(String, nullable=True)
+    city = Column(String, nullable=True)
+    country = Column(String, nullable=True, default="Germany")
+
+    contact_name = Column(String, nullable=True)
+    contact_email = Column(String, nullable=True)
+    contact_phone = Column(String, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    assets = relationship(
+        "Asset",
+        back_populates="customer",
+        cascade="all, delete-orphan"
+    )
