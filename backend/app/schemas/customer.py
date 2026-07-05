@@ -1,10 +1,14 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
+
 
 class CustomerCreate(BaseModel):
     name: str
-    email: str | None = None
+    email: EmailStr | None = None
 
-class CustomerOut(CustomerCreate):
+
+class CustomerOut(BaseModel):
     id: int
+    name: str
+    email: str | None = None
 
     model_config = {"from_attributes": True}

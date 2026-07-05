@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.v1 import assets, customers, dashboard
 from app.core.config import settings
 from app.database.session import Base, engine
 from app import models
-from app.routers import customers, assets
 
 Base.metadata.create_all(bind=engine)
 
@@ -17,8 +17,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(customers.router, prefix="/api/v1")
-app.include_router(assets.router, prefix="/api/v1")
+app.include_router(dashboard.router)
+app.include_router(customers.router)
+app.include_router(assets.router)
+
 
 @app.get("/health")
 def health():

@@ -1,0 +1,8 @@
+name: nuclei
+version: 0.1.0
+status: planned
+capabilities:
+  - web
+  - tls
+  - dns
+  - cve

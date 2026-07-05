@@ -12,6 +12,11 @@ services:
       TZ: Europe/Berlin
     volumes:
       - ccvm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ccvm -d ccvm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -21,24 +26,29 @@ services:
   backend:
     build:
       context: ./backend
+    image: ccvm-backend:0.4.0
     container_name: ccvm-backend
     restart: unless-stopped
     environment:
       DB_HOST: postgres
-      DB_PORT: 5432
       DB_NAME: ccvm
       DB_USER: ccvm
       DB_PASS: ChangeMeStrongPassword
       TZ: Europe/Berlin
+    volumes:
+      - ./backend:/app
     ports:
       - "8088:8000"
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   frontend:
     build:
       context: ./frontend
+    image: ccvm-frontend:0.4.0
     container_name: ccvm-frontend
     restart: unless-stopped
     ports:
