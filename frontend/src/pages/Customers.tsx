@@ -1,8 +1,6 @@
 import {
   Box,
   Button,
-  Card,
-  CardContent,
   Dialog,
   DialogActions,
   DialogContent,
@@ -10,11 +8,13 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import type { GridColDef } from "@mui/x-data-grid";
 import { useState } from "react";
 import { useCreateCustomer, useCustomers } from "../hooks/useCustomers";
 
 export function Customers() {
-  const { data, isLoading, error } = useCustomers();
+  const { data = [], isLoading, error } = useCustomers();
   const createCustomer = useCreateCustomer();
 
   const [open, setOpen] = useState(false);
@@ -25,13 +25,19 @@ export function Customers() {
     contact_email: "",
   });
 
+  const columns: GridColDef[] = [
+    { field: "name", headerName: "Name", flex: 1 },
+    { field: "company", headerName: "Company", flex: 1.5 },
+    { field: "city", headerName: "City", flex: 1 },
+    { field: "contact_email", headerName: "Email", flex: 1.5 },
+  ];
+
   const saveCustomer = async () => {
     await createCustomer.mutateAsync(form);
     setForm({ name: "", company: "", city: "", contact_email: "" });
     setOpen(false);
   };
 
-  if (isLoading) return <Typography>Lade Kunden...</Typography>;
   if (error) return <Typography color="error">Fehler beim Laden.</Typography>;
 
   return (
@@ -43,42 +49,35 @@ export function Customers() {
         </Button>
       </Box>
 
-      {data?.map((customer) => (
-        <Card key={customer.uuid} sx={{ mb: 2 }}>
-          <CardContent>
-            <Typography variant="h6">{customer.name}</Typography>
-            <Typography color="text.secondary">{customer.company}</Typography>
-            <Typography color="text.secondary">{customer.city}</Typography>
-            <Typography color="text.secondary">{customer.contact_email}</Typography>
-          </CardContent>
-        </Card>
-      ))}
+      <Box sx={{ height: 520, width: "100%" }}>
+        <DataGrid
+          rows={data}
+          columns={columns}
+          loading={isLoading}
+          getRowId={(row) => row.uuid}
+          pageSizeOptions={[10, 25, 50]}
+          initialState={{
+            pagination: {
+              paginationModel: { pageSize: 10, page: 0 },
+            },
+          }}
+          sx={{
+            borderColor: "#1e293b",
+            "& .MuiDataGrid-columnHeaders": {
+              backgroundColor: "#0f172a",
+            },
+          }}
+        />
+      </Box>
 
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>New Customer</DialogTitle>
         <DialogContent>
           <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-            <TextField
-              label="Name"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              required
-            />
-            <TextField
-              label="Company"
-              value={form.company}
-              onChange={(e) => setForm({ ...form, company: e.target.value })}
-            />
-            <TextField
-              label="City"
-              value={form.city}
-              onChange={(e) => setForm({ ...form, city: e.target.value })}
-            />
-            <TextField
-              label="Contact Email"
-              value={form.contact_email}
-              onChange={(e) => setForm({ ...form, contact_email: e.target.value })}
-            />
+            <TextField label="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+            <TextField label="Company" value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} />
+            <TextField label="City" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
+            <TextField label="Contact Email" value={form.contact_email} onChange={(e) => setForm({ ...form, contact_email: e.target.value })} />
           </Box>
         </DialogContent>
         <DialogActions>
