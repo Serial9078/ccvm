@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+
 class CustomerBase(BaseModel):
     name: str
     company: str | None = None
@@ -11,11 +12,14 @@ class CustomerBase(BaseModel):
     contact_email: str | None = None
     contact_phone: str | None = None
 
+
 class CustomerCreate(CustomerBase):
     pass
 
+
 class CustomerUpdate(CustomerBase):
     name: str | None = None
+
 
 class CustomerOut(CustomerBase):
     id: int

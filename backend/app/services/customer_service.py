@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+
 from app.repositories.customer_repository import CustomerRepository
 from app.schemas.customer import CustomerCreate
 
