@@ -1,9 +1,9 @@
-import { Navigate, Route, Routes } from 'react-router-dom'
-import { AppLayout } from './layouts/AppLayout'
-import { Dashboard } from './pages/Dashboard'
-import { Customers } from './pages/Customers'
-import { Assets } from './pages/Assets'
-import { PlaceholderPage } from './pages/PlaceholderPage'
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AppLayout } from "./shared/layout/AppLayout";
+import { Dashboard } from "./features/dashboard/page";
+import { Customers } from "./features/customers/page";
+import { Assets } from "./features/assets/page";
+import { PlaceholderPage } from "./pages/PlaceholderPage";
 
 export default function App() {
   return (
@@ -19,5 +19,5 @@ export default function App() {
         <Route path="/settings" element={<PlaceholderPage title="Settings" />} />
       </Route>
     </Routes>
-  )
+  );
 }

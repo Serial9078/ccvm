@@ -12,8 +12,8 @@ import {
 import { DataGrid } from "@mui/x-data-grid";
 import type { GridColDef } from "@mui/x-data-grid";
 import { useState } from "react";
-import { useAssets, useCreateAsset } from "../hooks/useAssets";
-import { useCustomers } from "../hooks/useCustomers";
+import { useAssets, useCreateAsset } from "./hooks";
+import { useCustomers } from "../customers/hooks";
 
 export function Assets() {
   const { data: assets = [], isLoading, error } = useAssets();

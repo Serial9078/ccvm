@@ -11,7 +11,7 @@ import {
 import { DataGrid } from "@mui/x-data-grid";
 import type { GridColDef } from "@mui/x-data-grid";
 import { useState } from "react";
-import { useCreateCustomer, useCustomers } from "../hooks/useCustomers";
+import { useCreateCustomer, useCustomers } from "./hooks";
 
 export function Customers() {
   const { data = [], isLoading, error } = useCustomers();

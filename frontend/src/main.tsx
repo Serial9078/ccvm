@@ -4,7 +4,7 @@ import { CssBaseline, ThemeProvider } from '@mui/material'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
-import { ccvmTheme } from './theme/theme'
+import { ccvmTheme } from './shared/theme/theme'
 
 const queryClient = new QueryClient()
 
