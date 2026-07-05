@@ -1,18 +1,12 @@
-from pydantic_settings import BaseSettings
+import os
 
+DB_HOST = os.getenv("DB_HOST", "postgres")
+DB_NAME = os.getenv("DB_NAME", "ccvm")
+DB_USER = os.getenv("DB_USER", "ccvm")
+DB_PASS = os.getenv("DB_PASS", "ChangeMeStrongPassword")
+DB_PORT = os.getenv("DB_PORT", "5432")
 
-class Settings(BaseSettings):
-    app_name: str = "CCVM"
-    app_version: str = "0.4.0"
-    db_host: str = "postgres"
-    db_name: str = "ccvm"
-    db_user: str = "ccvm"
-    db_pass: str = "ChangeMeStrongPassword"
-    db_port: int = 5432
-
-    @property
-    def database_url(self) -> str:
-        return f"postgresql://{self.db_user}:{self.db_pass}@{self.db_host}:{self.db_port}/{self.db_name}"
-
-
-settings = Settings()
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+)

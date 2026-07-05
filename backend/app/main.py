@@ -2,12 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import customers
-from app.database.session import Base, engine
 from app.routers import assets
 
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI(title="CCVM API", version="0.5.0")
+app = FastAPI(title="CCVM API", version="0.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,7 +20,10 @@ app.add_middleware(
 app.include_router(customers.router, prefix="/api/v1")
 app.include_router(assets.router, prefix="/api/v1")
 
-
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": "CCVM", "version": "0.5.0"}
+    return {
+        "status": "ok",
+        "app": "CCVM",
+        "version": "0.9.0"
+    }
