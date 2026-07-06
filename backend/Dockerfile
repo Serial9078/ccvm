@@ -1,9 +1,17 @@
 FROM python:3.12-slim
+
+RUN apt-get update && \
+    apt-get install -y wget unzip ca-certificates && \
+    wget https://github.com/projectdiscovery/nuclei/releases/download/v3.10.0/nuclei_3.10.0_linux_amd64.zip && \
+    unzip nuclei_3.10.0_linux_amd64.zip && \
+    mv nuclei /usr/local/bin/nuclei && \
+    chmod +x /usr/local/bin/nuclei && \
+    rm -f nuclei_3.10.0_linux_amd64.zip && \
+    apt-get clean
+
 WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app ./app
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN pip install -r requirements.txt
+
+COPY . .
