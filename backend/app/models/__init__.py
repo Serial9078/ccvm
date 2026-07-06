@@ -4,3 +4,4 @@ from app.models.scan import Scan
 from app.models.finding import Finding
 from app.models.plugin import Plugin
 from app.models.job import Job
+from app.models.domain import Domain

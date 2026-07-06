@@ -28,3 +28,10 @@ class Customer(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     assets = relationship("Asset", back_populates="customer", cascade="all, delete-orphan")
+
+    domains = relationship(
+        "Domain",
+        back_populates="customer",
+        cascade="all, delete-orphan",
+    )
+
