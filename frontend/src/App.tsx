@@ -4,6 +4,7 @@ import { Dashboard } from "./features/dashboard/page";
 import { Customers } from "./features/customers/page";
 import { Assets } from "./features/assets/page";
 import { Jobs } from "./features/jobs/page";
+import { Findings } from "./features/findings/page";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 
 export default function App() {
@@ -15,7 +16,7 @@ export default function App() {
         <Route path="/customers" element={<Customers />} />
         <Route path="/assets" element={<Assets />} />
         <Route path="/scans" element={<Jobs />} />
-        <Route path="/findings" element={<PlaceholderPage title="Findings" />} />
+        <Route path="/findings" element={<Findings />} />
         <Route path="/reports" element={<PlaceholderPage title="Reports" />} />
         <Route path="/settings" element={<PlaceholderPage title="Settings" />} />
       </Route>
