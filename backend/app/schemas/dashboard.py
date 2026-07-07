@@ -1,12 +1,20 @@
 from pydantic import BaseModel
 
 
-class DashboardStats(BaseModel):
+class DashboardSummary(BaseModel):
     customers: int
+    domains: int
     assets: int
-    scans: int
+    jobs: int
+    running_jobs: int
+
     findings: int
+
     critical: int
     high: int
     medium: int
     low: int
+    info: int
+
+    open: int
+    fixed: int

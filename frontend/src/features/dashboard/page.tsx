@@ -1,52 +1,102 @@
-import { Box, Card, CardContent, Typography } from '@mui/material'
+import { Box, Card, CardContent, LinearProgress, Typography } from "@mui/material";
+import { useDashboardSummary } from "./hooks";
 
-const stats = [
-  { label: 'Customers', value: 0 },
-  { label: 'Assets', value: 0 },
-  { label: 'Critical', value: 0 },
-  { label: 'High', value: 0 },
-]
+function KpiCard({
+  label,
+  value,
+}: {
+  label: string;
+  value: number;
+}) {
+  return (
+    <Card>
+      <CardContent>
+        <Typography color="text.secondary" variant="body2">
+          {label}
+        </Typography>
+        <Typography variant="h4" sx={{ mt: 1, fontWeight: 700 }}>
+          {value}
+        </Typography>
+      </CardContent>
+    </Card>
+  );
+}
 
 export function Dashboard() {
+  const { data, isLoading, error } = useDashboardSummary();
+
+  if (isLoading) {
+    return (
+      <Box>
+        <Typography variant="h4" sx={{ mb: 3 }}>
+          Dashboard
+        </Typography>
+        <LinearProgress />
+      </Box>
+    );
+  }
+
+  if (error || !data) {
+    return <Typography color="error">Fehler beim Laden des Dashboards.</Typography>;
+  }
+
+  const severityCards = [
+    { label: "Critical", value: data.critical },
+    { label: "High", value: data.high },
+    { label: "Medium", value: data.medium },
+    { label: "Low", value: data.low },
+    { label: "Info", value: data.info },
+    { label: "Open", value: data.open },
+    { label: "Fixed", value: data.fixed },
+    { label: "Running Jobs", value: data.running_jobs },
+  ];
+
+  const inventoryCards = [
+    { label: "Customers", value: data.customers },
+    { label: "Domains", value: data.domains },
+    { label: "Assets", value: data.assets },
+    { label: "Findings", value: data.findings },
+    { label: "Jobs", value: data.jobs },
+  ];
+
   return (
     <Box>
-      <Typography variant="h4" gutterBottom>
-        Dashboard
-      </Typography>
-      <Typography color="text.secondary" sx={{ mb: 4 }}>
-        Security exposure overview for managed customers and assets.
+      <Typography variant="h4" sx={{ mb: 3 }}>
+        Executive Dashboard
       </Typography>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3, mb: 3 }}>
-        {stats.map((stat) => (
-          <Card key={stat.label}>
-            <CardContent>
-              <Typography color="text.secondary">{stat.label}</Typography>
-              <Typography variant="h3">{stat.value}</Typography>
-            </CardContent>
-          </Card>
+      <Typography variant="h6" sx={{ mb: 2 }}>
+        Risk Overview
+      </Typography>
+
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+          gap: 2,
+          mb: 4,
+        }}
+      >
+        {severityCards.map((card) => (
+          <KpiCard key={card.label} label={card.label} value={card.value} />
         ))}
       </Box>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 3 }}>
-        <Card>
-          <CardContent>
-            <Typography variant="h6">Risk Overview</Typography>
-            <Typography color="text.secondary" sx={{ mt: 2 }}>
-              Charts will appear here once findings are available.
-            </Typography>
-          </CardContent>
-        </Card>
+      <Typography variant="h6" sx={{ mb: 2 }}>
+        Inventory
+      </Typography>
 
-        <Card>
-          <CardContent>
-            <Typography variant="h6">Recent Activity</Typography>
-            <Typography color="text.secondary" sx={{ mt: 2 }}>
-              No scans yet.
-            </Typography>
-          </CardContent>
-        </Card>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+          gap: 2,
+        }}
+      >
+        {inventoryCards.map((card) => (
+          <KpiCard key={card.label} label={card.label} value={card.value} />
+        ))}
       </Box>
     </Box>
-  )
+  );
 }
