@@ -1,30 +1,33 @@
-import { Box, Card, CardContent, LinearProgress, Typography } from "@mui/material";
+import {
+  Box,
+  Chip,
+  LinearProgress,
+  Typography,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import type { GridColDef } from "@mui/x-data-grid";
+import DonutChartCard from "../../shared/components/DonutChartCard";
+import KpiCard from "../../shared/components/KpiCard";
+import SecurityScore from "../../shared/components/SecurityScore";
+import { severityColor } from "../../shared/severity";
 import { useDashboardSummary } from "./hooks";
-
-function KpiCard({
-  label,
-  value,
-}: {
-  label: string;
-  value: number;
-}) {
-  return (
-    <Card>
-      <CardContent>
-        <Typography color="text.secondary" variant="body2">
-          {label}
-        </Typography>
-        <Typography variant="h4" sx={{ mt: 1, fontWeight: 700 }}>
-          {value}
-        </Typography>
-      </CardContent>
-    </Card>
-  );
-}
+import { useState } from "react";
+import { getFinding } from "../findings/api";
+import type { Finding } from "../findings/api";
+import FindingDrawer from "../findings/components/FindingDrawer";
+import ProgressWithLabel from "../../shared/components/ProgressWithLabel";
+import StatusChip from "../../shared/components/StatusChip";
+import DashboardHeader from "../../shared/components/DashboardHeader";
 
 export function Dashboard() {
   const { data, isLoading, error } = useDashboardSummary();
-
+  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const openFinding = async (id: number) => {
+  const finding = await getFinding(id);
+  setSelectedFinding(finding);
+  setDrawerOpen(true);
+};
   if (isLoading) {
     return (
       <Box>
@@ -40,45 +43,135 @@ export function Dashboard() {
     return <Typography color="error">Fehler beim Laden des Dashboards.</Typography>;
   }
 
-  const severityCards = [
-    { label: "Critical", value: data.critical },
-    { label: "High", value: data.high },
-    { label: "Medium", value: data.medium },
-    { label: "Low", value: data.low },
-    { label: "Info", value: data.info },
-    { label: "Open", value: data.open },
-    { label: "Fixed", value: data.fixed },
-    { label: "Running Jobs", value: data.running_jobs },
-  ];
+  const riskCards = [
+
+{
+    title: "Critical",
+    value: data.critical,
+    color: severityColor("critical"),
+    subtitle: "Immediate action",
+  },
+  {
+    title: "High",
+    value: data.high,
+    color: severityColor("high"),
+    subtitle: "Needs attention",
+  },
+  {
+    title: "Medium",
+    value: data.medium,
+    color: severityColor("medium"),
+    subtitle: "Review",
+  },
+  {
+    title: "Low",
+    value: data.low,
+    color: severityColor("low"),
+    subtitle: "Minor risk",
+  },
+  {
+    title: "Info",
+    value: data.info,
+    color: severityColor("info"),
+    subtitle: "Informational",
+  },
+  {
+    title: "Open",
+    value: data.open,
+    color: "#e5e7eb",
+    subtitle: "Awaiting remediation",
+  },
+  {
+    title: "Fixed",
+    value: data.fixed,
+    color: "#22c55e",
+    subtitle: "Resolved",
+  },
+  {
+    title: "Running Jobs",
+    value: data.running_jobs,
+    color: "#38bdf8",
+    subtitle: "Currently scanning",
+  },
+];
 
   const inventoryCards = [
-    { label: "Customers", value: data.customers },
-    { label: "Domains", value: data.domains },
-    { label: "Assets", value: data.assets },
-    { label: "Findings", value: data.findings },
-    { label: "Jobs", value: data.jobs },
+    { title: "Customers", value: data.customers, color: "#38bdf8" },
+    { title: "Domains", value: data.domains, color: "#8b5cf6" },
+    { title: "Assets", value: data.assets, color: "#22c55e" },
+    { title: "Findings", value: data.findings, color: "#f97316" },
+    { title: "Jobs", value: data.jobs, color: "#e5e7eb" },
+  ];
+
+  const findingColumns: GridColDef[] = [
+    {
+      field: "severity",
+      headerName: "Severity",
+      width: 120,
+      renderCell: (params) => (
+        <Chip
+          label={String(params.value).toUpperCase()}
+          size="small"
+          sx={{
+            bgcolor: severityColor(String(params.value)),
+            color: "#fff",
+            fontWeight: 700,
+          }}
+        />
+      ),
+    },
+    { field: "name", headerName: "Finding", flex: 2 },
+    { field: "host", headerName: "Host", flex: 1 },
+    { field: "scanner", headerName: "Scanner", width: 120 },
+    { field: "status", headerName: "Status", width: 120 },
+  ];
+
+  const jobColumns: GridColDef[] = [
+    { field: "id", headerName: "ID", width: 80 },
+    { field: "plugin", headerName: "Plugin", width: 140 },
+    {
+     field: "status",
+     headerName: "Status",
+     width: 140,
+     renderCell: (params) => (
+      <StatusChip status={String(params.value)} />
+      ),
+    },
+    {
+      field: "progress",
+      headerName: "Progress",
+      flex: 1,
+     renderCell: (params) => (
+        <ProgressWithLabel value={Number(params.value ?? 0)} />
+      ),
+    },
+    { field: "message", headerName: "Message", flex: 2 },
+    { field: "worker", headerName: "Worker", width: 180 },
   ];
 
   return (
     <Box>
-      <Typography variant="h4" sx={{ mb: 3 }}>
-        Executive Dashboard
-      </Typography>
+      <DashboardHeader title="Executive Dashboard" />
+      <SecurityScore
+        critical={data.critical}
+        high={data.high}
+        medium={data.medium}
+        low={data.low}
+      />
 
       <Typography variant="h6" sx={{ mb: 2 }}>
         Risk Overview
       </Typography>
 
-      <Box
-        sx={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-          gap: 2,
-          mb: 4,
-        }}
-      >
-        {severityCards.map((card) => (
-          <KpiCard key={card.label} label={card.label} value={card.value} />
+      <Box sx={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 2, mb: 4 }}>
+        {riskCards.map((card) => (
+          <KpiCard
+  key={card.title}
+  title={card.title}
+  value={card.value}
+  color={card.color}
+  subtitle={card.subtitle}
+/>
         ))}
       </Box>
 
@@ -86,17 +179,43 @@ export function Dashboard() {
         Inventory
       </Typography>
 
-      <Box
-        sx={{
-          display: "grid",
-          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
-          gap: 2,
-        }}
-      >
+      <Box sx={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 2, mb: 4 }}>
         {inventoryCards.map((card) => (
-          <KpiCard key={card.label} label={card.label} value={card.value} />
+          <KpiCard key={card.title} title={card.title} value={card.value} color={card.color} />
         ))}
       </Box>
+
+      <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, mb: 4 }}>
+        <DonutChartCard title="Severity Distribution" data={data.severity_chart} />
+        <DonutChartCard title="Scanner Distribution" data={data.scanner_chart} />
+      </Box>
+
+      <Typography variant="h6" sx={{ mb: 2 }}>
+        Latest Findings
+      </Typography>
+
+      <Box sx={{ height: 360, width: "100%", mb: 4 }}>
+        <DataGrid
+  rows={data.latest_findings}
+  columns={findingColumns}
+  getRowId={(row) => row.id}
+  hideFooter
+  onRowClick={(params) => openFinding(Number(params.id))}
+      />
+      </Box>
+
+      <Typography variant="h6" sx={{ mb: 2 }}>
+        Active Jobs
+      </Typography>
+
+      <Box sx={{ height: 300, width: "100%" }}>
+        <DataGrid rows={data.active_jobs} columns={jobColumns} getRowId={(row) => row.id} hideFooter />
+      </Box>
+      <FindingDrawer
+  open={drawerOpen}
+  finding={selectedFinding}
+  onClose={() => setDrawerOpen(false)}
+/>
     </Box>
   );
 }

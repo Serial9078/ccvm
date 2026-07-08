@@ -5,3 +5,7 @@ from app.models.finding import Finding
 from app.models.plugin import Plugin
 from app.models.job import Job
 from app.models.domain import Domain
+from app.models.subdomain import Subdomain
+from app.models.host import Host
+from app.models.port import Port
+from app.models.technology import Technology

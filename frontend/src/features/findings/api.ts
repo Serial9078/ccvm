@@ -22,3 +22,8 @@ export async function getFindings(): Promise<Finding[]> {
   const { data } = await api.get("/findings");
   return data;
 }
+
+export async function getFinding(id: number): Promise<Finding> {
+  const { data } = await api.get(`/findings/${id}`);
+  return data;
+}
