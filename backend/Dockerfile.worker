@@ -1,9 +1,23 @@
+FROM projectdiscovery/subfinder:latest AS subfinder
+FROM projectdiscovery/httpx:latest AS httpx
+FROM projectdiscovery/naabu:latest AS naabu
+FROM projectdiscovery/dnsx:latest AS dnsx
+FROM projectdiscovery/katana:latest AS katana
+FROM projectdiscovery/nuclei:latest AS nuclei
+
 FROM python:3.12-slim
 
 RUN apt-get update && \
-    apt-get install -y docker.io ca-certificates && \
+    apt-get install -y ca-certificates libpcap0.8 dnsutils musl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+COPY --from=subfinder /usr/local/bin/subfinder /usr/local/bin/subfinder
+COPY --from=httpx /usr/local/bin/httpx /usr/local/bin/httpx
+COPY --from=naabu /usr/local/bin/naabu /usr/local/bin/naabu
+COPY --from=dnsx /usr/local/bin/dnsx /usr/local/bin/dnsx
+COPY --from=katana /usr/local/bin/katana /usr/local/bin/katana
+COPY --from=nuclei /usr/local/bin/nuclei /usr/local/bin/nuclei
 
 WORKDIR /app
 
@@ -11,3 +25,5 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
+
+CMD ["python", "-m", "app.worker.main"]

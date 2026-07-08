@@ -1,6 +1,10 @@
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import BusinessIcon from "@mui/icons-material/Business";
 import DomainIcon from "@mui/icons-material/Domain";
+import PublicIcon from "@mui/icons-material/Public";
+import DnsIcon from "@mui/icons-material/Dns";
+import LanIcon from "@mui/icons-material/Lan";
+import MemoryIcon from "@mui/icons-material/Memory";
 import DevicesIcon from "@mui/icons-material/Devices";
 import RadarIcon from "@mui/icons-material/Radar";
 import BugReportIcon from "@mui/icons-material/BugReport";
@@ -13,6 +17,10 @@ const navItems = [
   { label: "Dashboard", path: "/dashboard", icon: <DashboardIcon /> },
   { label: "Customers", path: "/customers", icon: <BusinessIcon /> },
   { label: "Domains", path: "/domains", icon: <DomainIcon /> },
+  { label: "Subdomains", path: "/subdomains", icon: <PublicIcon /> },
+  { label: "Hosts", path: "/hosts", icon: <DnsIcon /> },
+  { label: "Ports", path: "/ports", icon: <LanIcon /> },
+  { label: "Technologies", path: "/technologies", icon: <MemoryIcon /> },
   { label: "Assets", path: "/assets", icon: <DevicesIcon /> },
   { label: "Scans", path: "/scans", icon: <RadarIcon /> },
   { label: "Findings", path: "/findings", icon: <BugReportIcon /> },
@@ -35,7 +43,7 @@ export function AppLayout() {
         }}
       >
         <Typography variant="h6">CloudCollab Vulnerability Manager</Typography>
-        <Chip label="v0.4 Phoenix" color="primary" size="small" />
+        <Chip label="v3.1 Discovery" color="primary" size="small" />
       </Box>
 
       <Box sx={{ display: "flex" }}>

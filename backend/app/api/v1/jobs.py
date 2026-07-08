@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.deps import get_db
@@ -15,14 +15,23 @@ def list_jobs(db: Session = Depends(get_db)):
 
 @router.post("", response_model=JobOut)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
+    if payload.plugin == "subfinder" and not payload.domain_id:
+        raise HTTPException(status_code=400, detail="domain_id is required for subfinder jobs")
+
+    if payload.plugin != "subfinder" and not payload.asset_id:
+        raise HTTPException(status_code=400, detail="asset_id is required for scanner jobs")
+
     job = Job(
         asset_id=payload.asset_id,
+        domain_id=payload.domain_id,
         plugin=payload.plugin,
         status="queued",
         progress=0,
         message="Job queued",
     )
+
     db.add(job)
     db.commit()
     db.refresh(job)
+
     return job
