@@ -12,6 +12,7 @@ from app.models.finding import Finding
 from app.models.host import Host
 from app.models.job import Job
 from app.models.subdomain import Subdomain
+from app.models.technology import Technology
 
 
 def normalize_nuclei_finding(item: dict, asset_id: int, job_id: int) -> Finding:
@@ -80,34 +81,29 @@ def run_subfinder(db: Session, job: Job):
         if not name or " " in name:
             continue
 
-        exists = (
-            db.query(Subdomain)
-            .filter(Subdomain.domain_id == domain.id, Subdomain.name == name)
-            .first()
-        )
+        exists = db.query(Subdomain).filter(
+            Subdomain.domain_id == domain.id,
+            Subdomain.name == name,
+        ).first()
 
         if exists:
             continue
 
-        db.add(
-            Subdomain(
-                customer_id=domain.customer_id,
-                domain_id=domain.id,
-                name=name,
-                source="subfinder",
-            )
-        )
+        db.add(Subdomain(
+            customer_id=domain.customer_id,
+            domain_id=domain.id,
+            name=name,
+            source="subfinder",
+        ))
         discovered += 1
 
     job.progress = 100
-
-    if result.returncode == 0:
-        job.status = "finished"
-        job.message = f"Subfinder finished. New subdomains: {discovered}"
-    else:
-        job.status = "failed"
-        job.message = f"Subfinder failed. New subdomains: {discovered}. Output: {output[-1000:]}"
-
+    job.status = "finished" if result.returncode == 0 else "failed"
+    job.message = (
+        f"Subfinder finished. New subdomains: {discovered}"
+        if result.returncode == 0
+        else f"Subfinder failed. New subdomains: {discovered}. Output: {output[-1000:]}"
+    )
     db.commit()
 
 
@@ -121,12 +117,7 @@ def run_dnsx(db: Session, job: Job):
         db.commit()
         return
 
-    subdomains = (
-        db.query(Subdomain)
-        .filter(Subdomain.domain_id == domain.id)
-        .order_by(Subdomain.id.asc())
-        .all()
-    )
+    subdomains = db.query(Subdomain).filter(Subdomain.domain_id == domain.id).order_by(Subdomain.id.asc()).all()
 
     if not subdomains:
         job.status = "failed"
@@ -141,17 +132,10 @@ def run_dnsx(db: Session, job: Job):
     db.commit()
 
     input_data = "\n".join([s.name for s in subdomains]) + "\n"
-
     cmd = ["dnsx", "-silent", "-a", "-resp"]
 
     try:
-        result = subprocess.run(
-            cmd,
-            input=input_data,
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
+        result = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=900)
     except Exception as exc:
         job.status = "failed"
         job.progress = 100
@@ -164,7 +148,6 @@ def run_dnsx(db: Session, job: Job):
 
     for line in output.splitlines():
         line = line.strip()
-
         if not line:
             continue
 
@@ -172,43 +155,167 @@ def run_dnsx(db: Session, job: Job):
         ip_match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
         ip_address = ip_match.group(1) if ip_match else None
 
-        subdomain = (
-            db.query(Subdomain)
-            .filter(Subdomain.domain_id == domain.id, Subdomain.name == hostname)
-            .first()
-        )
+        subdomain = db.query(Subdomain).filter(
+            Subdomain.domain_id == domain.id,
+            Subdomain.name == hostname,
+        ).first()
 
-        exists = (
-            db.query(Host)
-            .filter(Host.customer_id == domain.customer_id, Host.hostname == hostname)
-            .first()
-        )
+        exists = db.query(Host).filter(
+            Host.customer_id == domain.customer_id,
+            Host.hostname == hostname,
+            Host.ip_address == ip_address,
+        ).first()
 
         if exists:
             continue
 
-        db.add(
-            Host(
-                customer_id=domain.customer_id,
-                domain_id=domain.id,
-                subdomain_id=subdomain.id if subdomain else None,
-                hostname=hostname,
-                ip_address=ip_address,
-                alive=True,
-                source="dnsx",
-            )
-        )
+        db.add(Host(
+            customer_id=domain.customer_id,
+            domain_id=domain.id,
+            subdomain_id=subdomain.id if subdomain else None,
+            hostname=hostname,
+            ip_address=ip_address,
+            alive=True,
+            source="dnsx",
+        ))
         created += 1
 
     job.progress = 100
+    job.status = "finished" if result.returncode == 0 else "failed"
+    job.message = (
+        f"DNSX finished. Hosts created: {created}"
+        if result.returncode == 0
+        else f"DNSX failed. Hosts created: {created}. Output: {output[-1000:]}"
+    )
+    db.commit()
 
-    if result.returncode == 0:
-        job.status = "finished"
-        job.message = f"DNSX finished. Hosts created: {created}"
-    else:
+
+def run_httpx(db: Session, job: Job):
+    domain = db.query(Domain).filter(Domain.id == job.domain_id).first()
+
+    if not domain:
         job.status = "failed"
-        job.message = f"DNSX failed. Hosts created: {created}. Output: {output[-1000:]}"
+        job.progress = 100
+        job.message = "Domain not found"
+        db.commit()
+        return
 
+    hosts = db.query(Host).filter(Host.domain_id == domain.id).order_by(Host.id.asc()).all()
+
+    if not hosts:
+        job.status = "failed"
+        job.progress = 100
+        job.message = "No hosts found for HTTPX"
+        db.commit()
+        return
+
+    job.status = "running"
+    job.progress = 10
+    job.message = f"Starting HTTPX probing for {domain.name}"
+    db.commit()
+
+    input_data = "\n".join(sorted({h.hostname for h in hosts if h.hostname})) + "\n"
+
+    cmd = [
+        "httpx",
+        "-silent",
+        "-json",
+        "-title",
+        "-tech-detect",
+        "-status-code",
+        "-ip",
+        "-cdn",
+        "-follow-redirects",
+    ]
+
+    try:
+        result = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=1200)
+    except Exception as exc:
+        job.status = "failed"
+        job.progress = 100
+        job.message = f"HTTPX execution failed: {exc}"
+        db.commit()
+        return
+
+    output = "\n".join([result.stdout or "", result.stderr or ""])
+    technologies_created = 0
+    hosts_updated = 0
+
+    for line in output.splitlines():
+        line = line.strip()
+
+        if not line.startswith("{"):
+            continue
+
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        input_host = (
+            item.get("input")
+            or item.get("host")
+            or item.get("url", "").replace("https://", "").replace("http://", "").split("/")[0]
+        )
+
+        hostname = str(input_host).strip().lower()
+        if not hostname:
+            continue
+
+        host = db.query(Host).filter(
+            Host.domain_id == domain.id,
+            Host.hostname == hostname,
+        ).first()
+
+        if not host:
+            host = Host(
+                customer_id=domain.customer_id,
+                domain_id=domain.id,
+                hostname=hostname,
+                ip_address=item.get("host"),
+                alive=True,
+                source="httpx",
+            )
+            db.add(host)
+            db.flush()
+        else:
+            host.alive = True
+            if item.get("host") and not host.ip_address:
+                host.ip_address = item.get("host")
+            hosts_updated += 1
+
+        tech_values = item.get("tech") or item.get("technologies") or []
+        if isinstance(tech_values, str):
+            tech_values = [tech_values]
+
+        for tech in tech_values:
+            tech_name = str(tech).strip()
+            if not tech_name:
+                continue
+
+            exists = db.query(Technology).filter(
+                Technology.host_id == host.id,
+                Technology.name == tech_name,
+            ).first()
+
+            if exists:
+                continue
+
+            db.add(Technology(
+                host_id=host.id,
+                name=tech_name,
+                category="web",
+                source="httpx",
+            ))
+            technologies_created += 1
+
+    job.progress = 100
+    job.status = "finished" if result.returncode == 0 else "failed"
+    job.message = (
+        f"HTTPX finished. Hosts updated: {hosts_updated}. Technologies created: {technologies_created}"
+        if result.returncode == 0
+        else f"HTTPX failed. Hosts updated: {hosts_updated}. Technologies created: {technologies_created}. Output: {output[-1000:]}"
+    )
     db.commit()
 
 
@@ -264,14 +371,12 @@ def run_nuclei(db: Session, job: Job):
         findings_created += 1
 
     job.progress = 100
-
-    if result.returncode == 0:
-        job.status = "finished"
-        job.message = f"Nuclei scan finished. Findings created: {findings_created}"
-    else:
-        job.status = "failed"
-        job.message = f"Nuclei failed. Findings created: {findings_created}. Output: {combined_output[-1000:]}"
-
+    job.status = "finished" if result.returncode == 0 else "failed"
+    job.message = (
+        f"Nuclei scan finished. Findings created: {findings_created}"
+        if result.returncode == 0
+        else f"Nuclei failed. Findings created: {findings_created}. Output: {combined_output[-1000:]}"
+    )
     db.commit()
 
 
@@ -296,6 +401,8 @@ def process_job(db: Session, job: Job):
         run_subfinder(db, job)
     elif job.plugin == "dnsx":
         run_dnsx(db, job)
+    elif job.plugin == "httpx":
+        run_httpx(db, job)
     elif job.plugin == "nuclei":
         run_nuclei(db, job)
     else:
@@ -309,12 +416,7 @@ def worker():
         db = SessionLocal()
 
         try:
-            job = (
-                db.query(Job)
-                .filter(Job.status == "queued")
-                .order_by(Job.id.asc())
-                .first()
-            )
+            job = db.query(Job).filter(Job.status == "queued").order_by(Job.id.asc()).first()
 
             if job:
                 print(f"Processing job {job.id} with plugin {job.plugin}", flush=True)

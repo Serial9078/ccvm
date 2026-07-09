@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import (
     customers,
     dashboard,
+    discovery,
     findings,
     hosts,
     jobs,
@@ -13,7 +14,7 @@ from app.api.v1 import (
 )
 from app.routers import assets, domains
 
-app = FastAPI(title="CCVM API", version="3.1.0")
+app = FastAPI(title="CCVM API", version="3.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +30,7 @@ app.add_middleware(
 app.include_router(customers.router, prefix="/api/v1")
 app.include_router(assets.router, prefix="/api/v1")
 app.include_router(domains.router, prefix="/api/v1")
+app.include_router(discovery.router, prefix="/api/v1")
 app.include_router(subdomains.router, prefix="/api/v1")
 app.include_router(hosts.router, prefix="/api/v1")
 app.include_router(ports.router, prefix="/api/v1")
@@ -43,5 +45,5 @@ def health():
     return {
         "status": "ok",
         "app": "CCVM",
-        "version": "3.1.0",
+        "version": "3.5.0",
     }
