@@ -15,10 +15,10 @@ def list_jobs(db: Session = Depends(get_db)):
 
 @router.post("", response_model=JobOut)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
-    if payload.plugin == "subfinder" and not payload.domain_id:
-        raise HTTPException(status_code=400, detail="domain_id is required for subfinder jobs")
+    if payload.plugin in ["subfinder", "dnsx"] and not payload.domain_id:
+        raise HTTPException(status_code=400, detail="domain_id is required for discovery jobs")
 
-    if payload.plugin != "subfinder" and not payload.asset_id:
+    if payload.plugin not in ["subfinder", "dnsx"] and not payload.asset_id:
         raise HTTPException(status_code=400, detail="asset_id is required for scanner jobs")
 
     job = Job(

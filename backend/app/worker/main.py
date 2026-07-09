@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import time
 
@@ -8,6 +9,7 @@ from app.database.session import SessionLocal
 from app.models.asset import Asset
 from app.models.domain import Domain
 from app.models.finding import Finding
+from app.models.host import Host
 from app.models.job import Job
 from app.models.subdomain import Subdomain
 
@@ -58,12 +60,7 @@ def run_subfinder(db: Session, job: Job):
     job.message = f"Starting Subfinder discovery for {domain.name}"
     db.commit()
 
-    cmd = [
-    "subfinder",
-    "-d",
-    domain.name,
-    "-silent",
-    ]
+    cmd = ["subfinder", "-d", domain.name, "-silent"]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
@@ -114,6 +111,107 @@ def run_subfinder(db: Session, job: Job):
     db.commit()
 
 
+def run_dnsx(db: Session, job: Job):
+    domain = db.query(Domain).filter(Domain.id == job.domain_id).first()
+
+    if not domain:
+        job.status = "failed"
+        job.progress = 100
+        job.message = "Domain not found"
+        db.commit()
+        return
+
+    subdomains = (
+        db.query(Subdomain)
+        .filter(Subdomain.domain_id == domain.id)
+        .order_by(Subdomain.id.asc())
+        .all()
+    )
+
+    if not subdomains:
+        job.status = "failed"
+        job.progress = 100
+        job.message = "No subdomains found for DNSX"
+        db.commit()
+        return
+
+    job.status = "running"
+    job.progress = 10
+    job.message = f"Starting DNSX resolve for {domain.name}"
+    db.commit()
+
+    input_data = "\n".join([s.name for s in subdomains]) + "\n"
+
+    cmd = ["dnsx", "-silent", "-a", "-resp"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=input_data,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except Exception as exc:
+        job.status = "failed"
+        job.progress = 100
+        job.message = f"DNSX execution failed: {exc}"
+        db.commit()
+        return
+
+    output = "\n".join([result.stdout or "", result.stderr or ""])
+    created = 0
+
+    for line in output.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        hostname = line.split()[0].strip().lower()
+        ip_match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
+        ip_address = ip_match.group(1) if ip_match else None
+
+        subdomain = (
+            db.query(Subdomain)
+            .filter(Subdomain.domain_id == domain.id, Subdomain.name == hostname)
+            .first()
+        )
+
+        exists = (
+            db.query(Host)
+            .filter(Host.customer_id == domain.customer_id, Host.hostname == hostname)
+            .first()
+        )
+
+        if exists:
+            continue
+
+        db.add(
+            Host(
+                customer_id=domain.customer_id,
+                domain_id=domain.id,
+                subdomain_id=subdomain.id if subdomain else None,
+                hostname=hostname,
+                ip_address=ip_address,
+                alive=True,
+                source="dnsx",
+            )
+        )
+        created += 1
+
+    job.progress = 100
+
+    if result.returncode == 0:
+        job.status = "finished"
+        job.message = f"DNSX finished. Hosts created: {created}"
+    else:
+        job.status = "failed"
+        job.message = f"DNSX failed. Hosts created: {created}. Output: {output[-1000:]}"
+
+    db.commit()
+
+
 def run_nuclei(db: Session, job: Job):
     asset = db.query(Asset).filter(Asset.id == job.asset_id).first()
 
@@ -130,9 +228,6 @@ def run_nuclei(db: Session, job: Job):
     db.commit()
 
     cmd = [
-        "docker",
-        "exec",
-        "ccvm-nuclei",
         "nuclei",
         "-u",
         asset.target,
@@ -143,7 +238,7 @@ def run_nuclei(db: Session, job: Job):
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     except Exception as exc:
         job.status = "failed"
         job.progress = 100
@@ -199,6 +294,8 @@ def process_job(db: Session, job: Job):
 
     if job.plugin == "subfinder":
         run_subfinder(db, job)
+    elif job.plugin == "dnsx":
+        run_dnsx(db, job)
     elif job.plugin == "nuclei":
         run_nuclei(db, job)
     else:
@@ -206,18 +303,29 @@ def process_job(db: Session, job: Job):
 
 
 def worker():
-    print("CCVM worker started")
+    print("CCVM worker started", flush=True)
 
     while True:
         db = SessionLocal()
 
-        job = db.query(Job).filter(Job.status == "queued").order_by(Job.id.asc()).first()
+        try:
+            job = (
+                db.query(Job)
+                .filter(Job.status == "queued")
+                .order_by(Job.id.asc())
+                .first()
+            )
 
-        if job:
-            print(f"Processing job {job.id} with plugin {job.plugin}")
-            process_job(db, job)
+            if job:
+                print(f"Processing job {job.id} with plugin {job.plugin}", flush=True)
+                process_job(db, job)
 
-        db.close()
+        except Exception as exc:
+            print(f"Worker loop error: {exc}", flush=True)
+
+        finally:
+            db.close()
+
         time.sleep(2)
 
 
