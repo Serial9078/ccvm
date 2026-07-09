@@ -7,8 +7,7 @@ from app.schemas.job import JobCreate, JobOut
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
-
-DISCOVERY_PLUGINS = ["subfinder", "dnsx", "httpx"]
+DISCOVERY_PLUGINS = ["subfinder", "dnsx", "httpx", "naabu"]
 
 
 @router.get("", response_model=list[JobOut])

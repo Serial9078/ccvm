@@ -11,6 +11,7 @@ from app.models.domain import Domain
 from app.models.finding import Finding
 from app.models.host import Host
 from app.models.job import Job
+from app.models.port import Port
 from app.models.subdomain import Subdomain
 from app.models.technology import Technology
 
@@ -46,14 +47,21 @@ def normalize_nuclei_finding(item: dict, asset_id: int, job_id: int) -> Finding:
     )
 
 
-def run_subfinder(db: Session, job: Job):
-    domain = db.query(Domain).filter(Domain.id == job.domain_id).first()
+def get_domain(db: Session, job: Job) -> Domain | None:
+    return db.query(Domain).filter(Domain.id == job.domain_id).first()
 
+
+def fail_job(db: Session, job: Job, message: str):
+    job.status = "failed"
+    job.progress = 100
+    job.message = message
+    db.commit()
+
+
+def run_subfinder(db: Session, job: Job):
+    domain = get_domain(db, job)
     if not domain:
-        job.status = "failed"
-        job.progress = 100
-        job.message = "Domain not found"
-        db.commit()
+        fail_job(db, job, "Domain not found")
         return
 
     job.status = "running"
@@ -61,69 +69,37 @@ def run_subfinder(db: Session, job: Job):
     job.message = f"Starting Subfinder discovery for {domain.name}"
     db.commit()
 
-    cmd = ["subfinder", "-d", domain.name, "-silent"]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-    except Exception as exc:
-        job.status = "failed"
-        job.progress = 100
-        job.message = f"Subfinder execution failed: {exc}"
-        db.commit()
-        return
-
+    result = subprocess.run(["subfinder", "-d", domain.name, "-silent"], capture_output=True, text=True, timeout=900)
     output = "\n".join([result.stdout or "", result.stderr or ""])
     discovered = 0
 
     for line in output.splitlines():
         name = line.strip().lower()
-
         if not name or " " in name:
             continue
 
-        exists = db.query(Subdomain).filter(
-            Subdomain.domain_id == domain.id,
-            Subdomain.name == name,
-        ).first()
-
+        exists = db.query(Subdomain).filter(Subdomain.domain_id == domain.id, Subdomain.name == name).first()
         if exists:
             continue
 
-        db.add(Subdomain(
-            customer_id=domain.customer_id,
-            domain_id=domain.id,
-            name=name,
-            source="subfinder",
-        ))
+        db.add(Subdomain(customer_id=domain.customer_id, domain_id=domain.id, name=name, source="subfinder"))
         discovered += 1
 
     job.progress = 100
     job.status = "finished" if result.returncode == 0 else "failed"
-    job.message = (
-        f"Subfinder finished. New subdomains: {discovered}"
-        if result.returncode == 0
-        else f"Subfinder failed. New subdomains: {discovered}. Output: {output[-1000:]}"
-    )
+    job.message = f"Subfinder finished. New subdomains: {discovered}" if result.returncode == 0 else f"Subfinder failed. Output: {output[-1000:]}"
     db.commit()
 
 
 def run_dnsx(db: Session, job: Job):
-    domain = db.query(Domain).filter(Domain.id == job.domain_id).first()
-
+    domain = get_domain(db, job)
     if not domain:
-        job.status = "failed"
-        job.progress = 100
-        job.message = "Domain not found"
-        db.commit()
+        fail_job(db, job, "Domain not found")
         return
 
     subdomains = db.query(Subdomain).filter(Subdomain.domain_id == domain.id).order_by(Subdomain.id.asc()).all()
-
     if not subdomains:
-        job.status = "failed"
-        job.progress = 100
-        job.message = "No subdomains found for DNSX"
-        db.commit()
+        fail_job(db, job, "No subdomains found for DNSX")
         return
 
     job.status = "running"
@@ -132,17 +108,7 @@ def run_dnsx(db: Session, job: Job):
     db.commit()
 
     input_data = "\n".join([s.name for s in subdomains]) + "\n"
-    cmd = ["dnsx", "-silent", "-a", "-resp"]
-
-    try:
-        result = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=900)
-    except Exception as exc:
-        job.status = "failed"
-        job.progress = 100
-        job.message = f"DNSX execution failed: {exc}"
-        db.commit()
-        return
-
+    result = subprocess.run(["dnsx", "-silent", "-a", "-resp"], input=input_data, capture_output=True, text=True, timeout=900)
     output = "\n".join([result.stdout or "", result.stderr or ""])
     created = 0
 
@@ -155,11 +121,7 @@ def run_dnsx(db: Session, job: Job):
         ip_match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
         ip_address = ip_match.group(1) if ip_match else None
 
-        subdomain = db.query(Subdomain).filter(
-            Subdomain.domain_id == domain.id,
-            Subdomain.name == hostname,
-        ).first()
-
+        subdomain = db.query(Subdomain).filter(Subdomain.domain_id == domain.id, Subdomain.name == hostname).first()
         exists = db.query(Host).filter(
             Host.customer_id == domain.customer_id,
             Host.hostname == hostname,
@@ -182,31 +144,19 @@ def run_dnsx(db: Session, job: Job):
 
     job.progress = 100
     job.status = "finished" if result.returncode == 0 else "failed"
-    job.message = (
-        f"DNSX finished. Hosts created: {created}"
-        if result.returncode == 0
-        else f"DNSX failed. Hosts created: {created}. Output: {output[-1000:]}"
-    )
+    job.message = f"DNSX finished. Hosts created: {created}" if result.returncode == 0 else f"DNSX failed. Output: {output[-1000:]}"
     db.commit()
 
 
 def run_httpx(db: Session, job: Job):
-    domain = db.query(Domain).filter(Domain.id == job.domain_id).first()
-
+    domain = get_domain(db, job)
     if not domain:
-        job.status = "failed"
-        job.progress = 100
-        job.message = "Domain not found"
-        db.commit()
+        fail_job(db, job, "Domain not found")
         return
 
     hosts = db.query(Host).filter(Host.domain_id == domain.id).order_by(Host.id.asc()).all()
-
     if not hosts:
-        job.status = "failed"
-        job.progress = 100
-        job.message = "No hosts found for HTTPX"
-        db.commit()
+        fail_job(db, job, "No hosts found for HTTPX")
         return
 
     job.status = "running"
@@ -215,35 +165,15 @@ def run_httpx(db: Session, job: Job):
     db.commit()
 
     input_data = "\n".join(sorted({h.hostname for h in hosts if h.hostname})) + "\n"
+    cmd = ["httpx", "-silent", "-json", "-title", "-tech-detect", "-status-code", "-ip", "-cdn", "-follow-redirects"]
 
-    cmd = [
-        "httpx",
-        "-silent",
-        "-json",
-        "-title",
-        "-tech-detect",
-        "-status-code",
-        "-ip",
-        "-cdn",
-        "-follow-redirects",
-    ]
-
-    try:
-        result = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=1200)
-    except Exception as exc:
-        job.status = "failed"
-        job.progress = 100
-        job.message = f"HTTPX execution failed: {exc}"
-        db.commit()
-        return
-
+    result = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=1200)
     output = "\n".join([result.stdout or "", result.stderr or ""])
     technologies_created = 0
     hosts_updated = 0
 
     for line in output.splitlines():
         line = line.strip()
-
         if not line.startswith("{"):
             continue
 
@@ -252,30 +182,14 @@ def run_httpx(db: Session, job: Job):
         except json.JSONDecodeError:
             continue
 
-        input_host = (
-            item.get("input")
-            or item.get("host")
-            or item.get("url", "").replace("https://", "").replace("http://", "").split("/")[0]
-        )
-
+        input_host = item.get("input") or item.get("host") or item.get("url", "").replace("https://", "").replace("http://", "").split("/")[0]
         hostname = str(input_host).strip().lower()
         if not hostname:
             continue
 
-        host = db.query(Host).filter(
-            Host.domain_id == domain.id,
-            Host.hostname == hostname,
-        ).first()
-
+        host = db.query(Host).filter(Host.domain_id == domain.id, Host.hostname == hostname).first()
         if not host:
-            host = Host(
-                customer_id=domain.customer_id,
-                domain_id=domain.id,
-                hostname=hostname,
-                ip_address=item.get("host"),
-                alive=True,
-                source="httpx",
-            )
+            host = Host(customer_id=domain.customer_id, domain_id=domain.id, hostname=hostname, ip_address=item.get("host"), alive=True, source="httpx")
             db.add(host)
             db.flush()
         else:
@@ -293,40 +207,92 @@ def run_httpx(db: Session, job: Job):
             if not tech_name:
                 continue
 
-            exists = db.query(Technology).filter(
-                Technology.host_id == host.id,
-                Technology.name == tech_name,
-            ).first()
-
+            exists = db.query(Technology).filter(Technology.host_id == host.id, Technology.name == tech_name).first()
             if exists:
                 continue
 
-            db.add(Technology(
-                host_id=host.id,
-                name=tech_name,
-                category="web",
-                source="httpx",
-            ))
+            db.add(Technology(host_id=host.id, name=tech_name, category="web", source="httpx"))
             technologies_created += 1
 
     job.progress = 100
     job.status = "finished" if result.returncode == 0 else "failed"
-    job.message = (
-        f"HTTPX finished. Hosts updated: {hosts_updated}. Technologies created: {technologies_created}"
-        if result.returncode == 0
-        else f"HTTPX failed. Hosts updated: {hosts_updated}. Technologies created: {technologies_created}. Output: {output[-1000:]}"
-    )
+    job.message = f"HTTPX finished. Hosts updated: {hosts_updated}. Technologies created: {technologies_created}" if result.returncode == 0 else f"HTTPX failed. Output: {output[-1000:]}"
+    db.commit()
+
+
+def run_naabu(db: Session, job: Job):
+    domain = get_domain(db, job)
+    if not domain:
+        fail_job(db, job, "Domain not found")
+        return
+
+    hosts = db.query(Host).filter(Host.domain_id == domain.id).order_by(Host.id.asc()).all()
+    if not hosts:
+        fail_job(db, job, "No hosts found for Naabu")
+        return
+
+    job.status = "running"
+    job.progress = 10
+    job.message = f"Starting Naabu port discovery for {domain.name}"
+    db.commit()
+
+    targets = sorted({h.hostname for h in hosts if h.hostname})
+    input_data = "\n".join(targets) + "\n"
+
+    cmd = ["naabu", "-silent", "-json", "-top-ports", "100"]
+
+    result = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=1800)
+    output = "\n".join([result.stdout or "", result.stderr or ""])
+    created = 0
+
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        hostname = str(item.get("host") or item.get("ip") or "").strip().lower()
+        port_number = item.get("port")
+
+        if not hostname or not port_number:
+            continue
+
+        host = db.query(Host).filter(Host.domain_id == domain.id, Host.hostname == hostname).first()
+
+        if not host:
+            host = db.query(Host).filter(Host.domain_id == domain.id, Host.ip_address == hostname).first()
+
+        if not host:
+            continue
+
+        exists = db.query(Port).filter(Port.host_id == host.id, Port.port == int(port_number), Port.protocol == "tcp").first()
+        if exists:
+            continue
+
+        db.add(Port(
+            host_id=host.id,
+            port=int(port_number),
+            protocol="tcp",
+            service=item.get("service"),
+            banner=None,
+            source="naabu",
+        ))
+        created += 1
+
+    job.progress = 100
+    job.status = "finished" if result.returncode == 0 else "failed"
+    job.message = f"Naabu finished. Ports created: {created}" if result.returncode == 0 else f"Naabu failed. Ports created: {created}. Output: {output[-1000:]}"
     db.commit()
 
 
 def run_nuclei(db: Session, job: Job):
     asset = db.query(Asset).filter(Asset.id == job.asset_id).first()
-
     if not asset:
-        job.status = "failed"
-        job.progress = 100
-        job.message = "Asset not found"
-        db.commit()
+        fail_job(db, job, "Asset not found")
         return
 
     job.status = "running"
@@ -334,31 +300,13 @@ def run_nuclei(db: Session, job: Job):
     job.message = f"Starting Nuclei scan for {asset.target}"
     db.commit()
 
-    cmd = [
-        "nuclei",
-        "-u",
-        asset.target,
-        "-severity",
-        "critical,high,medium,low,info",
-        "-jsonl",
-        "-silent",
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-    except Exception as exc:
-        job.status = "failed"
-        job.progress = 100
-        job.message = f"Nuclei execution failed: {exc}"
-        db.commit()
-        return
-
+    cmd = ["nuclei", "-u", asset.target, "-severity", "critical,high,medium,low,info", "-jsonl", "-silent"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     combined_output = "\n".join([result.stdout or "", result.stderr or ""])
     findings_created = 0
 
     for line in combined_output.splitlines():
         line = line.strip()
-
         if not line.startswith("{"):
             continue
 
@@ -372,11 +320,7 @@ def run_nuclei(db: Session, job: Job):
 
     job.progress = 100
     job.status = "finished" if result.returncode == 0 else "failed"
-    job.message = (
-        f"Nuclei scan finished. Findings created: {findings_created}"
-        if result.returncode == 0
-        else f"Nuclei failed. Findings created: {findings_created}. Output: {combined_output[-1000:]}"
-    )
+    job.message = f"Nuclei scan finished. Findings created: {findings_created}" if result.returncode == 0 else f"Nuclei failed. Output: {combined_output[-1000:]}"
     db.commit()
 
 
@@ -403,6 +347,8 @@ def process_job(db: Session, job: Job):
         run_dnsx(db, job)
     elif job.plugin == "httpx":
         run_httpx(db, job)
+    elif job.plugin == "naabu":
+        run_naabu(db, job)
     elif job.plugin == "nuclei":
         run_nuclei(db, job)
     else:

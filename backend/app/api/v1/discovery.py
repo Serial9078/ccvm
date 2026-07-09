@@ -20,6 +20,7 @@ def start_discovery(payload: DiscoveryCreate, db: Session = Depends(get_db)):
         Job(domain_id=domain.id, plugin="subfinder", status="queued", progress=0, message="Discovery queued: subfinder"),
         Job(domain_id=domain.id, plugin="dnsx", status="queued", progress=0, message="Discovery queued: dnsx"),
         Job(domain_id=domain.id, plugin="httpx", status="queued", progress=0, message="Discovery queued: httpx"),
+        Job(domain_id=domain.id, plugin="naabu", status="queued", progress=0, message="Discovery queued: naabu"),
     ]
 
     for job in jobs:
