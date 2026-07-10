@@ -26,6 +26,10 @@ export interface ChartPoint {
 export interface DashboardSummary {
   customers: number;
   domains: number;
+  subdomains: number;
+  hosts: number;
+  ports: number;
+  technologies: number;
   assets: number;
   jobs: number;
   running_jobs: number;

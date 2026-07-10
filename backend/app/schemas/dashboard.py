@@ -27,6 +27,10 @@ class ChartPoint(BaseModel):
 class DashboardSummary(BaseModel):
     customers: int
     domains: int
+    subdomains: int
+    hosts: int
+    ports: int
+    technologies: int
     assets: int
     jobs: int
     running_jobs: int

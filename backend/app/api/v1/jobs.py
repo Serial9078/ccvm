@@ -5,23 +5,53 @@ from app.database.deps import get_db
 from app.models.job import Job
 from app.schemas.job import JobCreate, JobOut
 
-router = APIRouter(prefix="/jobs", tags=["Jobs"])
+router = APIRouter(
+    prefix="/jobs",
+    tags=["Jobs"],
+)
 
-DISCOVERY_PLUGINS = ["subfinder", "dnsx", "httpx", "naabu"]
+DISCOVERY_PLUGINS = [
+    "subfinder",
+    "dnsx",
+    "httpx",
+    "naabu",
+    "katana",
+]
 
 
 @router.get("", response_model=list[JobOut])
-def list_jobs(db: Session = Depends(get_db)):
-    return db.query(Job).order_by(Job.id.desc()).all()
+def list_jobs(
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(Job)
+        .order_by(Job.id.desc())
+        .all()
+    )
 
 
 @router.post("", response_model=JobOut)
-def create_job(payload: JobCreate, db: Session = Depends(get_db)):
-    if payload.plugin in DISCOVERY_PLUGINS and not payload.domain_id:
-        raise HTTPException(status_code=400, detail="domain_id is required for discovery jobs")
+def create_job(
+    payload: JobCreate,
+    db: Session = Depends(get_db),
+):
+    if (
+        payload.plugin in DISCOVERY_PLUGINS
+        and not payload.domain_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="domain_id is required for discovery jobs",
+        )
 
-    if payload.plugin not in DISCOVERY_PLUGINS and not payload.asset_id:
-        raise HTTPException(status_code=400, detail="asset_id is required for scanner jobs")
+    if (
+        payload.plugin not in DISCOVERY_PLUGINS
+        and not payload.asset_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="asset_id is required for scanner jobs",
+        )
 
     job = Job(
         asset_id=payload.asset_id,

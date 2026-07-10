@@ -7,18 +7,32 @@ export interface Domain {
   description?: string | null;
 }
 
-export interface DomainCreate {
-  customer_id: number;
-  name: string;
-  description?: string;
+export interface DiscoveryJob {
+  id: number;
+  uuid: string;
+  domain_id?: number | null;
+  plugin: string;
+  status: string;
+  progress: number;
+  message?: string | null;
+}
+
+export interface DiscoveryResponse {
+  domain_id: number;
+  jobs: DiscoveryJob[];
 }
 
 export async function getDomains(): Promise<Domain[]> {
-  const { data } = await api.get("/domains");
+  const { data } = await api.get<Domain[]>("/domains");
   return data;
 }
 
-export async function createDomain(payload: DomainCreate): Promise<Domain> {
-  const { data } = await api.post("/domains", payload);
+export async function startDiscovery(
+  domainId: number,
+): Promise<DiscoveryResponse> {
+  const { data } = await api.post<DiscoveryResponse>("/discover", {
+    domain_id: domainId,
+  });
+
   return data;
 }

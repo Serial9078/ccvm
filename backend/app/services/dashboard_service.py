@@ -5,7 +5,11 @@ from app.models.asset import Asset
 from app.models.customer import Customer
 from app.models.domain import Domain
 from app.models.finding import Finding
+from app.models.host import Host
 from app.models.job import Job
+from app.models.port import Port
+from app.models.subdomain import Subdomain
+from app.models.technology import Technology
 
 
 def count_findings_by_severity(db: Session, severity: str) -> int:
@@ -51,6 +55,10 @@ def get_dashboard_summary(db: Session) -> dict:
     return {
         "customers": db.query(Customer).count(),
         "domains": db.query(Domain).count(),
+        "subdomains": db.query(Subdomain).count(),
+        "hosts": db.query(Host).count(),
+        "ports": db.query(Port).count(),
+        "technologies": db.query(Technology).count(),
         "assets": db.query(Asset).count(),
         "jobs": db.query(Job).count(),
         "running_jobs": db.query(Job).filter(Job.status == "running").count(),
