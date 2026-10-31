@@ -27,6 +27,8 @@ class Asset(Base):
     tags: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     customer = relationship("Customer", back_populates="assets")

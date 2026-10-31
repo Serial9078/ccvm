@@ -15,3 +15,5 @@ Cyber Exposure & Vulnerability Management Platform
 
 See ./docs
 
+For backend development checks, tests, and the CI repair report, see
+[Backend quality checks](docs/backend-quality.md).

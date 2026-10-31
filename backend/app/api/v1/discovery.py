@@ -17,11 +17,7 @@ def start_discovery(
     payload: DiscoveryCreate,
     db: Session = Depends(get_db),
 ):
-    domain = (
-        db.query(Domain)
-        .filter(Domain.id == payload.domain_id)
-        .first()
-    )
+    domain = db.query(Domain).filter(Domain.id == payload.domain_id).first()
 
     if not domain:
         raise HTTPException(

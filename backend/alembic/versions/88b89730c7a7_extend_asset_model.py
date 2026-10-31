@@ -7,9 +7,9 @@ Create Date: 2026-07-05
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision: str = "88b89730c7a7"
 down_revision: Union[str, None] = "1449178d5497"
@@ -35,7 +35,9 @@ def upgrade() -> None:
     op.add_column("assets", sa.Column("tags", sa.String(length=1024), nullable=True))
     op.add_column(
         "assets",
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=True),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=True
+        ),
     )
 
 

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.job import Job
 from app.plugins.katana import run_katana
-from app.plugins.legacy import (
+from app.worker.main import (
     run_dnsx,
     run_dummy,
     run_httpx,
@@ -36,12 +36,8 @@ PLUGIN_REGISTRY: dict[
 def get_plugin(
     name: str,
 ) -> PluginHandler | None:
-    return PLUGIN_REGISTRY.get(
-        name.strip().lower()
-    )
+    return PLUGIN_REGISTRY.get(name.strip().lower())
 
 
 def list_plugins() -> list[str]:
-    return sorted(
-        PLUGIN_REGISTRY.keys()
-    )
+    return sorted(PLUGIN_REGISTRY.keys())

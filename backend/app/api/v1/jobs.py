@@ -23,11 +23,7 @@ DISCOVERY_PLUGINS = [
 def list_jobs(
     db: Session = Depends(get_db),
 ):
-    return (
-        db.query(Job)
-        .order_by(Job.id.desc())
-        .all()
-    )
+    return db.query(Job).order_by(Job.id.desc()).all()
 
 
 @router.post("", response_model=JobOut)
@@ -35,19 +31,13 @@ def create_job(
     payload: JobCreate,
     db: Session = Depends(get_db),
 ):
-    if (
-        payload.plugin in DISCOVERY_PLUGINS
-        and not payload.domain_id
-    ):
+    if payload.plugin in DISCOVERY_PLUGINS and not payload.domain_id:
         raise HTTPException(
             status_code=400,
             detail="domain_id is required for discovery jobs",
         )
 
-    if (
-        payload.plugin not in DISCOVERY_PLUGINS
-        and not payload.asset_id
-    ):
+    if payload.plugin not in DISCOVERY_PLUGINS and not payload.asset_id:
         raise HTTPException(
             status_code=400,
             detail="asset_id is required for scanner jobs",
