@@ -2,9 +2,10 @@
 """Apply the reviewed long-URL fix on Neptun. Preflight by default; --apply activates it.
 
 Requires a full --target SHA already merged into the deployment branch. The
-existing API is stopped and the idle worker's main process is frozen while its
-container remains available for migration commands. No scanner is interrupted,
-no scan is started, and no existing database rows are modified or removed.
+existing API is stopped and the idle worker is paused using Docker's cgroup
+freezer. Short-lived maintenance containers run database commands independently.
+No scanner is interrupted, no scan is started, and no existing database rows
+are modified or removed.
 """
 
 import argparse
@@ -21,7 +22,7 @@ import time
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 BASE = "e51860b931bec53c8b7ba9375c101678374d40af"
 BRANCH = "sprint-1.0.2-feature-architecture"
 OLD_REVISION = "7f91c32a60d1"
@@ -160,6 +161,11 @@ def source_plan(root, target):
 
 class Runtime:
     def __init__(self):
+        self.worker_name = "ccvm-worker"
+        self.worker_paused = False
+        self.maintenance_args = None
+        self.worker_info = None
+        self.postgres_info = None
         self.prefix = ["docker"]
         try:
             run([*self.prefix, "info", "--format", "{{.ServerVersion}}"])
@@ -172,7 +178,9 @@ class Runtime:
         return run([*self.prefix, *args]).decode().strip()
 
     def state(self):
-        return json.loads(self.docker("exec", "ccvm-worker", "python", "-c", STATE_CODE))
+        if getattr(self, "worker_paused", False):
+            return json.loads(self.maintenance_python(STATE_CODE))
+        return json.loads(self.docker("exec", self.worker_name, "python", "-c", STATE_CODE))
 
     def preflight(self, root):
         postgres = None
@@ -182,7 +190,9 @@ class Runtime:
                 raise RuntimeError(f"Container is not running normally: {name}")
             if name == "ccvm-postgres":
                 postgres = info
+                self.postgres_info = info
             if name == "ccvm-worker":
+                self.worker_info = info
                 argv = info.get("Config", {}).get("Cmd", [])
                 if (
                     not isinstance(argv, list)
@@ -271,16 +281,78 @@ class Runtime:
             )
         return state
 
-    def freeze(self):
-        self.docker("kill", "--signal=STOP", "ccvm-worker")
-        status = self.docker(
-            "exec", "ccvm-worker", "python", "-c", "print(open('/proc/1/status').read())"
+    def prepare_maintenance(self, backup):
+        worker = self.worker_info
+        postgres = self.postgres_info
+        image = worker["Image"]
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise RuntimeError("Expected the existing worker's immutable image ID")
+        shared = set(worker["NetworkSettings"]["Networks"]) & set(
+            postgres["NetworkSettings"]["Networks"]
         )
-        if not re.search(r"^State:\s+T\b", status, re.MULTILINE):
-            raise RuntimeError("Worker main process did not stop")
+        if len(shared) != 1:
+            raise RuntimeError("Expected one shared worker/PostgreSQL network for maintenance")
+        allowed = {"DATABASE_URL", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASS"}
+        entries = [
+            item
+            for item in worker["Config"].get("Env", [])
+            if item.split("=", 1)[0] in allowed or item.split("=", 1)[0].startswith("PG")
+        ]
+        if any("\n" in item or "\r" in item or "\0" in item for item in entries):
+            raise RuntimeError("Database environment cannot be represented as a private env-file")
+        environment = backup / "maintenance.env"
+        descriptor = os.open(environment, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write("\n".join(entries) + "\n")
+        self.maintenance_args = [
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network",
+            next(iter(shared)),
+            "--volumes-from",
+            f"{self.worker_name}:ro",
+            "--env-file",
+            str(environment),
+            "--env",
+            "PGCONNECT_TIMEOUT=10",
+            "--workdir",
+            "/app",
+            "--entrypoint",
+            "python",
+            image,
+            "-B",
+            "-c",
+        ]
+        # Prove this exact image, environment, network and read-only source mount
+        # can query the same database before stopping API submissions or pausing.
+        current = self.state()
+        maintenance = json.loads(self.maintenance_python(STATE_CODE))
+        validate_state(maintenance, expected=current["revision"])
+        if maintenance["identity"] != current["identity"]:
+            raise RuntimeError("Maintenance interpreter does not reach the verified database")
+
+    def maintenance_python(self, source):
+        if not self.maintenance_args:
+            raise RuntimeError("Maintenance interpreter was not prepared")
+        return self.docker(*self.maintenance_args, source)
+
+    def freeze(self):
+        # A paused container cannot accept docker exec. Database commands use
+        # the independently verified one-shot maintenance interpreter instead.
+        self.worker_paused = True
+        self.docker("pause", self.worker_name)
+        state = json.loads(self.docker("inspect", "--format", "{{json .State}}", self.worker_name))
+        if not state.get("Running") or state.get("Paused") is not True:
+            raise RuntimeError("Docker did not confirm the worker pause")
 
     def resume(self):
-        self.docker("kill", "--signal=CONT", "ccvm-worker")
+        state = json.loads(self.docker("inspect", "--format", "{{json .State}}", self.worker_name))
+        if not state.get("Running"):
+            raise RuntimeError("Worker stopped during maintenance; inspect its state")
+        if state.get("Paused"):
+            self.docker("unpause", self.worker_name)
+        self.worker_paused = False
 
     def database_backup(self, destination):
         with destination.open("xb") as handle:
@@ -314,16 +386,9 @@ class Runtime:
             raise RuntimeError("The custom-format database backup could not be inspected")
 
     def migrate(self):
-        return self.docker(
-            "exec",
-            "--workdir",
-            "/app",
-            "ccvm-worker",
-            "python",
-            "-m",
-            "alembic",
-            "upgrade",
-            REVISION,
+        return self.maintenance_python(
+            "from alembic import command; from alembic.config import Config; "
+            f"command.upgrade(Config('/app/alembic.ini'), {REVISION!r})"
         )
 
     def verify(self):
@@ -384,7 +449,8 @@ def apply(root, target, runtime, plan):
             shutil.copy2(path, saved)
     (backup / "operation.json").write_text(json.dumps({"before": before, "target": target}))
     print(f"Private backup: {backup}", flush=True)
-    api_stopped = frozen = mutated = False
+    runtime.prepare_maintenance(backup)
+    api_stopped = frozen = mutated = installed = False
     coherent = True
     try:
         api_stopped = True
@@ -400,6 +466,7 @@ def apply(root, target, runtime, plan):
             raise RuntimeError("Git state changed during backup")
         mutated = True
         git(root, "merge", "--ff-only", target)
+        installed = True
         runtime.migrate()
         after = runtime.state()
         (backup / "after.json").write_text(json.dumps(after, indent=2))
@@ -412,7 +479,7 @@ def apply(root, target, runtime, plan):
                 and saved.read_bytes() != (root / saved.relative_to(backup / "config")).read_bytes()
             ):
                 raise RuntimeError("Private configuration changed")
-    except BaseException:
+    except BaseException as update_error:
         if mutated:
             # A failed migration rolls back its DDL. Undo code only if the old
             # revision is positively confirmed. Never downgrade a migrated DB.
@@ -433,29 +500,43 @@ def apply(root, target, runtime, plan):
                         *changes,
                     )
                     git(root, "update-ref", "HEAD", before, target)
+                    installed = False
                 elif state["revision"] == REVISION:
                     validate_state(state, expected=REVISION)
                 else:
                     coherent = False
             except BaseException:
                 coherent = False
-        print(f"Update stopped; retain backup for inspection: {backup}", flush=True)
+        print(
+            f"Update stopped ({type(update_error).__name__}: {update_error}); "
+            f"retain backup for inspection: {backup}",
+            flush=True,
+        )
         raise
     finally:
         if coherent:
-            try:
-                if frozen:
-                    try:
-                        runtime.resume()
-                    finally:
+            if frozen:
+                try:
+                    runtime.resume()
+                    if installed:
                         runtime.docker("restart", "--time", "20", "ccvm-worker")
-            finally:
-                if api_stopped:
-                    runtime.docker("start", "ccvm-backend")
+                except BaseException as restore_error:
+                    # Retain an idle paused worker if Docker cannot reload it;
+                    # never reopen API submissions with an unknown worker state.
+                    try:
+                        runtime.freeze()
+                    except Exception as pause_error:
+                        print(f"Worker pause could not be confirmed: {pause_error}", flush=True)
+                    raise RuntimeError(
+                        f"Worker resume/reload failed; API remains stopped. "
+                        f"Inspect backup {backup}: {restore_error}"
+                    ) from restore_error
+            if api_stopped:
+                runtime.docker("start", "ccvm-backend")
         else:
-            # Do not resume an unknown code/schema combination into the queue.
-            runtime.docker("stop", "--time", "5", "ccvm-worker")
-            print("Code/schema state could not be established; API and worker remain stopped.")
+            # The worker is already paused. Do not send signals or resume an
+            # unknown code/schema combination into the queue.
+            print("Code/schema state unknown; API remains stopped and worker remains paused.")
     runtime.verify()
     if git(root, "rev-parse", "HEAD") != target:
         raise RuntimeError("Final Git verification failed")
