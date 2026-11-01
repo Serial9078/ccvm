@@ -10,7 +10,6 @@ from app.models.host import Host
 from app.models.job import Job
 from app.models.url import Url
 
-
 KATANA_TIMEOUT_SECONDS = 45
 KATANA_DEPTH = 2
 KATANA_CRAWL_DURATION = "30s"
@@ -20,11 +19,7 @@ def get_domain(
     db: Session,
     job: Job,
 ) -> Domain | None:
-    return (
-        db.query(Domain)
-        .filter(Domain.id == job.domain_id)
-        .first()
-    )
+    return db.query(Domain).filter(Domain.id == job.domain_id).first()
 
 
 def fail_job(
@@ -76,11 +71,7 @@ def extract_katana_url(
         or request_data.get("url")
     )
 
-    method = (
-        item.get("method")
-        or request_data.get("method")
-        or "GET"
-    )
+    method = item.get("method") or request_data.get("method") or "GET"
 
     status_code = (
         item.get("status-code")
@@ -98,23 +89,15 @@ def extract_katana_url(
     )
 
     try:
-        normalized_status_code = (
-            int(status_code)
-            if status_code is not None
-            else None
-        )
+        normalized_status_code = int(status_code) if status_code is not None else None
     except (TypeError, ValueError):
         normalized_status_code = None
 
     return (
-        str(discovered_url).strip()
-        if discovered_url
-        else None,
+        str(discovered_url).strip() if discovered_url else None,
         str(method).upper(),
         normalized_status_code,
-        str(content_type)
-        if content_type
-        else None,
+        str(content_type) if content_type else None,
     )
 
 
@@ -136,12 +119,7 @@ def is_domain_url(
     hostname = (parsed.hostname or "").lower()
     normalized_domain = domain_name.lower()
 
-    return (
-        hostname == normalized_domain
-        or hostname.endswith(
-            f".{normalized_domain}"
-        )
-    )
+    return hostname == normalized_domain or hostname.endswith(f".{normalized_domain}")
 
 
 def collect_host_urls(
@@ -210,9 +188,7 @@ def collect_host_urls(
             if not discovered_url:
                 continue
 
-            discovered_url = normalize_url(
-                discovered_url
-            )
+            discovered_url = normalize_url(discovered_url)
 
             if not is_domain_url(
                 discovered_url,
@@ -221,10 +197,7 @@ def collect_host_urls(
                 continue
 
             parsed = urlparse(discovered_url)
-            hostname = (
-                parsed.hostname
-                or ""
-            ).lower()
+            hostname = (parsed.hostname or "").lower()
 
             collected[discovered_url] = {
                 "hostname": hostname,
@@ -303,17 +276,10 @@ def run_katana(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting Katana crawl for "
-        f"{domain.name}"
-    )
+    job.message = f"Starting Katana crawl for " f"{domain.name}"
     db.commit()
 
-    host_by_hostname = {
-        host.hostname.lower(): host
-        for host in hosts
-        if host.hostname
-    }
+    host_by_hostname = {host.hostname.lower(): host for host in hosts if host.hostname}
 
     collected_rows_by_url: dict[str, dict] = {}
     processed_hosts = 0
@@ -350,20 +316,14 @@ def run_katana(
                 host,
             )
 
-            collected_rows_by_url[
-                discovered["url"]
-            ] = {
+            collected_rows_by_url[discovered["url"]] = {
                 "customer_id": domain.customer_id,
                 "domain_id": domain.id,
                 "host_id": target_host.id,
                 "url": discovered["url"],
                 "method": discovered["method"],
-                "status_code": discovered[
-                    "status_code"
-                ],
-                "content_type": discovered[
-                    "content_type"
-                ],
+                "status_code": discovered["status_code"],
+                "content_type": discovered["content_type"],
                 "source": "katana",
             }
 
@@ -374,12 +334,7 @@ def run_katana(
         if current_job:
             current_job.progress = min(
                 95,
-                10
-                + int(
-                    processed_hosts
-                    / max(len(hosts), 1)
-                    * 85
-                ),
+                10 + int(processed_hosts / max(len(hosts), 1) * 85),
             )
 
             current_job.message = (
@@ -397,18 +352,13 @@ def run_katana(
     try:
         created = bulk_insert_urls(
             db,
-            list(
-                collected_rows_by_url.values()
-            ),
+            list(collected_rows_by_url.values()),
         )
     except Exception as exc:
         fail_job(
             db,
             job,
-            (
-                "Katana URL bulk import failed: "
-                f"{type(exc).__name__}: {exc}"
-            ),
+            ("Katana URL bulk import failed: " f"{type(exc).__name__}: {exc}"),
         )
         return
 

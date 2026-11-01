@@ -22,11 +22,7 @@ def get_domain(
     db: Session,
     job: Job,
 ) -> Domain | None:
-    return (
-        db.query(Domain)
-        .filter(Domain.id == job.domain_id)
-        .first()
-    )
+    return db.query(Domain).filter(Domain.id == job.domain_id).first()
 
 
 def fail_job(
@@ -62,10 +58,7 @@ def normalize_nuclei_finding(
     references = info.get("reference") or []
 
     if isinstance(references, list):
-        references = "\n".join(
-            str(reference)
-            for reference in references
-        )
+        references = "\n".join(str(reference) for reference in references)
 
     cve = classification.get("cve-id")
 
@@ -79,26 +72,15 @@ def normalize_nuclei_finding(
         job_id=job_id,
         scanner="nuclei",
         template_id=item.get("template-id"),
-        name=(
-            info.get("name")
-            or item.get("template-id")
-            or "Nuclei Finding"
-        ),
+        name=(info.get("name") or item.get("template-id") or "Nuclei Finding"),
         severity=info.get("severity", "info"),
         host=item.get("host"),
-        matched_at=(
-            item.get("matched-at")
-            or item.get("matched")
-        ),
+        matched_at=(item.get("matched-at") or item.get("matched")),
         description=info.get("description"),
         remediation=info.get("remediation"),
         reference=references,
         cve=cve,
-        cvss_score=(
-            str(cvss_score)
-            if cvss_score is not None
-            else None
-        ),
+        cvss_score=(str(cvss_score) if cvss_score is not None else None),
         raw_json=json.dumps(item),
         status="open",
     )
@@ -116,9 +98,7 @@ def run_subfinder(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting Subfinder discovery for {domain.name}"
-    )
+    job.message = f"Starting Subfinder discovery for {domain.name}"
     db.commit()
 
     try:
@@ -187,10 +167,7 @@ def run_subfinder(
     finish_job(
         db,
         job,
-        (
-            f"Subfinder finished. "
-            f"New subdomains: {discovered}"
-        ),
+        (f"Subfinder finished. " f"New subdomains: {discovered}"),
     )
 
 
@@ -221,18 +198,10 @@ def run_dnsx(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting DNSX resolve for {domain.name}"
-    )
+    job.message = f"Starting DNSX resolve for {domain.name}"
     db.commit()
 
-    input_data = (
-        "\n".join(
-            subdomain.name
-            for subdomain in subdomains
-        )
-        + "\n"
-    )
+    input_data = "\n".join(subdomain.name for subdomain in subdomains) + "\n"
 
     try:
         result = subprocess.run(
@@ -271,11 +240,7 @@ def run_dnsx(
             line,
         )
 
-        ip_address = (
-            ip_match.group(1)
-            if ip_match
-            else None
-        )
+        ip_address = ip_match.group(1) if ip_match else None
 
         subdomain = (
             db.query(Subdomain)
@@ -303,11 +268,7 @@ def run_dnsx(
             Host(
                 customer_id=domain.customer_id,
                 domain_id=domain.id,
-                subdomain_id=(
-                    subdomain.id
-                    if subdomain
-                    else None
-                ),
+                subdomain_id=(subdomain.id if subdomain else None),
                 hostname=hostname,
                 ip_address=ip_address,
                 alive=True,
@@ -320,11 +281,7 @@ def run_dnsx(
         fail_job(
             db,
             job,
-            (
-                f"DNSX failed. Hosts created: "
-                f"{created}. Output: "
-                f"{result.stderr[-1000:]}"
-            ),
+            (f"DNSX failed. Hosts created: " f"{created}. Output: " f"{result.stderr[-1000:]}"),
         )
         return
 
@@ -345,12 +302,7 @@ def run_httpx(
         fail_job(db, job, "Domain not found")
         return
 
-    hosts = (
-        db.query(Host)
-        .filter(Host.domain_id == domain.id)
-        .order_by(Host.id.asc())
-        .all()
-    )
+    hosts = db.query(Host).filter(Host.domain_id == domain.id).order_by(Host.id.asc()).all()
 
     if not hosts:
         fail_job(
@@ -362,23 +314,10 @@ def run_httpx(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting HTTPX probing for {domain.name}"
-    )
+    job.message = f"Starting HTTPX probing for {domain.name}"
     db.commit()
 
-    input_data = (
-        "\n".join(
-            sorted(
-                {
-                    host.hostname
-                    for host in hosts
-                    if host.hostname
-                }
-            )
-        )
-        + "\n"
-    )
+    input_data = "\n".join(sorted({host.hostname for host in hosts if host.hostname})) + "\n"
 
     try:
         result = subprocess.run(
@@ -421,11 +360,7 @@ def run_httpx(
         except json.JSONDecodeError:
             continue
 
-        input_host = (
-            item.get("input")
-            or item.get("host")
-            or ""
-        )
+        input_host = item.get("input") or item.get("host") or ""
 
         hostname = (
             str(input_host)
@@ -455,19 +390,13 @@ def run_httpx(
         host.alive = True
         hosts_updated += 1
 
-        tech_values = (
-            item.get("tech")
-            or item.get("technologies")
-            or []
-        )
+        tech_values = item.get("tech") or item.get("technologies") or []
 
         if isinstance(tech_values, str):
             tech_values = [tech_values]
 
         for technology_name in tech_values:
-            technology_name = str(
-                technology_name
-            ).strip()
+            technology_name = str(technology_name).strip()
 
             if not technology_name:
                 continue
@@ -498,10 +427,7 @@ def run_httpx(
         fail_job(
             db,
             job,
-            (
-                f"HTTPX failed. Output: "
-                f"{result.stderr[-1000:]}"
-            ),
+            (f"HTTPX failed. Output: " f"{result.stderr[-1000:]}"),
         )
         return
 
@@ -526,12 +452,7 @@ def run_naabu(
         fail_job(db, job, "Domain not found")
         return
 
-    hosts = (
-        db.query(Host)
-        .filter(Host.domain_id == domain.id)
-        .order_by(Host.id.asc())
-        .all()
-    )
+    hosts = db.query(Host).filter(Host.domain_id == domain.id).order_by(Host.id.asc()).all()
 
     if not hosts:
         fail_job(
@@ -543,24 +464,10 @@ def run_naabu(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting Naabu port discovery for "
-        f"{domain.name}"
-    )
+    job.message = f"Starting Naabu port discovery for " f"{domain.name}"
     db.commit()
 
-    input_data = (
-        "\n".join(
-            sorted(
-                {
-                    host.hostname
-                    for host in hosts
-                    if host.hostname
-                }
-            )
-        )
-        + "\n"
-    )
+    input_data = "\n".join(sorted({host.hostname for host in hosts if host.hostname})) + "\n"
 
     try:
         result = subprocess.run(
@@ -599,11 +506,7 @@ def run_naabu(
         except json.JSONDecodeError:
             continue
 
-        target = str(
-            item.get("host")
-            or item.get("ip")
-            or ""
-        ).strip().lower()
+        target = str(item.get("host") or item.get("ip") or "").strip().lower()
 
         port_number = item.get("port")
 
@@ -672,11 +575,7 @@ def run_naabu(
         fail_job(
             db,
             job,
-            (
-                f"Naabu failed. Ports created: "
-                f"{created}. Output: "
-                f"{result.stderr[-1000:]}"
-            ),
+            (f"Naabu failed. Ports created: " f"{created}. Output: " f"{result.stderr[-1000:]}"),
         )
         return
 
@@ -700,11 +599,7 @@ def extract_katana_url(
         or request_data.get("url")
     )
 
-    method = (
-        item.get("method")
-        or request_data.get("method")
-        or "GET"
-    )
+    method = item.get("method") or request_data.get("method") or "GET"
 
     status_code = (
         item.get("status-code")
@@ -722,23 +617,15 @@ def extract_katana_url(
     )
 
     try:
-        status_code = (
-            int(status_code)
-            if status_code is not None
-            else None
-        )
+        status_code = int(status_code) if status_code is not None else None
     except (TypeError, ValueError):
         status_code = None
 
     return (
-        str(url).strip()
-        if url
-        else None,
+        str(url).strip() if url else None,
         str(method).upper(),
         status_code,
-        str(content_type)
-        if content_type
-        else None,
+        str(content_type) if content_type else None,
     )
 
 
@@ -772,16 +659,14 @@ def run_katana(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting Katana crawl for {domain.name}"
-    )
+    job.message = f"Starting Katana crawl for {domain.name}"
     db.commit()
 
     created = 0
     processed_hosts = 0
     failures = 0
 
-    for index, host in enumerate(hosts, start=1):
+    for _index, host in enumerate(hosts, start=1):
         if not host.hostname:
             continue
 
@@ -844,17 +729,9 @@ def run_katana(
                 if not parsed.scheme or not parsed.netloc:
                     continue
 
-                hostname = (
-                    parsed.hostname
-                    or ""
-                ).lower()
+                hostname = (parsed.hostname or "").lower()
 
-                if not (
-                    hostname == domain.name
-                    or hostname.endswith(
-                        f".{domain.name}"
-                    )
-                ):
+                if not (hostname == domain.name or hostname.endswith(f".{domain.name}")):
                     continue
 
                 target_host = (
@@ -882,11 +759,7 @@ def run_katana(
                     Url(
                         customer_id=domain.customer_id,
                         domain_id=domain.id,
-                        host_id=(
-                            target_host.id
-                            if target_host
-                            else host.id
-                        ),
+                        host_id=(target_host.id if target_host else host.id),
                         url=discovered_url,
                         method=method,
                         status_code=status_code,
@@ -905,17 +778,11 @@ def run_katana(
 
         job.progress = min(
             95,
-            10 + int(
-                processed_hosts
-                / max(len(hosts), 1)
-                * 85
-            ),
+            10 + int(processed_hosts / max(len(hosts), 1) * 85),
         )
 
         job.message = (
-            f"Katana crawling {processed_hosts}/"
-            f"{len(hosts)} hosts. URLs found: "
-            f"{created}"
+            f"Katana crawling {processed_hosts}/" f"{len(hosts)} hosts. URLs found: " f"{created}"
         )
         db.commit()
 
@@ -935,11 +802,7 @@ def run_nuclei(
     db: Session,
     job: Job,
 ):
-    asset = (
-        db.query(Asset)
-        .filter(Asset.id == job.asset_id)
-        .first()
-    )
+    asset = db.query(Asset).filter(Asset.id == job.asset_id).first()
 
     if not asset:
         fail_job(db, job, "Asset not found")
@@ -947,9 +810,7 @@ def run_nuclei(
 
     job.status = "running"
     job.progress = 10
-    job.message = (
-        f"Starting Nuclei scan for {asset.target}"
-    )
+    job.message = f"Starting Nuclei scan for {asset.target}"
     db.commit()
 
     try:
@@ -1013,10 +874,7 @@ def run_nuclei(
     finish_job(
         db,
         job,
-        (
-            f"Nuclei scan finished. "
-            f"Findings created: {findings_created}"
-        ),
+        (f"Nuclei scan finished. " f"Findings created: {findings_created}"),
     )
 
 
@@ -1027,9 +885,7 @@ def run_dummy(
     for progress in [5, 25, 50, 75, 100]:
         job.status = "running"
         job.progress = progress
-        job.message = (
-            f"Dummy job progress {progress}%"
-        )
+        job.message = f"Dummy job progress {progress}%"
         db.commit()
         time.sleep(2)
 
@@ -1079,19 +935,11 @@ def worker():
         db = SessionLocal()
 
         try:
-            job = (
-                db.query(Job)
-                .filter(Job.status == "queued")
-                .order_by(Job.id.asc())
-                .first()
-            )
+            job = db.query(Job).filter(Job.status == "queued").order_by(Job.id.asc()).first()
 
             if job:
                 print(
-                    (
-                        f"Processing job {job.id} "
-                        f"with plugin {job.plugin}"
-                    ),
+                    (f"Processing job {job.id} " f"with plugin {job.plugin}"),
                     flush=True,
                 )
 

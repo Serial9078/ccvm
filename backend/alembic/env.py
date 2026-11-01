@@ -1,11 +1,11 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
+from app import models  # noqa: F401  # Registers ORM tables in Base.metadata.
 from app.core.config import DATABASE_URL
 from app.database.session import Base
-from app import models
 
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
