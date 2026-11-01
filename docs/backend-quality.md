@@ -4,10 +4,34 @@ Investigation date: 2026-11-01 (Europe/Berlin).
 Base branch: `sprint-1.0.2-feature-architecture`.
 Base commit: `6173b43ef02177ae706e68c2106a7a6547d88841`.
 
-Current deployed-source coverage is documented in
-[Neptun reconciliation](neptun-integration.md): 76 backend cases, ten Git
-safeguard cases, and the separate PostgreSQL test covering thirteen migrations
-and fifteen application tables. The original repair evidence below is retained.
+Current coverage includes the 76 backend cases documented in
+[Neptun reconciliation](neptun-integration.md), sixteen Nuclei scope cases,
+ten Git safeguard cases, and the separate PostgreSQL test covering thirteen
+migrations and fifteen application tables. The original repair evidence below
+is retained.
+
+## Nuclei URL target boundary
+
+The URL-targeted Nuclei stage previously preferred `UrlDetail.final_url` without
+checking its host. An HTTP probe following a redirect could therefore supply an
+unrelated site's URL to the active scanner, even when the original URL belonged
+to the selected domain.
+
+Both the original and effective URL must now use HTTP(S) and belong to the
+selected domain or one of its subdomains. Matching uses a complete DNS-label
+boundary, ignores case and a terminal dot, and rejects credentials, invalid
+ports, malformed authorities, and control characters. A rejected redirect is
+omitted rather than scanned through its original URL. The existing limits of
+40 URLs per domain and 12 per origin remain. The Nuclei process is also passed
+`-disable-redirects` to prevent HTTP templates from following subsequent
+redirects. Regression cases exercise selection against an in-memory database
+and capture a mocked process launch; no scanner or network request runs.
+
+This guard applies to Nuclei URL selection and HTTP redirects. It is not a
+network egress sandbox and does not change DNS resolution, template behavior,
+or redirect handling in other plugins. This application-only change requires
+reloading the worker after installation, with no database migration or Compose
+change.
 
 ## Reproduced causes
 

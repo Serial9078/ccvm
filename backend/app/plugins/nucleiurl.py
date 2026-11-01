@@ -258,6 +258,29 @@ def origin_from_url(
         return None
 
 
+def is_domain_scan_url(value: str, domain_name: str) -> bool:
+    domain_name = domain_name.strip().lower().rstrip(".")
+    # Targets are written one per line. Reject control characters before urlparse
+    # can silently discard them, as well as credentials and malformed authorities.
+    if not domain_name or any(ord(character) <= 32 or ord(character) == 127 for character in value):
+        return False
+
+    try:
+        parsed = urlparse(value)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            not origin_from_url(value)
+            or parsed.username is not None
+            or parsed.password is not None
+            or "\\" in parsed.netloc
+        ):
+            return False
+    except ValueError:
+        return False
+
+    return hostname == domain_name or hostname.endswith(f".{domain_name}")
+
+
 def is_static_resource(
     value: str,
     content_type: str | None,
@@ -380,7 +403,11 @@ def select_scan_urls(
     for url_record, detail in rows:
         target = str(detail.final_url or url_record.url).strip()
 
-        if not target or target in seen_targets:
+        if (
+            target in seen_targets
+            or not is_domain_scan_url(url_record.url, domain.name)
+            or not is_domain_scan_url(target, domain.name)
+        ):
             continue
 
         if is_static_resource(
@@ -626,6 +653,7 @@ def run_nucleiurl(
             "-headless-concurrency",
             "1",
             "-no-interactsh",
+            "-disable-redirects",
             "-disable-update-check",
             "-stats",
             "-stats-interval",

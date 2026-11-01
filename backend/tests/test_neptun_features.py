@@ -1,6 +1,7 @@
 """Preserve the deployed Neptun features without starting any scanners."""
 
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from app.api.v1 import url_screenshots
 from app.database.deps import get_db
 from app.main import app
+from app.models.asset import Asset
 from app.models.job import Job
 from app.models.url import Url
 from app.models.url_detail import UrlDetail
@@ -203,8 +205,68 @@ def test_nuclei_url_selection_respects_limits_and_skips_static_errors(domain, cu
         db.flush()
         db.add(UrlDetail(url_id=record.id, status_code=status, content_type=content_type))
     db.commit()
-    targets = nucleiurl.select_scan_urls(db, SimpleNamespace(id=domain["id"]))
+    targets = nucleiurl.select_scan_urls(db, SimpleNamespace(**domain))
     assert len(targets) == 40
     origins = Counter(nucleiurl.origin_from_url(target) for target in targets)
     assert max(origins.values()) <= 12
     assert all(not target.endswith(("image.png", "error")) for target in targets)
+
+
+@pytest.mark.parametrize(
+    ("original", "final", "expected"),
+    [
+        ("https://example.test/", None, True),
+        ("https://example.test/", "https://LOGIN.Example.Test.:8443/login", True),
+        ("https://example.test/", "https://other.test/login", False),
+        ("https://example.test/", "https://example.test.other.test/", False),
+        ("https://example.test/", "https://notexample.test/", False),
+        ("https://other.test/", "https://example.test/login", False),
+        ("https://example.test/", "https://example.test@other.test/", False),
+        ("https://example.test/", "https://user:secret@example.test/", False),
+        ("https://example.test/", "https://example.test:invalid/", False),
+        ("https://example.test/", "ftp://example.test/", False),
+        ("https://example.test/", "//example.test/", False),
+        ("https://example.test/", "https://[example.test/", False),
+        ("https://example.test/", "https://example.test/\nhttps://other.test/", False),
+        ("https://example.test/", "https://other.test\\.example.test/", False),
+    ],
+)
+def test_nuclei_selection_requires_original_and_final_url_in_domain(
+    domain, customer, db, original, final, expected
+):
+    record = Url(customer_id=customer["id"], domain_id=domain["id"], url=original)
+    db.add(record)
+    db.flush()
+    db.add(UrlDetail(url_id=record.id, status_code=200, content_type="text/html", final_url=final))
+    db.commit()
+
+    targets = nucleiurl.select_scan_urls(db, SimpleNamespace(**domain))
+
+    assert targets == ([final or original] if expected else [])
+
+
+def test_nuclei_rejects_empty_domain():
+    assert not nucleiurl.is_domain_scan_url("https://example.test/", "")
+
+
+def test_nuclei_launch_disables_redirects(domain, customer, db, monkeypatch):
+    asset = Asset(customer_id=customer["id"], target="https://example.test/")
+    record = Url(customer_id=customer["id"], domain_id=domain["id"], url="https://example.test/")
+    job = Job(domain_id=domain["id"], plugin="nucleiurl", status="queued")
+    db.add_all([asset, record, job])
+    db.flush()
+    db.add(UrlDetail(url_id=record.id, status_code=200, content_type="text/html"))
+    db.commit()
+    launches = []
+
+    def fake_popen(command, **kwargs):
+        launches.append(command)
+        assert Path(command[command.index("-l") + 1]).read_text() == "https://example.test/\n"
+        return SimpleNamespace(poll=lambda: 0, returncode=0)
+
+    monkeypatch.setattr(nucleiurl.subprocess, "Popen", fake_popen)
+    nucleiurl.run_nucleiurl(db, job)
+
+    assert job.status == "finished", job.message
+    assert len(launches) == 1
+    assert "-disable-redirects" in launches[0]
