@@ -3,6 +3,7 @@
 import base64
 import json
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -106,6 +107,8 @@ def main():
                 "backend",
                 "-v",
                 f"{stub}:/fixture.py:ro",
+                "-v",
+                f"{Path(__file__).resolve()}:/ci/check-frontend-routing.py:ro",
                 "python:3.12-alpine",
                 "python",
                 "/fixture.py",
@@ -117,13 +120,16 @@ def main():
                 frontend,
                 "--network",
                 prefix,
-                "-p",
-                "127.0.0.1::80",
                 image,
             )
-            address = docker("port", frontend, "80/tcp")
-            assert address.startswith("127.0.0.1:"), address
-            check_routes(f"http://{address}")
+            docker(
+                "exec",
+                backend,
+                "python",
+                "/ci/check-frontend-routing.py",
+                "--probe",
+                f"http://{frontend}",
+            )
             print("nginx smoke check passed: API JSON, SPA fallback, screenshot GET/HEAD")
     except Exception:
         for name in (backend, frontend):
@@ -137,4 +143,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--probe":
+        check_routes(sys.argv[2])
+    else:
+        main()
