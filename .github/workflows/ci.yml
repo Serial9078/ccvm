@@ -72,7 +72,7 @@ jobs:
           POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: |
           docker logs --tail 200 "$POSTGRES_CONTAINER"
-          docker exec "$POSTGRES_CONTAINER" psql -U ccvm_ci -d "ccvm_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" -c '\dt+' -c '\d+ alembic_version'
+          docker exec "$POSTGRES_CONTAINER" psql -U ccvm_ci -d "ccvm_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" -c '\dt+' -c "SELECT current_database(), current_user, version(), to_regclass('public.alembic_version');"
       - name: Preserve migration logs, schema snapshot, and test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4

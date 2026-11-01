@@ -46,7 +46,7 @@ def ci_database_url(environ):
     )
 
 
-def alembic_command(url, *args):
+def alembic_command(url, *args, log_name=None):
     # Run the real env.py in a fresh process, separate from SQLite unit-test imports.
     environ = {
         key: value
@@ -55,18 +55,30 @@ def alembic_command(url, *args):
     }
     environ["DATABASE_URL"] = url.render_as_string(hide_password=False)
     environ["PGOPTIONS"] = "-c search_path=public -c statement_timeout=30000 -c lock_timeout=5000"
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-        cwd=BACKEND,
-        env=environ,
-        text=True,
-        capture_output=True,
-        timeout=120,
-        check=False,
-    )
+    log = ARTIFACTS / f"alembic-{log_name or '-'.join(args)}.log"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+            cwd=BACKEND,
+            env=environ,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        # TimeoutExpired may carry bytes even when text=True.
+        output = b"\n".join(
+            part.encode() if isinstance(part, str) else part
+            for part in (error.stdout, error.stderr)
+            if part
+        ).decode(errors="replace")
+        log.write_text(output + "\nAlembic exceeded the 120-second timeout.\n")
+        print(output, flush=True)
+        raise AssertionError(f"alembic {' '.join(args)} exceeded 120 seconds") from error
     output = result.stdout + result.stderr
     print(f"alembic {' '.join(args)} (exit {result.returncode})\n{output}", flush=True)
-    (ARTIFACTS / f"alembic-{'-'.join(args)}.log").write_text(output)
+    log.write_text(output)
     assert result.returncode == 0, f"alembic {' '.join(args)} failed; see captured output"
 
 
@@ -175,6 +187,9 @@ def assert_postgresql_behavior(connection):
 
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
+    for key in tuple(os.environ):
+        if key.startswith(("PG", "DB_")):
+            del os.environ[key]
     os.environ["DATABASE_URL"] = url.render_as_string(hide_password=False)
     ARTIFACTS.mkdir(exist_ok=True)
     engine = sa.create_engine(
@@ -207,7 +222,7 @@ def test_empty_postgresql_database_migrates_to_head():
         script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
         expected_heads = set(script.get_heads())
         assert len(expected_heads) == 1, f"Expected one revision head: {expected_heads!r}"
-        alembic_command(url, "upgrade", "head")
+        alembic_command(url, "upgrade", "head", log_name="upgrade-from-empty")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
@@ -216,7 +231,7 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_schema_matches_models(connection)
             assert_postgresql_behavior(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
-        alembic_command(url, "upgrade", "head")  # A second upgrade must be a no-op.
+        alembic_command(url, "upgrade", "head", log_name="upgrade-at-head")
         with engine.connect() as connection:
             assert set(MigrationContext.configure(connection).get_current_heads()) == expected_heads
             assert_schema_matches_models(connection)
