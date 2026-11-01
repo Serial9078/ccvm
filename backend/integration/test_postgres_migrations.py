@@ -1,5 +1,6 @@
 """Opt-in integration check for the disposable GitHub Actions PostgreSQL service."""
 
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -134,6 +135,11 @@ def assert_schema_matches_models(connection):
         opts={"compare_type": True, "compare_server_default": compare_defaults},
     )
     differences = compare_metadata(context, Base.metadata)
+    if differences:
+        for index in Base.metadata.tables["urls"].indexes:
+            if index.unique:
+                print(f"Expected URL index: {context.impl._compile_element(index.expressions[1])}")
+        print(f"Observed URL indexes: {sa.inspect(connection).get_indexes('urls')}")
     assert not differences, f"Migrated schema differs from ORM metadata: {differences!r}"
     inspector = sa.inspect(connection)
     assert set(inspector.get_table_names()) == set(Base.metadata.tables) | {"alembic_version"}
@@ -580,6 +586,23 @@ def assert_long_url_persistence(connection):
         )
 
 
+def assert_operator_readonly_snapshot(connection):
+    spec = importlib.util.spec_from_file_location(
+        "update_url_index", BACKEND.parent / "scripts/update-url-index.py"
+    )
+    operator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(operator)
+    before = all_data_rows(connection)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(operator.STATE_CODE, "<operator-read-only-snapshot>", "exec"), {})
+    snapshot = json.loads(output.getvalue())
+    operator.validate_state(snapshot, expected=operator.REVISION)
+    assert snapshot["tables"]["urls"]["count"] == len(before["urls"])
+    assert all_data_rows(connection) == before
+    print("Operator read-only row fingerprints and URL index verification passed", flush=True)
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -627,6 +650,7 @@ def test_empty_postgresql_database_migrates_to_head():
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
+            assert_operator_readonly_snapshot(connection)
             assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
