@@ -167,8 +167,14 @@ def finish_job(
 def extract_katana_url(
     item: dict,
 ) -> tuple[str | None, str, int | None, str | None]:
-    request_data = item.get("request") or {}
-    response_data = item.get("response") or {}
+    if not isinstance(item, dict):
+        return None, "GET", None, None
+    request_data = item.get("request")
+    response_data = item.get("response")
+    if not isinstance(request_data, dict):
+        request_data = {}
+    if not isinstance(response_data, dict):
+        response_data = {}
 
     discovered_url = (
         item.get("url")

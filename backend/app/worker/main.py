@@ -157,6 +157,13 @@ def process_job(
 
     try:
         handler(db, job)
+        db.refresh(job)
+        if job.status not in TERMINAL_SUCCESS_STATES | TERMINAL_FAILURE_STATES:
+            mark_job_failed(
+                db,
+                job.id,
+                f"Plugin '{plugin_name}' returned without a terminal job status",
+            )
 
     except Exception as exc:
         traceback.print_exc()

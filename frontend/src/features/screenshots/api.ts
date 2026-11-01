@@ -1,3 +1,4 @@
+import { apiResourceUrl } from "../../shared/api/config";
 import { api } from "../../shared/api/api";
 
 
@@ -104,10 +105,7 @@ function filenameFromScreenshot(
 function buildScreenshotUrl(
   filename: string,
 ): string {
-  return (
-    "/api/v1/screenshots/"
-    + encodeURIComponent(filename)
-  );
+  return apiResourceUrl(`screenshots/${encodeURIComponent(filename)}`);
 }
 
 

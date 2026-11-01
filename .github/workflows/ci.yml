@@ -96,6 +96,20 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - name: Check frontend dependencies for high or critical advisories
+        run: npm audit --audit-level=high
+      - run: npm test
       - run: npm run build
+      - name: Verify default API base in the built frontend
+        run: node tests/check-build.mjs dist /api/v1
+      - run: npm run lint
+      - name: Verify frontend Docker build and nginx routes on an isolated network
+        run: python3 ../scripts/check-frontend-routing.py
+      - name: Verify a configured API base in a separate frontend build
+        env:
+          VITE_API_URL: https://ccvm-ci.invalid/api/v1
+        run: |
+          npm run build -- --outDir "$RUNNER_TEMP/ccvm-frontend-configured"
+          node tests/check-build.mjs "$RUNNER_TEMP/ccvm-frontend-configured" https://ccvm-ci.invalid/api/v1
       - name: Check screenshot service JavaScript syntax
         run: node --check ../screenshot-service/server.js
