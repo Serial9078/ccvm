@@ -9,6 +9,7 @@ no scan is started, and no existing database rows are modified or removed.
 
 import argparse
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -20,7 +21,7 @@ import time
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 BASE = "e51860b931bec53c8b7ba9375c101678374d40af"
 BRANCH = "sprint-1.0.2-feature-architecture"
 OLD_REVISION = "7f91c32a60d1"
@@ -238,14 +239,35 @@ class Runtime:
             for key in ("IPAddress", "GlobalIPv6Address")
         } - {None, ""}
         identity = state["identity"]
+        try:
+            # PostgreSQL's inet::text includes /32 or /128; Docker returns a
+            # plain host address. Compare exact IP objects, never subnet membership.
+            actual_address = ipaddress.ip_interface(identity["address"]).ip
+            backup_addresses = {ipaddress.ip_address(address) for address in addresses}
+        except (ValueError, TypeError) as error:
+            raise RuntimeError(
+                "Invalid database IP address: "
+                + json.dumps({"actual": identity["address"], "expected": sorted(addresses)})
+            ) from error
         if (
             identity["database"] != settings.get("POSTGRES_DB")
-            or identity["address"] not in addresses
+            or actual_address not in backup_addresses
             or identity["port"] != 5432
             or identity["version"] // 10000 != 16
         ):
             raise RuntimeError(
-                "Application database does not match the PostgreSQL 16 backup target"
+                "Application database does not match the PostgreSQL 16 backup target: "
+                + json.dumps(
+                    {
+                        "actual": identity,
+                        "expected": {
+                            "database": settings.get("POSTGRES_DB"),
+                            "addresses": sorted(addresses),
+                            "port": 5432,
+                            "version_major": 16,
+                        },
+                    }
+                )
             )
         return state
 

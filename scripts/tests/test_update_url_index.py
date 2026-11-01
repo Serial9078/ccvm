@@ -268,7 +268,7 @@ class RuntimePreflightTests(unittest.TestCase):
         snapshot = state(operator.OLD_REVISION)
         snapshot["identity"] = {
             "database": "ccvm",
-            "address": "172.25.0.2",
+            "address": "172.18.0.6",
             "port": 5432,
             "version": 160015,
             **overrides,
@@ -286,7 +286,12 @@ class RuntimePreflightTests(unittest.TestCase):
                         },
                         "Mounts": [{"Source": str(root / "backend"), "Destination": "/app"}],
                         "NetworkSettings": {
-                            "Networks": {"ccvm_default": {"IPAddress": "172.25.0.2"}}
+                            "Networks": {
+                                "ccvm_default": {
+                                    "IPAddress": "172.18.0.6",
+                                    "GlobalIPv6Address": "2001:db8::6",
+                                }
+                            }
                         },
                     }
                 )
@@ -305,6 +310,36 @@ class RuntimePreflightTests(unittest.TestCase):
     def test_existing_postgresql_backup_target_matches_application_connection(self):
         runtime, root = self.runtime()
         self.assertEqual(runtime.preflight(root)["identity"]["database"], "ccvm")
+
+    def test_neptun_postgresql_text_host_mask_matches_the_exact_docker_ip(self):
+        runtime, root = self.runtime(address="172.18.0.6/32", version=160012)
+        self.assertEqual(runtime.preflight(root)["identity"]["address"], "172.18.0.6/32")
+
+    def test_expanded_ipv6_host_mask_matches_the_exact_docker_ipv6(self):
+        runtime, root = self.runtime(address="2001:0db8:0000:0000:0000:0000:0000:0006/128")
+        self.assertEqual(runtime.preflight(root)["identity"]["database"], "ccvm")
+
+    def test_an_address_prefix_does_not_authorize_a_neighbor(self):
+        for value in ("172.18.0.7/24", "2001:db8::7/64"):
+            with self.subTest(address=value):
+                runtime, root = self.runtime(address=value)
+                with self.assertRaisesRegex(RuntimeError, "backup target"):
+                    runtime.preflight(root)
+
+    def test_invalid_database_address_is_rejected(self):
+        for value in (None, "", "postgres", "172.18.0.6/invalid"):
+            with self.subTest(address=value):
+                runtime, root = self.runtime(address=value)
+                with self.assertRaisesRegex(RuntimeError, "Invalid database IP address"):
+                    runtime.preflight(root)
+
+    def test_actual_backup_mismatch_reports_the_compared_fields(self):
+        runtime, root = self.runtime(address="172.18.0.6/32", port=5433)
+        with self.assertRaisesRegex(RuntimeError, "backup target") as error:
+            runtime.preflight(root)
+        self.assertIn("5433", str(error.exception))
+        self.assertIn("5432", str(error.exception))
+        self.assertIn("172.18.0.6", str(error.exception))
 
     def test_different_database_or_server_is_rejected_before_mutation(self):
         for field, value in (
