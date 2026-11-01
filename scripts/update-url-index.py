@@ -39,6 +39,10 @@ from app.database.session import engine
 with engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
     connection.execute(sa.text("SET TRANSACTION READ ONLY"))
     connection.execute(sa.text("SET LOCAL statement_timeout = '60s'"))
+    identity = dict(connection.execute(sa.text(
+        "SELECT current_database() AS database, inet_server_addr()::text AS address, "
+        "inet_server_port() AS port, current_setting('server_version_num')::int AS version"
+    )).one()._mapping)
     active = [dict(row._mapping) for row in connection.execute(sa.text(
         "SELECT id, plugin, status FROM jobs WHERE status IN ('queued', 'running') ORDER BY id"))]
     revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
@@ -61,7 +65,7 @@ with engine.connect().execution_options(isolation_level="REPEATABLE READ") as co
             count += 1
         result.close()
         tables[name] = {'count': count, 'sha256': fingerprint.hexdigest()}
-    print(json.dumps({'revision': revision, 'active': active,
+    print(json.dumps({'revision': revision, 'active': active, 'identity': identity,
                       'indexes': indexes, 'tables': tables}))
 """
 
@@ -170,10 +174,13 @@ class Runtime:
         return json.loads(self.docker("exec", "ccvm-worker", "python", "-c", STATE_CODE))
 
     def preflight(self, root):
+        postgres = None
         for name in ("ccvm-backend", "ccvm-worker", "ccvm-postgres"):
             info = json.loads(self.docker("inspect", "--format", "{{json .}}", name))
             if not info["State"]["Running"] or info["State"]["Paused"]:
                 raise RuntimeError(f"Container is not running normally: {name}")
+            if name == "ccvm-postgres":
+                postgres = info
             if name == "ccvm-worker":
                 argv = info.get("Config", {}).get("Cmd", [])
                 if (
@@ -222,6 +229,24 @@ class Runtime:
             raise RuntimeError("Standalone Nuclei container is not idle")
         state = self.state()
         validate_state(state)
+        settings = dict(
+            item.split("=", 1) for item in postgres["Config"].get("Env", []) if "=" in item
+        )
+        addresses = {
+            network.get(key)
+            for network in postgres.get("NetworkSettings", {}).get("Networks", {}).values()
+            for key in ("IPAddress", "GlobalIPv6Address")
+        } - {None, ""}
+        identity = state["identity"]
+        if (
+            identity["database"] != settings.get("POSTGRES_DB")
+            or identity["address"] not in addresses
+            or identity["port"] != 5432
+            or identity["version"] // 10000 != 16
+        ):
+            raise RuntimeError(
+                "Application database does not match the PostgreSQL 16 backup target"
+            )
         return state
 
     def freeze(self):

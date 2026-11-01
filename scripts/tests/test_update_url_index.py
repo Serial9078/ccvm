@@ -261,5 +261,63 @@ class UpdateUrlIndexTests(unittest.TestCase):
             operator.validate_state(state(operator.OLD_REVISION), expected=operator.REVISION)
 
 
+class RuntimePreflightTests(unittest.TestCase):
+    def runtime(self, **overrides):
+        runtime = object.__new__(operator.Runtime)
+        root = Path("/opt/ccvm")
+        snapshot = state(operator.OLD_REVISION)
+        snapshot["identity"] = {
+            "database": "ccvm",
+            "address": "172.25.0.2",
+            "port": 5432,
+            "version": 160015,
+            **overrides,
+        }
+        runtime.state = lambda: snapshot
+
+        def docker(*args):
+            if args[0] == "inspect":
+                return json.dumps(
+                    {
+                        "State": {"Running": True, "Paused": False},
+                        "Config": {
+                            "Cmd": ["python", "-m", "app.worker.main"],
+                            "Env": ["POSTGRES_DB=ccvm"],
+                        },
+                        "Mounts": [{"Source": str(root / "backend"), "Destination": "/app"}],
+                        "NetworkSettings": {
+                            "Networks": {"ccvm_default": {"IPAddress": "172.25.0.2"}}
+                        },
+                    }
+                )
+            if args[0] == "ps":
+                return "ccvm-worker\nccvm-backend\nccvm-postgres"
+            if args[0] == "top":
+                name = "tail" if args[1] == "ccvm-nuclei" else "python"
+                return f"PID COMMAND\n1 {name}\n"
+            if args[0] == "exec":
+                return json.dumps(["python", "-m", "app.worker.main"])
+            raise AssertionError(args)
+
+        runtime.docker = docker
+        return runtime, root
+
+    def test_existing_postgresql_backup_target_matches_application_connection(self):
+        runtime, root = self.runtime()
+        self.assertEqual(runtime.preflight(root)["identity"]["database"], "ccvm")
+
+    def test_different_database_or_server_is_rejected_before_mutation(self):
+        for field, value in (
+            ("database", "other-project"),
+            ("address", "192.0.2.10"),
+            ("port", 5433),
+            ("version", 150000),
+        ):
+            with self.subTest(field=field):
+                runtime, root = self.runtime(**{field: value})
+                with self.assertRaisesRegex(RuntimeError, "backup target"):
+                    runtime.preflight(root)
+
+
 if __name__ == "__main__":
     unittest.main()
