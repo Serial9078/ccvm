@@ -45,7 +45,7 @@ compilation failure was reproduced on this application head.
 | URL Intelligence | HTTPX details, headers, header findings and screenshot records | Effective URL interpretation, subsecond timings, zero lengths and stale reachability corrected. Previous metadata retained when reachability becomes unknown. |
 | Screenshot service | Express/Playwright, internal port 3001, PNGs under `/data/screenshots` | Compose previously omitted service and shared storage. Synthetic nginx checks do not execute a browser. |
 | Gotenberg | Standalone version 8 service on port 3000 | No application call or PDF report API found; report integration remains work. |
-| React/Vite | MUI, React Query, Axios, TypeScript/Vite; polling inventories | Fixed API host removed; shared API/image base, nginx/dev proxy, Docker `npm ci` and excluded host build artifacts added. |
+| React/Vite | MUI, React Query, Axios, TypeScript/Vite; polling inventories | Fixed API host removed; shared API/image base, nginx/dev proxy, Docker `npm ci`, excluded host build artifacts and patched dependency lock added. |
 
 ## Reproductions and fixes
 
@@ -77,7 +77,8 @@ redirect guards remain in force.
 Local final validation: 173 backend cases (48 added), twelve frontend cases,
 ten Git safeguard cases, Black/Ruff over 107 Python files, dependency consistency,
 TypeScript/Vite default and configured builds, Oxlint, screenshot JavaScript
-syntax and whitespace checks passed. Native integration results are recorded in
+syntax and whitespace checks passed. The updated dependency lock reports zero
+npm audit findings (including development dependencies). Native integration results are recorded in
 the pull request after GitHub Actions completes.
 
 Backend commands, from `backend`, in a Python 3.12 virtual environment:
@@ -119,6 +120,21 @@ evidence therefore comes from GitHub Actions. Offline tests prohibit network
 connections and scanner subprocesses. They do not scan real targets, connect to
 existing databases or validate browser rendering. Backend deprecations, duplicate
 screenshot OpenAPI operation warning and the Vite bundle warning remain visible.
+
+## Frontend dependency findings
+
+The original CI install reported fourteen npm findings: five moderate and nine
+high. A separate production-only audit reported four high package findings
+(Axios, follow-redirects and the React Router packages). The lockfile is updated
+within the existing declared version ranges, including Axios 1.21.0,
+follow-redirects 1.16.2, React Router 7.18.5 and Vite 8.3.5. No forced major
+upgrade or advisory suppression is used. Unused ESLint and eslint-config-prettier
+development entries were removed after confirming that the actual lint command
+and configuration use Oxlint and contain no ESLint imports. This eliminates the
+remaining minimatch advisory chain without overriding transitive major versions.
+The final full npm audit reports zero findings. CI now blocks high/critical
+frontend dependency advisories. This is dependency audit evidence, not a claim
+that the application has no security defects.
 
 ## Configuration and release boundaries
 

@@ -96,6 +96,8 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - name: Check frontend dependencies for high or critical advisories
+        run: npm audit --audit-level=high
       - run: npm test
       - run: npm run build
       - name: Verify default API base in the built frontend
