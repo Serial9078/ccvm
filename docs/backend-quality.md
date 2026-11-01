@@ -59,11 +59,11 @@ pins Black 26.10.1, Ruff 0.17.3, pytest 9.2.0, and HTTPX 0.28.1. These pins make
 formatter/linter and direct test-tool versions explicit; transitive packages
 are not a complete dependency lock.
 
-The backend job now:
+The backend job now (including the PostgreSQL integration follow-up):
 
 1. Installs runtime/development requirements and runs `python -m pip check`.
-2. Runs `black --check app alembic tests`.
-3. Runs `ruff check app alembic tests`.
+2. Runs `black --check app alembic tests integration`.
+3. Runs `ruff check app alembic tests integration`.
 4. Runs `python -m pytest -q`.
 
 Ruff and tests have an explicit condition requiring successful dependency
@@ -97,11 +97,18 @@ Test teardown closes the session, removes the override, and disposes the engine.
 An automatic fixture blocks socket connections and scanner subprocesses;
 Katana tests replace subprocess execution with controlled mocks.
 
-These are a useful initial CI gate, not PostgreSQL integration or API security
-hardening tests. They do not exercise external scanner binaries or execute
-migration upgrades/downgrades.
+The original 37 tests remain an isolated unit-test gate. A separate
+[PostgreSQL migration CI job](postgresql-ci.md) now executes the actual
+upgrade chain against a disposable PostgreSQL 16 service and verifies its
+revision, schema, and native constraints. Seventeen offline connection-guard
+tests bring the unit-suite total to 54. The SQLite fixtures and their I/O
+restrictions are unchanged. Scanner integration, API security hardening,
+populated-database upgrades, and downgrade execution remain outside this work.
 
-## Local validation
+## Local validation of the original repair
+
+The following results describe PR #1. For the subsequent PostgreSQL integration
+and its necessary empty-baseline repair, see [postgresql-ci.md](postgresql-ci.md).
 
 | Check | Result |
 | --- | --- |
@@ -141,19 +148,20 @@ python3.12 -m venv .venv
 cd backend
 python -m pip install -r requirements-dev.txt
 python -m pip check
-black --check app alembic tests
-ruff check app alembic tests
+black --check app alembic tests integration
+ruff check app alembic tests integration
 python -m pytest -q
 ```
 
-For formatting, run `black app alembic tests`; review Ruff suggestions with
-`ruff check app alembic tests` before applying fixes. In particular, do not
+For formatting, run `black app alembic tests integration`; review Ruff suggestions
+with `ruff check app alembic tests integration` before applying fixes. In particular, do not
 remove intentional model-registration imports.
 
 ## Deployment boundary
 
 No Docker deployment was built, restarted, or published. Dockerfiles,
 `docker-compose.yml`, runtime requirements, and database configuration are
-unchanged. No existing database was contacted or modified; no migration was
-applied. Merge into the development branch and any later deployment remain
-separate actions.
+unchanged. No existing database was contacted or modified. The subsequent
+PostgreSQL CI job applies migrations only to its fresh GitHub Actions test
+service, as described in [postgresql-ci.md](postgresql-ci.md). Merge into the
+development branch and any later deployment remain separate actions.

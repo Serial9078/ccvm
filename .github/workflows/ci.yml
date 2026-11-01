@@ -21,13 +21,66 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip check
       - name: Check Python formatting
-        run: black --check app alembic tests
+        run: black --check app alembic tests integration
       - name: Lint Python
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
-        run: ruff check app alembic tests
+        run: ruff check app alembic tests integration
       - name: Run backend tests
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python -m pytest -q
+
+  postgres-migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ccvm_ci
+          POSTGRES_PASSWORD: ccvm_ci_only
+          POSTGRES_DB: ccvm_ci_${{ github.run_id }}_${{ github.run_attempt }}
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U ccvm_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PostgreSQL driver, Alembic, and test dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+      - name: Migrate empty PostgreSQL database and verify revision, schema, and native types
+        env:
+          CCVM_POSTGRES_TEST_PORT: ${{ job.services.postgres.ports[5432] }}
+        run: >-
+          python -m pytest --confcutdir=integration integration/test_postgres_migrations.py
+          -v -s --junitxml=integration-artifacts/postgres-migrations.xml
+      - name: PostgreSQL service diagnostics on failure
+        if: ${{ failure() }}
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker logs --tail 200 "$POSTGRES_CONTAINER"
+          docker exec "$POSTGRES_CONTAINER" psql -U ccvm_ci -d "ccvm_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" -c '\dt+' -c "SELECT current_database(), current_user, version(), to_regclass('public.alembic_version');"
+      - name: Preserve migration logs, schema snapshot, and test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-migrations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: backend/integration-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
 
   frontend:
     runs-on: ubuntu-latest
