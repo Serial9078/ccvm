@@ -30,24 +30,29 @@ export interface DashboardSummary {
   hosts: number;
   ports: number;
   technologies: number;
+  urls: number;
   assets: number;
   jobs: number;
   running_jobs: number;
   findings: number;
+
   critical: number;
   high: number;
   medium: number;
   low: number;
   info: number;
+
   open: number;
   fixed: number;
+
   latest_findings: DashboardFinding[];
   active_jobs: DashboardJob[];
+
   severity_chart: ChartPoint[];
   scanner_chart: ChartPoint[];
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const { data } = await api.get("/dashboard");
+  const { data } = await api.get<DashboardSummary>("/dashboard");
   return data;
 }

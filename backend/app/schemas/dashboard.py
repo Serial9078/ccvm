@@ -31,10 +31,10 @@ class DashboardSummary(BaseModel):
     hosts: int
     ports: int
     technologies: int
+    urls: int
     assets: int
     jobs: int
     running_jobs: int
-
     findings: int
 
     critical: int

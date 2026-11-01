@@ -159,13 +159,15 @@ def assert_postgresql_behavior(connection):
             "boolean"
         )
         assert connection.scalar(sa.text("SELECT created_at FROM customers LIMIT 1")).tzinfo
-        connection.execute(
+        url_id = connection.scalar(
             sa.text(
                 "INSERT INTO urls (customer_id, domain_id, host_id, url, method, source) "
-                "VALUES (:customer, :domain, :host, 'https://example.test/', 'GET', 'ci')"
+                "VALUES (:customer, :domain, :host, 'https://example.test/', 'GET', 'ci') "
+                "RETURNING id"
             ),
             {"customer": customer_id, "domain": domain_id, "host": host_id},
         )
+        assert_neptun_persistence(connection, url_id, domain_id)
         invalid_statements = [
             # PostgreSQL enforces VARCHAR length; SQLite's VARCHAR(255) does not.
             (
@@ -183,6 +185,53 @@ def assert_postgresql_behavior(connection):
             with pytest.raises(sa.exc.DBAPIError) as error, connection.begin_nested():
                 connection.execute(sa.text(statement), {"customer": customer_id})
             assert error.value.orig.pgcode == sqlstate, str(error.value)
+
+
+def assert_neptun_persistence(connection, url_id, domain_id):
+    from sqlalchemy.orm import Session
+
+    from app.models.job import Job
+    from app.models.url_detail import UrlDetail
+    from app.models.url_screenshot import UrlScreenshot
+    from app.models.url_security import UrlSecurity
+    from app.plugins.headerprobe import build_result, bulk_upsert_security
+    from app.plugins.screenshot import upsert_screenshot
+    from app.worker.main import claim_next_job
+
+    # Plugin commit() calls release only their savepoints; the test's outer
+    # transaction owns these records and is rolled back on connection close.
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        parent = Job(domain_id=domain_id, pipeline_id="ci-pipeline", plugin="dummy")
+        session.add(parent)
+        session.flush()
+        child = Job(
+            domain_id=domain_id,
+            parent_job_id=parent.id,
+            pipeline_id="ci-pipeline",
+            plugin="dummy",
+        )
+        session.add(child)
+        session.add(UrlDetail(url_id=url_id, title="PostgreSQL integration", status_code=200))
+        session.commit()
+        assert claim_next_job(session).id == parent.id
+        assert claim_next_job(session) is None
+        parent.status = "finished"
+        session.commit()
+        assert claim_next_job(session).id == child.id
+
+        failed_probe = build_result(url_id, "https://example.test", None, {}, "timeout")
+        bulk_upsert_security(session, [failed_probe])
+        assert session.scalar(sa.select(UrlSecurity.security_score)) is None
+        successful_probe = build_result(url_id, "https://example.test", 200, {}, None)
+        bulk_upsert_security(session, [successful_probe])
+        assert session.scalar(sa.select(sa.func.count()).select_from(UrlSecurity)) == 1
+        assert session.scalar(sa.select(UrlSecurity.security_score)) == 5
+
+        upsert_screenshot(session, {"url_id": url_id, "filename": "first.png"})
+        upsert_screenshot(session, {"url_id": url_id, "filename": "updated.png"})
+        assert session.scalar(sa.select(sa.func.count()).select_from(UrlScreenshot)) == 1
+        assert session.scalar(sa.select(UrlScreenshot.filename)) == "updated.png"
+        assert session.scalar(sa.select(UrlDetail.title)) == "PostgreSQL integration"
 
 
 def test_empty_postgresql_database_migrates_to_head():

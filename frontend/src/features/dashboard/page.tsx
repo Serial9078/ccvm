@@ -20,10 +20,15 @@ import type { Finding } from "../findings/api";
 import FindingDrawer from "../findings/components/FindingDrawer";
 import { useDashboardSummary } from "./hooks";
 
+
 export function Dashboard() {
   const { data, isLoading, error } = useDashboardSummary();
-  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const [selectedFinding, setSelectedFinding] =
+    useState<Finding | null>(null);
+
+  const [drawerOpen, setDrawerOpen] =
+    useState(false);
 
   const openFinding = async (id: number) => {
     const finding = await getFinding(id);
@@ -41,7 +46,11 @@ export function Dashboard() {
   }
 
   if (error || !data) {
-    return <Typography color="error">Fehler beim Laden des Dashboards.</Typography>;
+    return (
+      <Typography color="error">
+        Fehler beim Laden des Dashboards.
+      </Typography>
+    );
   }
 
   const riskCards = [
@@ -96,15 +105,66 @@ export function Dashboard() {
   ];
 
   const inventoryCards = [
-    { title: "Customers", value: data.customers, color: "#38bdf8", subtitle: "Managed tenants" },
-    { title: "Domains", value: data.domains, color: "#8b5cf6", subtitle: "Root domains" },
-    { title: "Subdomains", value: data.subdomains, color: "#06b6d4", subtitle: "Discovered names" },
-    { title: "Hosts", value: data.hosts, color: "#22c55e", subtitle: "Resolved systems" },
-    { title: "Ports", value: data.ports, color: "#f59e0b", subtitle: "Open services" },
-    { title: "Technologies", value: data.technologies, color: "#ec4899", subtitle: "Detected stacks" },
-    { title: "Assets", value: data.assets, color: "#14b8a6", subtitle: "Managed assets" },
-    { title: "Findings", value: data.findings, color: "#f97316", subtitle: "Security findings" },
-    { title: "Jobs", value: data.jobs, color: "#e5e7eb", subtitle: "Pipeline executions" },
+    {
+      title: "Customers",
+      value: data.customers,
+      color: "#38bdf8",
+      subtitle: "Managed tenants",
+    },
+    {
+      title: "Domains",
+      value: data.domains,
+      color: "#8b5cf6",
+      subtitle: "Root domains",
+    },
+    {
+      title: "Subdomains",
+      value: data.subdomains,
+      color: "#06b6d4",
+      subtitle: "Discovered names",
+    },
+    {
+      title: "Hosts",
+      value: data.hosts,
+      color: "#22c55e",
+      subtitle: "Resolved systems",
+    },
+    {
+      title: "Ports",
+      value: data.ports,
+      color: "#f59e0b",
+      subtitle: "Open services",
+    },
+    {
+      title: "Technologies",
+      value: data.technologies,
+      color: "#ec4899",
+      subtitle: "Detected stacks",
+    },
+    {
+      title: "URLs",
+      value: data.urls,
+      color: "#a855f7",
+      subtitle: "Crawled endpoints",
+    },
+    {
+      title: "Assets",
+      value: data.assets,
+      color: "#14b8a6",
+      subtitle: "Managed assets",
+    },
+    {
+      title: "Findings",
+      value: data.findings,
+      color: "#f97316",
+      subtitle: "Security findings",
+    },
+    {
+      title: "Jobs",
+      value: data.jobs,
+      color: "#e5e7eb",
+      subtitle: "Pipeline executions",
+    },
   ];
 
   const findingColumns: GridColDef[] = [
@@ -117,28 +177,56 @@ export function Dashboard() {
           label={String(params.value).toUpperCase()}
           size="small"
           sx={{
-            bgcolor: severityColor(String(params.value)),
+            bgcolor: severityColor(
+              String(params.value),
+            ),
             color: "#fff",
             fontWeight: 700,
           }}
         />
       ),
     },
-    { field: "name", headerName: "Finding", flex: 2 },
-    { field: "host", headerName: "Host", flex: 1 },
-    { field: "scanner", headerName: "Scanner", width: 120 },
-    { field: "status", headerName: "Status", width: 120 },
+    {
+      field: "name",
+      headerName: "Finding",
+      flex: 2,
+    },
+    {
+      field: "host",
+      headerName: "Host",
+      flex: 1,
+    },
+    {
+      field: "scanner",
+      headerName: "Scanner",
+      width: 120,
+    },
+    {
+      field: "status",
+      headerName: "Status",
+      width: 120,
+    },
   ];
 
   const jobColumns: GridColDef[] = [
-    { field: "id", headerName: "ID", width: 80 },
-    { field: "plugin", headerName: "Plugin", width: 140 },
+    {
+      field: "id",
+      headerName: "ID",
+      width: 80,
+    },
+    {
+      field: "plugin",
+      headerName: "Plugin",
+      width: 140,
+    },
     {
       field: "status",
       headerName: "Status",
       width: 140,
       renderCell: (params) => (
-        <StatusChip status={String(params.value)} />
+        <StatusChip
+          status={String(params.value)}
+        />
       ),
     },
     {
@@ -146,11 +234,21 @@ export function Dashboard() {
       headerName: "Progress",
       flex: 1,
       renderCell: (params) => (
-        <ProgressWithLabel value={Number(params.value ?? 0)} />
+        <ProgressWithLabel
+          value={Number(params.value ?? 0)}
+        />
       ),
     },
-    { field: "message", headerName: "Message", flex: 2 },
-    { field: "worker", headerName: "Worker", width: 180 },
+    {
+      field: "message",
+      headerName: "Message",
+      flex: 2,
+    },
+    {
+      field: "worker",
+      headerName: "Worker",
+      width: 180,
+    },
   ];
 
   return (
@@ -164,14 +262,18 @@ export function Dashboard() {
         low={data.low}
       />
 
-      <Typography variant="h6" sx={{ mb: 2 }}>
+      <Typography
+        variant="h6"
+        sx={{ mb: 2 }}
+      >
         Risk Overview
       </Typography>
 
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+          gridTemplateColumns:
+            "repeat(4, minmax(0, 1fr))",
           gap: 2,
           mb: 4,
         }}
@@ -187,14 +289,18 @@ export function Dashboard() {
         ))}
       </Box>
 
-      <Typography variant="h6" sx={{ mb: 2 }}>
+      <Typography
+        variant="h6"
+        sx={{ mb: 2 }}
+      >
         Attack Surface Inventory
       </Typography>
 
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          gridTemplateColumns:
+            "repeat(3, minmax(0, 1fr))",
           gap: 2,
           mb: 4,
         }}
@@ -222,31 +328,53 @@ export function Dashboard() {
           title="Severity Distribution"
           data={data.severity_chart}
         />
+
         <DonutChartCard
           title="Scanner Distribution"
           data={data.scanner_chart}
         />
       </Box>
 
-      <Typography variant="h6" sx={{ mb: 2 }}>
+      <Typography
+        variant="h6"
+        sx={{ mb: 2 }}
+      >
         Latest Findings
       </Typography>
 
-      <Box sx={{ height: 360, width: "100%", mb: 4 }}>
+      <Box
+        sx={{
+          height: 360,
+          width: "100%",
+          mb: 4,
+        }}
+      >
         <DataGrid
           rows={data.latest_findings}
           columns={findingColumns}
           getRowId={(row) => row.id}
           hideFooter
-          onRowClick={(params) => openFinding(Number(params.id))}
+          onRowClick={(params) => {
+            void openFinding(
+              Number(params.id),
+            );
+          }}
         />
       </Box>
 
-      <Typography variant="h6" sx={{ mb: 2 }}>
+      <Typography
+        variant="h6"
+        sx={{ mb: 2 }}
+      >
         Active Jobs
       </Typography>
 
-      <Box sx={{ height: 300, width: "100%" }}>
+      <Box
+        sx={{
+          height: 300,
+          width: "100%",
+        }}
+      >
         <DataGrid
           rows={data.active_jobs}
           columns={jobColumns}
@@ -258,7 +386,9 @@ export function Dashboard() {
       <FindingDrawer
         open={drawerOpen}
         finding={selectedFinding}
-        onClose={() => setDrawerOpen(false)}
+        onClose={() => {
+          setDrawerOpen(false);
+        }}
       />
     </Box>
   );

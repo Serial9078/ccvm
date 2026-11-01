@@ -4,7 +4,7 @@ import pytest
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "app": "CCVM", "version": "3.6.0"}
+    assert response.json() == {"status": "ok", "app": "CCVM", "version": "4.4.0"}
 
 
 def test_openapi_can_be_generated(client):
@@ -105,10 +105,24 @@ def test_discovery_only_queues_jobs(client, domain):
     response = client.post("/api/v1/discover", json={"domain_id": domain["id"]})
     assert response.status_code == 200
     jobs = response.json()["jobs"]
-    assert [job["plugin"] for job in jobs] == ["subfinder", "dnsx", "httpx", "naabu", "katana"]
+    assert [job["plugin"] for job in jobs] == [
+        "subfinder",
+        "dnsx",
+        "httpx",
+        "naabu",
+        "katana",
+        "urlprobe",
+        "headerprobe",
+        "headerfindings",
+        "screenshot",
+        "nucleiurl",
+    ]
     assert all(job["status"] == "queued" and job["progress"] == 0 for job in jobs)
     assert all(job["domain_id"] == domain["id"] for job in jobs)
-    assert len(client.get("/api/v1/jobs").json()) == 5
+    assert len(client.get("/api/v1/jobs").json()) == 10
+    pipeline_id = response.json()["pipeline_id"]
+    assert all(job["pipeline_id"] == pipeline_id for job in jobs)
+    assert [job["parent_job_id"] for job in jobs] == [None] + [job["id"] for job in jobs[:-1]]
 
 
 def test_discovery_rejects_missing_domain(client):

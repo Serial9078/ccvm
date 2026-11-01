@@ -5,8 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.plugins import katana, registry
-from app.worker import main as worker
+from app.plugins import katana, legacy, registry
 
 
 @pytest.mark.parametrize(
@@ -49,7 +48,9 @@ def test_extract_katana_url(item, expected):
     ],
 )
 def test_katana_domain_boundary(url, expected):
-    assert katana.is_domain_url(url, "Example.Test") is expected
+    # Neptun's collector normalizes/rejects non-HTTP input before the domain check.
+    normalized = katana.normalize_url(url)
+    assert bool(normalized and katana.is_domain_url(normalized, "Example.Test")) is expected
 
 
 def test_katana_ignores_noise_and_external_urls_and_deduplicates(monkeypatch):
@@ -60,10 +61,11 @@ def test_katana_ignores_noise_and_external_urls_and_deduplicates(monkeypatch):
     )
     run = Mock(return_value=SimpleNamespace(stdout=output, returncode=0))
     monkeypatch.setattr(katana.subprocess, "run", run)
-    rows, failures = katana.collect_host_urls(
+    rows, failures, filtered = katana.collect_host_urls(
         SimpleNamespace(hostname="example.test"), SimpleNamespace(name="example.test")
     )
     assert failures == 0
+    assert filtered == 1
     assert rows == [
         {
             "hostname": "example.test",
@@ -86,11 +88,12 @@ def test_katana_falls_back_to_http_after_https_timeout(monkeypatch):
         ]
     )
     monkeypatch.setattr(katana.subprocess, "run", run)
-    rows, failures = katana.collect_host_urls(
+    rows, failures, filtered = katana.collect_host_urls(
         SimpleNamespace(hostname="example.test"), SimpleNamespace(name="example.test")
     )
     assert failures == 1
-    assert [row["url"] for row in rows] == ["http://example.test"]
+    assert filtered == 0
+    assert [row["url"] for row in rows] == ["http://example.test/"]
     assert [call.args[0][2] for call in run.call_args_list] == [
         "https://example.test",
         "http://example.test",
@@ -99,7 +102,8 @@ def test_katana_falls_back_to_http_after_https_timeout(monkeypatch):
 
 @pytest.mark.parametrize("name", ["subfinder", "dnsx", "httpx", "naabu", "nuclei", "dummy"])
 def test_registry_resolves_existing_worker_handlers(name):
-    assert registry.get_plugin(f" {name.upper()} ") is getattr(worker, f"run_{name}")
+    # Neptun moved these existing handlers out of the worker into legacy.py.
+    assert registry.get_plugin(f" {name.upper()} ") is getattr(legacy, f"run_{name}")
 
 
 def test_registry_keeps_hardened_katana_and_handles_unknown_plugins():
@@ -108,9 +112,14 @@ def test_registry_keeps_hardened_katana_and_handles_unknown_plugins():
     assert registry.list_plugins() == [
         "dnsx",
         "dummy",
+        "headerfindings",
+        "headerprobe",
         "httpx",
         "katana",
         "naabu",
         "nuclei",
+        "nucleiurl",
+        "screenshot",
         "subfinder",
+        "urlprobe",
     ]

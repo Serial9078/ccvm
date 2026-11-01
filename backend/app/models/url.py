@@ -1,11 +1,22 @@
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import (
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import (
+    Mapped,
+    mapped_column,
+    relationship,
+)
 
 from app.database.session import Base
 
 
 class Url(Base):
     __tablename__ = "urls"
+
     __table_args__ = (
         UniqueConstraint(
             "domain_id",
@@ -68,3 +79,24 @@ class Url(Base):
     customer = relationship("Customer")
     domain = relationship("Domain")
     host = relationship("Host")
+
+    detail = relationship(
+        "UrlDetail",
+        back_populates="url",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    security = relationship(
+        "UrlSecurity",
+        back_populates="url",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    screenshot = relationship(
+        "UrlScreenshot",
+        back_populates="url",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
