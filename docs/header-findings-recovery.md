@@ -10,6 +10,9 @@ rolling back, raising `PendingRollbackError` and leaving the job `running`.
 Migration `d91e6a2f4c80`, following `bc64c6f0e217`, widens this column to `TEXT`.
 Existing values, IDs, nullability, findings and scan relationships remain intact.
 Both HeaderFindings and Nuclei URL imports retain complete matched URLs. The
+Nuclei importer normalizes a URL-valued host (including its fallback when the
+scanner omits the host field) to its origin, keeping paths and queries in the
+full match and raw result instead of overflowing the bounded host column. The
 worker captures the plain job ID before plugin execution, allowing its existing
 failure handler to roll back and record `failed` after an unsuccessful flush.
 

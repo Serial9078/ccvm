@@ -67,6 +67,21 @@ def test_header_findings_keep_complete_long_url_and_reopen_without_duplicates(
     db.commit()
     finding = db.query(Finding).filter_by(scanner="nuclei-url").one()
     assert finding.matched_at == target
+    assert finding.host == "https://example.test"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://Example.Test:443/" + "long-path/" * 700, "https://example.test"),
+        ("https://Example.Test:8443/path?q=value", "https://example.test:8443"),
+        ("example.test:8443", "example.test:8443"),
+        ("192.0.2.1", "192.0.2.1"),
+    ],
+)
+def test_nuclei_host_contains_origin_while_complete_match_stays_separate(value, expected):
+    assert nucleiurl.extract_host({"host": value}, "https://other.test/path") == expected
+    assert nucleiurl.extract_host({}, value) == expected
 
 
 def test_worker_records_failed_flush_then_skips_children_and_processes_next_job(

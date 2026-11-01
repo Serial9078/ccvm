@@ -711,6 +711,14 @@ def assert_finding_url_persistence(connection):
             )
             == target
         )
+        assert (
+            session.scalar(
+                sa.select(Finding.host).where(
+                    Finding.scanner == "nuclei-url", Finding.asset_id == asset.id
+                )
+            )
+            == "https://existing.test"
+        )
         print("PostgreSQL HeaderFindings and Nuclei retained full >8KB finding URLs", flush=True)
 
 

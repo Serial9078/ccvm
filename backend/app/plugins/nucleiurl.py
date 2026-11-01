@@ -228,7 +228,10 @@ def extract_host(
     item: dict[str, Any],
     matched_url: str,
 ) -> str:
-    return str(item.get("host") or matched_url).strip()
+    value = str(item.get("host") or matched_url).strip()
+    # Scanner records may omit host or put the complete request URL there.
+    # Keep paths/queries in matched_at and raw_json, not the bounded host field.
+    return origin_from_url(value) or value
 
 
 def origin_from_url(
