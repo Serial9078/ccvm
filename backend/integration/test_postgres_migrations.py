@@ -397,11 +397,11 @@ def assert_operator_recovery(connection, session, parent, child):
     )
 
 
-def url_regression_value():
+def url_regression_value(chunks=70):
     # Deterministic high-entropy text; repeated characters would compress and
     # could accidentally pass through the old B-tree index.
     return "https://example.test/search?q=" + "".join(
-        hashlib.sha256(str(index).encode()).hexdigest() for index in range(160)
+        hashlib.sha256(str(index).encode()).hexdigest() for index in range(chunks)
     )
 
 
@@ -527,7 +527,13 @@ def assert_long_url_persistence(connection):
         assert set(session.scalars(sa.select(Url.url))) >= {original, changed}
         # Expression indexing must handle literal backslashes and UTF-8, rather
         # than interpreting bytea escape sequences or requiring pgcrypto.
-        for suffix in ("", r"&q=\xAB\123\\", "&q=Grüße/東京", "&q=a%2Fb"):
+        for suffix in (
+            "",
+            r"&q=\xAB\123\\",
+            "&q=Grüße/東京",
+            "&q=a%2Fb",
+            url_regression_value(160),
+        ):
             value = original + suffix
             actual = session.scalar(sa.select(url_digest(sa.literal(value))))
             assert bytes(actual) == hashlib.sha256(value.encode()).digest()
