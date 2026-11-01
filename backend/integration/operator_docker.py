@@ -49,6 +49,12 @@ def assert_paused_worker_maintenance(url):
     )
     operator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(operator)
+    spec = importlib.util.spec_from_file_location(
+        "finding_url_operator_docker", BACKEND.parent / "scripts/update-header-findings.py"
+    )
+    finding_operator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(finding_operator)
+    finding_operator.configure_maintenance(operator)
     runtime = object.__new__(operator.Runtime)
     runtime.prefix = ["docker"]
     runtime.worker_name = worker

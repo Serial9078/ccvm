@@ -132,6 +132,10 @@ def process_job(
     db: Session,
     job: Job,
 ) -> None:
+    # A failed plugin flush expires ORM attributes, including job.id. Retain
+    # the plain identity before execution so failure handling can roll back
+    # without first trying to load from the failed transaction.
+    job_id = job.id
     plugin_name = job.plugin.strip().lower()
     handler = get_plugin(plugin_name)
 
@@ -140,7 +144,7 @@ def process_job(
 
         mark_job_failed(
             db,
-            job.id,
+            job_id,
             (f"Unknown plugin '{plugin_name}'. " f"Available plugins: {available}"),
         )
         return
@@ -161,7 +165,7 @@ def process_job(
         if job.status not in TERMINAL_SUCCESS_STATES | TERMINAL_FAILURE_STATES:
             mark_job_failed(
                 db,
-                job.id,
+                job_id,
                 f"Plugin '{plugin_name}' returned without a terminal job status",
             )
 
@@ -170,7 +174,7 @@ def process_job(
 
         mark_job_failed(
             db,
-            job.id,
+            job_id,
             (f"Plugin '{plugin_name}' failed: " f"{type(exc).__name__}: {exc}"),
         )
 
