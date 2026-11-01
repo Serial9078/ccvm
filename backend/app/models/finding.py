@@ -19,7 +19,7 @@ class Finding(Base):
     severity: Mapped[str] = mapped_column(String(50), default="info")
 
     host: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    matched_at: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    matched_at: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     remediation: Mapped[str | None] = mapped_column(Text, nullable=True)

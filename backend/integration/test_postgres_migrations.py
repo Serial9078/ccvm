@@ -347,7 +347,12 @@ def assert_scan_persistence(session, url_id, domain_id):
     session.commit()
     finding = session.scalar(sa.select(Finding).where(Finding.asset_id == asset.id))
     assert FindingOut.model_validate(finding).cvss_score == "7.5"
-    assert session.scalar(sa.select(sa.func.count()).select_from(Finding)) == 1
+    assert (
+        session.scalar(
+            sa.select(sa.func.count()).select_from(Finding).where(Finding.asset_id == asset.id)
+        )
+        == 1
+    )
     finding.status = "fixed"
     session.commit()
     assert nucleiurl.import_nuclei_result(session, job, asset, result) == (False, True)
@@ -603,6 +608,229 @@ def assert_operator_readonly_snapshot(connection):
     print("Operator read-only row fingerprints and URL index verification passed", flush=True)
 
 
+def finding_operator():
+    spec = importlib.util.spec_from_file_location(
+        "finding_url_operator", BACKEND.parent / "scripts/update-header-findings.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def seed_finding_url_regression(engine):
+    """Reproduce the production VARCHAR error before widening the column."""
+    from sqlalchemy.orm import Session
+
+    from app.models.asset import Asset
+    from app.models.domain import Domain
+    from app.models.finding import Finding
+    from app.models.job import Job
+    from app.models.url import Url
+    from app.models.url_detail import UrlDetail
+    from app.models.url_security import UrlSecurity
+    from app.worker.main import process_job
+
+    with Session(engine, autoflush=False) as session:
+        domain = session.scalar(sa.select(Domain).where(Domain.name == "existing.test"))
+        asset = Asset(customer_id=domain.customer_id, target="https://existing.test/")
+        target = url_regression_value(125).replace("example.test", "existing.test")
+        url = Url(customer_id=domain.customer_id, domain_id=domain.id, url=target)
+        job = Job(domain_id=domain.id, plugin="headerfindings", status="running")
+        session.add_all([asset, url, job])
+        session.flush()
+        existing = Finding(
+            asset_id=asset.id,
+            scanner="headerprobe",
+            template_id="ccvm-missing-csp",
+            name="Existing header finding",
+            host="https://existing.test",
+            matched_at="https://existing.test/preserved",
+            status="fixed",
+        )
+        session.add_all(
+            [
+                existing,
+                UrlDetail(url_id=url.id, content_type="text/html", final_url=target),
+                UrlSecurity(url_id=url.id, checked_url=target, security_score=5),
+            ]
+        )
+        session.commit()
+        job_id = job.id
+        process_job(session, job)
+        assert session.get(Job, job_id).status == "failed", job.message
+        assert job.progress == 100 and "DataError" in job.message
+        assert "character varying(1024)" in job.message
+        assert existing.status == "fixed" and existing.matched_at.endswith("/preserved")
+        assert session.scalar(sa.select(sa.func.count()).select_from(Finding)) == 1
+        print(
+            "Reproduced PostgreSQL 22001 for finding URL; worker persisted failed status",
+            flush=True,
+        )
+
+
+def assert_finding_url_persistence(connection):
+    from sqlalchemy.orm import Session
+
+    from app.models.asset import Asset
+    from app.models.domain import Domain
+    from app.models.finding import Finding
+    from app.models.job import Job
+    from app.plugins import nucleiurl
+    from app.worker.main import process_job
+
+    with Session(
+        bind=connection, autoflush=False, join_transaction_mode="create_savepoint"
+    ) as session:
+        domain = session.scalar(sa.select(Domain).where(Domain.name == "existing.test"))
+        asset = session.scalar(sa.select(Asset).where(Asset.customer_id == domain.customer_id))
+        existing = session.scalar(sa.select(Finding).where(Finding.asset_id == asset.id))
+        existing_id = existing.id
+        job = Job(domain_id=domain.id, plugin="headerfindings", status="running")
+        session.add(job)
+        session.commit()
+        process_job(session, job)
+        assert job.status == "finished" and job.progress == 100, job.message
+        target = url_regression_value(125).replace("example.test", "existing.test")
+        assert session.get(Finding, existing_id).status == "open"
+        assert session.get(Finding, existing_id).matched_at == target
+        findings = session.scalars(sa.select(Finding).where(Finding.asset_id == asset.id)).all()
+        assert len(findings) == 6 and all(row.matched_at == target for row in findings)
+        result = {
+            "template-id": "ci-long-url",
+            "matched-at": target,
+            "info": {"name": "Long finding URL", "severity": "low"},
+        }
+        assert nucleiurl.import_nuclei_result(session, job, asset, result) == (True, False)
+        assert nucleiurl.import_nuclei_result(session, job, asset, result) == (False, False)
+        session.commit()
+        assert (
+            session.scalar(
+                sa.select(Finding.matched_at).where(
+                    Finding.scanner == "nuclei-url", Finding.asset_id == asset.id
+                )
+            )
+            == target
+        )
+        print("PostgreSQL HeaderFindings and Nuclei retained full >8KB finding URLs", flush=True)
+
+
+def assert_header_resume_transaction(connection):
+    """Run the operator's exact recovery transaction, including changed-row refusal."""
+    from sqlalchemy.orm import Session
+
+    from app.models.domain import Domain
+    from app.models.job import Job
+    from app.worker.main import claim_next_job
+
+    operator = finding_operator()
+    with connection.begin_nested() as fixture_transaction:
+        with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+            domain = session.scalar(sa.select(Domain).where(Domain.name == "existing.test"))
+            jobs = []
+            for index, plugin in enumerate(operator.STAGES):
+                job = Job(
+                    domain_id=domain.id,
+                    pipeline_id="ci-header-resume",
+                    plugin=plugin,
+                    parent_job_id=jobs[-1].id if jobs else None,
+                    status="finished" if index < 7 else "running" if index == 7 else "queued",
+                    progress=100 if index < 7 else 10 if index == 7 else 0,
+                    message="Correlating security headers for 119 HTML URLs" if index == 7 else "",
+                    worker="ccvm-worker-01" if index <= 7 else None,
+                )
+                session.add(job)
+                session.flush()
+                jobs.append(job)
+            session.commit()
+            rows = [
+                {column.name: getattr(job, column.name) for column in Job.__table__.columns}
+                for job in jobs
+            ]
+            selection = (jobs[7].id, jobs[7].uuid)
+            state = {"jobs": rows, "active": rows[7:]}
+            assert operator.selected_pipeline(state, selection) == rows
+
+            class ExistingTransactionEngine:
+                @contextlib.contextmanager
+                def begin(self):
+                    with connection.begin_nested():
+                        yield connection
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr("app.database.session.engine", ExistingTransactionEngine())
+                changed = json.loads(json.dumps(rows))
+                changed[-1]["progress"] = 1
+                with pytest.raises(RuntimeError, match="Pipeline changed since backup"):
+                    exec(
+                        compile(
+                            operator.requeue_source(changed, selection),
+                            "<header-resume-reject-changed-snapshot>",
+                            "exec",
+                        ),
+                        {},
+                    )
+                session.expire_all()
+                assert jobs[7].status == "running" and jobs[7].progress == 10
+                exec(
+                    compile(
+                        operator.requeue_source(rows, selection),
+                        "<header-resume-transaction>",
+                        "exec",
+                    ),
+                    {},
+                )
+            session.expire_all()
+            assert jobs[7].status == "queued" and jobs[7].progress == 0
+            assert jobs[7].worker is None and jobs[7].uuid == selection[1]
+            for before, job in zip(rows, jobs, strict=True):
+                for field in set(before) - (
+                    {"status", "progress", "message", "worker"} if job.id == selection[0] else set()
+                ):
+                    assert getattr(job, field) == before[field]
+            assert claim_next_job(session).id == selection[0]
+        fixture_transaction.rollback()
+    print(
+        "PostgreSQL selected HeaderFindings retry preserved UUID, dependencies and other jobs",
+        flush=True,
+    )
+
+
+def assert_finding_downgrade_refuses_truncation(engine, url):
+    with engine.begin() as connection:
+        existing = connection.execute(
+            sa.text(
+                "SELECT id, matched_at FROM findings WHERE scanner='headerprobe' "
+                "ORDER BY id LIMIT 1"
+            )
+        ).one()
+        connection.execute(
+            sa.text("UPDATE findings SET matched_at=:value WHERE id=:id"),
+            {"value": url_regression_value(125), "id": existing.id},
+        )
+        before = all_data_rows(connection)
+    output = alembic_command(
+        url,
+        "downgrade",
+        "bc64c6f0e217",
+        log_name="downgrade-refuses-long-finding-url",
+        expect_success=False,
+    )
+    assert "finding URLs exceed 1024 characters" in output
+    with engine.begin() as connection:
+        assert all_data_rows(connection) == before
+        assert_schema_matches_models(connection)
+        assert MigrationContext.configure(connection).get_current_heads() == (
+            finding_operator().REVISION,
+        )
+        # Restore only this disposable test value so the older URL-index
+        # downgrade refusal can be exercised independently in the same CI DB.
+        connection.execute(
+            sa.text("UPDATE findings SET matched_at=:value WHERE id=:id"),
+            {"value": existing.matched_at, "id": existing.id},
+        )
+    print("PostgreSQL downgrade refused URL truncation and preserved all rows", flush=True)
+
+
 def assert_downgrade_preserves_long_urls(engine, url):
     with engine.begin() as connection:
         domain = connection.execute(
@@ -625,7 +853,9 @@ def assert_downgrade_preserves_long_urls(engine, url):
     )
     assert "ProgramLimitExceeded" in output
     with engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_heads() == ("bc64c6f0e217",)
+        assert MigrationContext.configure(connection).get_current_heads() == (
+            finding_operator().REVISION,
+        )
         assert all_data_rows(connection) == before
         assert_schema_matches_models(connection)
     print("PostgreSQL downgrade refusal preserved schema, long URLs and dependent rows", flush=True)
@@ -670,6 +900,13 @@ def test_empty_postgresql_database_migrates_to_head():
         assert len(expected_heads) == 1, f"Expected one revision head: {expected_heads!r}"
         alembic_command(url, "upgrade", "7f91c32a60d1", log_name="upgrade-from-empty")
         existing_rows = seed_url_upgrade_regression(engine)
+        alembic_command(url, "upgrade", "bc64c6f0e217", log_name="upgrade-url-index")
+        with engine.connect() as connection:
+            assert all_data_rows(connection) == existing_rows
+            assert_operator_readonly_snapshot(connection)
+        seed_finding_url_regression(engine)
+        with engine.connect() as connection:
+            existing_rows = all_data_rows(connection)
         alembic_command(url, "upgrade", "head", log_name="upgrade-existing-urls")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
@@ -678,7 +915,8 @@ def test_empty_postgresql_database_migrates_to_head():
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
-            assert_operator_readonly_snapshot(connection)
+            assert_finding_url_persistence(connection)
+            assert_header_resume_transaction(connection)
             assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
@@ -689,6 +927,7 @@ def test_empty_postgresql_database_migrates_to_head():
         with engine.connect() as connection:
             assert set(MigrationContext.configure(connection).get_current_heads()) == expected_heads
             assert_schema_matches_models(connection)
+        assert_finding_downgrade_refuses_truncation(engine, url)
         assert_downgrade_preserves_long_urls(engine, url)
     finally:
         try:
