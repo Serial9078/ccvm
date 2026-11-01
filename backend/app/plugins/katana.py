@@ -6,6 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.database.url_identity import url_digest
 from app.models.domain import Domain
 from app.models.host import Host
 from app.models.job import Job
@@ -478,8 +479,8 @@ def bulk_insert_urls(
         .values(rows)
         .on_conflict_do_nothing(
             index_elements=[
-                "domain_id",
-                "url",
+                Url.domain_id,
+                url_digest(Url.url),
             ],
         )
     )

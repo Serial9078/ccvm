@@ -1,3 +1,4 @@
+import hashlib
 import os
 import socket
 import subprocess
@@ -38,6 +39,9 @@ def client():
     @event.listens_for(engine, "connect")
     def enable_foreign_keys(connection, connection_record):
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.create_function(
+            "sha256", 1, lambda value: hashlib.sha256(value).digest(), deterministic=True
+        )
 
     try:
         Base.metadata.create_all(engine)
