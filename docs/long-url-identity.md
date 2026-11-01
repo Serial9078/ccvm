@@ -43,22 +43,30 @@ allows a different server address. Actual mismatches report the compared
 non-secret fields. It refuses active or queued jobs, unexpected edits, untracked
 source collisions and changes outside the reviewed backend correction.
 
-On apply it closes API submissions, checks the queue again, freezes the verified
-idle worker main process with SIGSTOP, and keeps its container available for
-maintenance subprocesses. It saves the private configurations, database row
-fingerprints and a custom-format pg_dump in a private directory under `.git`.
-The dump's table of contents must be readable before source installation begins.
+Updater 1.0.2 first verifies a one-shot maintenance interpreter using the existing
+worker image ID, its read-only source mounts, its PostgreSQL network and a private
+env-file containing only the database connection settings. The environment file
+has mode 0600 inside the private backup directory. No image is pulled or rebuilt.
+
+On apply it closes API submissions, checks the queue again, and pauses the idle
+worker using Docker's cgroup freezer (`docker pause`). It uses neither SIGSTOP
+nor SIGCONT. Database snapshots and Alembic run in short-lived maintenance
+containers because Docker cannot execute commands inside a paused container.
+It saves the private configurations, database row fingerprints and a custom-format
+pg_dump under `.git`. The dump's table of contents must be readable before source
+installation begins.
 
 Then it fast-forwards Git, migrates using the worker's existing Python environment
 and connection configuration, and compares every existing table's count and row
-fingerprint. It resumes and restarts the worker, starts the API and checks both
+fingerprint. It unpauses and, after code installation, restarts the worker, starts the API and checks both
 API routes, nginx forwarding and one ordinary dummy job. It does not run a real
 scan, rebuild the frontend, recreate containers or modify Compose files.
 
 A failed uncommitted migration restores the old application code. A committed
 migration keeps the matching new code; it is never automatically downgraded.
-If the code/schema combination cannot be confirmed, both API and worker remain
-stopped with the backup location printed for inspection. No automatic database
+If the code/schema combination cannot be confirmed, the API stays stopped and
+the worker stays paused with the backup location printed for inspection. If
+Docker cannot resume or reload the worker, the API also remains closed. No automatic database
 restore or row deletion is performed.
 
 After the command prints `VERIFIED`, start one new Discover run for the same
@@ -76,3 +84,7 @@ limit and 8 KiB, deduplication, distinct suffixes, cross-domain identity, Unicod
 literal backslashes, direct inserts, ORM updates and Katana job completion.
 Operator tests cover backup ordering, active-job races, configuration preservation,
 failed migrations, coherent rollback, unknown schemas and repeat execution.
+
+CI also uses a real Docker worker and the isolated PostgreSQL service to pause
+the worker, perform a migration round trip through the same-image maintenance
+interpreter, compare every table fingerprint, and unpause the worker.

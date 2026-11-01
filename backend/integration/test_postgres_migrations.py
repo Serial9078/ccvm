@@ -682,6 +682,9 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
+        from integration.operator_docker import assert_paused_worker_maintenance
+
+        assert_paused_worker_maintenance(url)
         alembic_command(url, "upgrade", "head", log_name="upgrade-at-head")
         with engine.connect() as connection:
             assert set(MigrationContext.configure(connection).get_current_heads()) == expected_heads

@@ -49,11 +49,18 @@ class FakeRuntime:
 
     def docker(self, *args):
         self.actions.append(args)
+        if args[0] == "restart" and self.fail == "restart":
+            raise RuntimeError("runc restart denied")
         if args[0] == "stop" and args[-1] == "ccvm-backend" and self.new_queue:
             self.snapshot["active"] = [{"id": 200, "plugin": "katana", "status": "queued"}]
 
     def state(self):
         return copy.deepcopy(self.snapshot)
+
+    def prepare_maintenance(self, backup):
+        self.actions.append(("prepare_maintenance",))
+        if self.fail == "prepare":
+            raise RuntimeError("maintenance interpreter failed")
 
     def freeze(self):
         self.actions.append(("freeze",))
@@ -151,6 +158,20 @@ class UpdateUrlIndexTests(unittest.TestCase):
         )
         self.assertEqual(before["tables"], after["tables"])
 
+    def test_maintenance_interpreter_failure_leaves_services_and_source_untouched(self):
+        self.runtime.fail = "prepare"
+        with self.assertRaisesRegex(RuntimeError, "maintenance interpreter failed"):
+            self.apply()
+        self.assertEqual(self.runtime.actions, [("prepare_maintenance",)])
+        self.assertEqual(self.run_git("rev-parse", "HEAD"), self.base)
+
+    def test_failed_pause_never_restarts_an_unchanged_worker(self):
+        self.runtime.fail = "freeze"
+        with self.assertRaisesRegex(RuntimeError, "freeze response lost"):
+            self.apply()
+        self.assertNotIn(("restart", "--time", "20", "ccvm-worker"), self.runtime.actions)
+        self.assertEqual(self.runtime.actions[-1], ("start", "ccvm-backend"))
+
     def test_active_jobs_stop_before_backup_or_services(self):
         self.runtime.snapshot["active"] = [{"id": 109, "status": "running"}]
         with self.assertRaisesRegex(RuntimeError, "Active jobs preserved"):
@@ -208,7 +229,16 @@ class UpdateUrlIndexTests(unittest.TestCase):
             self.apply()
         self.assertNotIn(("resume",), self.runtime.actions)
         self.assertNotIn(("start", "ccvm-backend"), self.runtime.actions)
-        self.assertEqual(self.runtime.actions[-1], ("stop", "--time", "5", "ccvm-worker"))
+        self.assertNotIn(("stop", "--time", "5", "ccvm-worker"), self.runtime.actions)
+
+    def test_worker_reload_failure_keeps_api_closed_and_worker_paused(self):
+        self.runtime.fail = "restart"
+        with self.assertRaisesRegex(RuntimeError, "Worker resume/reload failed"):
+            self.apply()
+        self.assertEqual(self.run_git("rev-parse", "HEAD"), self.target)
+        self.assertEqual(self.runtime.snapshot["revision"], operator.REVISION)
+        self.assertNotIn(("start", "ccvm-backend"), self.runtime.actions)
+        self.assertEqual(self.runtime.actions[-1], ("freeze",))
 
     def test_repeat_apply_verifies_without_repeating_migration_or_backup(self):
         self.apply()
@@ -352,6 +382,123 @@ class RuntimePreflightTests(unittest.TestCase):
                 runtime, root = self.runtime(**{field: value})
                 with self.assertRaisesRegex(RuntimeError, "backup target"):
                     runtime.preflight(root)
+
+
+class RuntimeMaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="ccvm-maintenance-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.backup = Path(self.temporary.name)
+        self.runtime = object.__new__(operator.Runtime)
+        self.runtime.worker_name = "ccvm-worker"
+        self.runtime.worker_paused = False
+        self.runtime.maintenance_args = None
+        self.runtime.worker_info = {
+            "Image": "sha256:" + "a" * 64,
+            "Config": {
+                "Env": ["DB_HOST=postgres", "DB_PASS=test=secret", "UNRELATED_SECRET=excluded"]
+            },
+            "NetworkSettings": {"Networks": {"ccvm_test": {}}},
+        }
+        self.runtime.postgres_info = {"NetworkSettings": {"Networks": {"ccvm_test": {}}}}
+        self.snapshot = state(operator.OLD_REVISION)
+        self.snapshot["identity"] = {
+            "database": "ccvm",
+            "address": "172.18.0.6/32",
+            "port": 5432,
+            "version": 160012,
+        }
+        self.paused = False
+        self.calls = []
+        self.helper_mismatch = False
+        self.pause_response_lost = False
+        self.runtime.docker = self.docker
+
+    def docker(self, *args):
+        self.calls.append(args)
+        if args[0] == "kill":
+            raise AssertionError("The runc STOP/CONT signal path must never be used")
+        if args[0] == "pause":
+            self.paused = True
+            if self.pause_response_lost:
+                raise RuntimeError("pause response lost")
+            return "ccvm-worker"
+        if args[0] == "unpause":
+            self.paused = False
+            return "ccvm-worker"
+        if args[0] == "inspect":
+            return json.dumps({"Running": True, "Paused": self.paused})
+        if args[0] == "exec":
+            if self.paused:
+                raise AssertionError("docker exec is unavailable while the worker is paused")
+            return json.dumps(self.snapshot)
+        if args[0] == "run":
+            result = copy.deepcopy(self.snapshot)
+            if self.helper_mismatch:
+                result["identity"]["database"] = "wrong-database"
+            if "command.upgrade" in args[-1]:
+                return "migration completed"
+            return json.dumps(result)
+        raise AssertionError(args)
+
+    def test_helper_uses_exact_existing_image_readonly_mount_and_private_database_env(self):
+        self.runtime.prepare_maintenance(self.backup)
+        args = self.runtime.maintenance_args
+        self.assertIn("--pull=never", args)
+        self.assertIn("ccvm-worker:ro", args)
+        self.assertIn("sha256:" + "a" * 64, args)
+        self.assertNotIn("test=secret", str(args))
+        environment = self.backup / "maintenance.env"
+        self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+        self.assertIn("DB_PASS=test=secret", environment.read_text())
+        self.assertNotIn("UNRELATED_SECRET", environment.read_text())
+        self.assertFalse(self.paused)
+
+    def test_pause_state_and_migration_use_helpers_without_exec_into_paused_worker(self):
+        self.runtime.prepare_maintenance(self.backup)
+        self.calls.clear()
+        self.runtime.freeze()
+        self.assertTrue(self.paused)
+        self.assertEqual(self.runtime.state()["revision"], operator.OLD_REVISION)
+        self.assertEqual(self.runtime.migrate(), "migration completed")
+        self.assertFalse(any(args[0] in {"kill", "exec"} for args in self.calls))
+        self.runtime.resume()
+        self.assertFalse(self.paused)
+        self.assertFalse(self.runtime.worker_paused)
+
+    def test_pause_lost_response_is_recovered_by_inspecting_and_unpausing(self):
+        self.runtime.prepare_maintenance(self.backup)
+        self.pause_response_lost = True
+        with self.assertRaisesRegex(RuntimeError, "pause response lost"):
+            self.runtime.freeze()
+        self.assertTrue(self.paused)
+        self.runtime.resume()
+        self.assertFalse(self.paused)
+        self.assertFalse(any(args[0] == "kill" for args in self.calls))
+
+    def test_helper_target_mismatch_is_rejected_before_pausing_services(self):
+        self.helper_mismatch = True
+        with self.assertRaisesRegex(RuntimeError, "verified database"):
+            self.runtime.prepare_maintenance(self.backup)
+        self.assertFalse(self.paused)
+        self.assertFalse(any(args[0] == "pause" for args in self.calls))
+
+    def test_mutable_image_tags_and_unsupported_networks_are_rejected(self):
+        self.runtime.worker_info["Image"] = "worker:latest"
+        with self.assertRaisesRegex(RuntimeError, "immutable image ID"):
+            self.runtime.prepare_maintenance(self.backup)
+        self.runtime.worker_info["Image"] = "sha256:" + "a" * 64
+        self.runtime.postgres_info["NetworkSettings"]["Networks"] = {"unrelated": {}}
+        with self.assertRaisesRegex(RuntimeError, "shared"):
+            self.runtime.prepare_maintenance(self.backup)
+        self.assertFalse(self.calls)
+
+    def test_multiline_environment_values_are_rejected_before_side_effects(self):
+        self.runtime.worker_info["Config"]["Env"].append("DB_PASS=multi\nline")
+        with self.assertRaisesRegex(RuntimeError, "private env-file"):
+            self.runtime.prepare_maintenance(self.backup)
+        self.assertFalse((self.backup / "maintenance.env").exists())
+        self.assertFalse(self.calls)
 
 
 if __name__ == "__main__":
