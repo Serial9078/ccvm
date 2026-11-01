@@ -1,3 +1,5 @@
+import { apiResourceUrl } from "../../shared/api/config.ts";
+
 import type {
   UrlFinding,
   UrlInventoryRow,
@@ -144,18 +146,6 @@ export function screenshotUrl(
     return null;
   }
 
-  if (path.startsWith("/api/")) {
-    return path;
-  }
-
-  if (
-    path.startsWith(
-      "/screenshots/",
-    )
-  ) {
-    return `/api/v1${path}`;
-  }
-
   const parts = path
     .split("/")
     .filter(Boolean);
@@ -165,10 +155,7 @@ export function screenshotUrl(
       ? parts[parts.length - 1]
       : path;
 
-  return (
-    "/api/v1/screenshots/"
-    + encodeURIComponent(filename)
-  );
+  return apiResourceUrl(`screenshots/${encodeURIComponent(filename)}`);
 }
 
 

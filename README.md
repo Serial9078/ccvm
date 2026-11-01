@@ -17,3 +17,6 @@ See ./docs
 
 For backend development checks, tests, and the CI repair report, see
 [Backend quality checks](docs/backend-quality.md).
+
+For the current branch/component assessment, reproduced scan failures, corrections
+and verification boundaries, see [CCVM development review](docs/ccvm-development-review.md).

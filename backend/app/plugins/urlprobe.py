@@ -1,5 +1,8 @@
 import json
+import math
+import re
 import subprocess
+from urllib.parse import urlsplit
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -66,6 +69,7 @@ def parse_integer(
     except (
         TypeError,
         ValueError,
+        OverflowError,
     ):
         return None
 
@@ -77,12 +81,27 @@ def parse_float(
         if value is None:
             return None
 
-        if isinstance(value, str):
-            normalized = value.replace("s", "").strip()
+        if isinstance(value, (int, float)):
+            number = float(value)
+            return number if math.isfinite(number) and number >= 0 else None
 
-            return float(normalized)
-
-        return float(value)
+        # httpx uses Go duration strings, e.g. 120ms or 150µs, not only seconds.
+        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|μs|ms|s|m|h)?", str(value).strip())
+        if not match:
+            return None
+        multiplier = {
+            None: 1,
+            "ns": 1e-9,
+            "us": 1e-6,
+            "µs": 1e-6,
+            "μs": 1e-6,
+            "ms": 1e-3,
+            "s": 1,
+            "m": 60,
+            "h": 3600,
+        }[match[2]]
+        result = float(match[1]) * multiplier
+        return result if math.isfinite(result) else None
 
     except (
         TypeError,
@@ -105,11 +124,19 @@ def extract_ip(
 def extract_final_url(
     item: dict,
 ) -> str | None:
-    value = (
-        item.get("final-url") or item.get("final_url") or item.get("location") or item.get("url")
-    )
-
-    return str(value) if value else None
+    # Location describes a next hop, which may be relative or never visited.
+    # Only retain an absolute URL actually reported as probed/effective by httpx.
+    for key in ("final-url", "final_url", "url", "input"):
+        value = item.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme in {"http", "https"} and parsed.hostname:
+                return value
+        except ValueError:
+            continue
+    return None
 
 
 def run_urlprobe(
@@ -217,6 +244,9 @@ def run_urlprobe(
         except json.JSONDecodeError:
             continue
 
+        if not isinstance(item, dict):
+            continue
+
         input_url = str(item.get("input") or item.get("url") or "").strip()
 
         url_record = url_by_value.get(input_url)
@@ -226,7 +256,7 @@ def run_urlprobe(
 
         status_code = parse_integer(item.get("status-code") or item.get("status_code"))
 
-        content_length = parse_integer(item.get("content-length") or item.get("content_length"))
+        content_length = parse_integer(item.get("content-length", item.get("content_length")))
 
         content_type = item.get("content-type") or item.get("content_type")
 
@@ -254,6 +284,21 @@ def run_urlprobe(
         url_record.content_type = str(content_type) if content_type else None
 
         parsed_results += 1
+
+    if result.returncode == 0:
+        # A completed probe that no longer reports a URL must not leave its old
+        # successful response eligible for the downstream active scanner.
+        unobserved_ids = []
+        for url_record in urls:
+            if url_record.id not in rows_by_url_id:
+                unobserved_ids.append(url_record.id)
+                url_record.status_code = None
+        if unobserved_ids:
+            # Retain previous titles, response metadata and URL records. Only
+            # invalidate reachability after a completed observation pass.
+            db.query(UrlDetail).filter(UrlDetail.url_id.in_(unobserved_ids)).update(
+                {UrlDetail.status_code: None}, synchronize_session=False
+            )
 
     if rows_by_url_id:
         statement = (

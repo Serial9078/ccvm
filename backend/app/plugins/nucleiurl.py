@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 import tempfile
 import time
@@ -19,6 +20,7 @@ from app.models.url_detail import UrlDetail
 NUCLEI_TIMEOUT_SECONDS = 1200
 MAX_URLS_PER_DOMAIN = 40
 MAX_URLS_PER_ORIGIN = 12
+PROGRESS_POLL_SECONDS = 5
 
 NUCLEI_SEVERITIES = "info,low,medium,high,critical"
 
@@ -466,12 +468,14 @@ def select_scan_urls(
 
 def existing_finding(
     db: Session,
+    asset_id: int,
     template_id: str,
     matched_at: str,
 ) -> Finding | None:
     return (
         db.query(Finding)
         .filter(
+            Finding.asset_id == asset_id,
             Finding.scanner == "nuclei-url",
             Finding.template_id == template_id,
             Finding.matched_at == matched_at,
@@ -511,6 +515,7 @@ def import_nuclei_result(
 
     existing = existing_finding(
         db,
+        asset.id,
         template_id,
         matched_at,
     )
@@ -561,7 +566,46 @@ def import_nuclei_result(
         )
     )
 
+    # SessionLocal disables autoflush. Make this insert visible to the next
+    # result's deduplication query without committing the whole import batch.
+    db.flush()
+
     return True, False
+
+
+def read_scan_stats(path: Path) -> dict | None:
+    """Read a bounded log tail; findings and incomplete/noisy lines are not stats."""
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        handle.seek(max(0, handle.tell() - 16384))
+        lines = handle.read().decode("utf-8", errors="replace").splitlines()
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+            if not isinstance(item, dict) or not {"percent", "requests", "total"} <= item.keys():
+                continue
+            percent = float(item["percent"])
+            if not math.isfinite(percent) or not 0 <= percent <= 100:
+                continue
+            counts = {key: int(item.get(key, 0)) for key in ("requests", "total", "matched")}
+            if any(value < 0 for value in counts.values()):
+                continue
+            return {"percent": percent, **counts}
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return None
+
+
+def valid_result(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    info = item.get("info", {})
+    if not isinstance(info, dict):
+        return False
+    classification = info.get("classification", {})
+    return isinstance(classification, dict) and bool(extract_matched_url(item))
 
 
 def run_nucleiurl(
@@ -633,7 +677,7 @@ def run_nucleiurl(
             "-jsonl",
             "-o",
             str(result_file),
-            "-silent",
+            "-no-color",
             "-severity",
             NUCLEI_SEVERITIES,
             "-tags",
@@ -656,8 +700,9 @@ def run_nucleiurl(
             "-disable-redirects",
             "-disable-update-check",
             "-stats",
+            "-stats-json",
             "-stats-interval",
-            "30",
+            str(PROGRESS_POLL_SECONDS),
         ]
 
         process: subprocess.Popen | None = None
@@ -702,33 +747,7 @@ def run_nucleiurl(
 
                         break
 
-                    result_count = 0
-
-                    if result_file.exists():
-                        try:
-                            with result_file.open(
-                                "r",
-                                encoding="utf-8",
-                                errors="replace",
-                            ) as result_handle:
-                                result_count = sum(
-                                    1 for result_line in result_handle if result_line.strip()
-                                )
-                        except OSError:
-                            result_count = 0
-
-                    progress = min(
-                        75,
-                        10
-                        + int(
-                            elapsed_seconds
-                            / max(
-                                NUCLEI_TIMEOUT_SECONDS,
-                                1,
-                            )
-                            * 65
-                        ),
-                    )
+                    stats = read_scan_stats(stderr_file) or read_scan_stats(stdout_file)
 
                     current_job = db.get(
                         Job,
@@ -736,16 +755,26 @@ def run_nucleiurl(
                     )
 
                     if current_job:
-                        current_job.progress = progress
+                        if stats:
+                            current_job.progress = max(
+                                current_job.progress,
+                                10 + int(stats["percent"] * 0.65),
+                            )
+                        statistics = (
+                            f"Requests: {stats['requests']}/{stats['total']}. "
+                            f"Results: {stats['matched']}"
+                            if stats
+                            else "Waiting for scanner statistics"
+                        )
                         current_job.message = (
                             "Nuclei URL scan running. "
                             f"Targets: {len(targets)}. "
                             f"Elapsed: {elapsed_seconds}s. "
-                            f"Results: {result_count}"
+                            f"{statistics}"
                         )
                         db.commit()
 
-                    time.sleep(15)
+                    time.sleep(PROGRESS_POLL_SECONDS)
 
             stdout = (
                 stdout_file.read_text(
@@ -822,6 +851,10 @@ def run_nucleiurl(
                         malformed += 1
                         continue
 
+                    if not valid_result(item):
+                        malformed += 1
+                        continue
+
                     (
                         was_created,
                         was_reopened,
@@ -846,34 +879,32 @@ def run_nucleiurl(
 
         db.commit()
 
-        if result.returncode not in {
-            0,
-            124,
-        } and (not result_file.exists() or result_file.stat().st_size == 0):
+        summary = (
+            f"Targets: {len(targets)}. Created: {created}. Updated: {updated}. "
+            f"Reopened: {reopened}. Malformed results: {malformed}"
+        )
+        if result.returncode != 0 or malformed:
+            reason = (
+                f"hard timeout after {NUCLEI_TIMEOUT_SECONDS}s"
+                if hard_timeout_reached
+                else (
+                    f"exit code {result.returncode}"
+                    if result.returncode != 0
+                    else "malformed scanner output"
+                )
+            )
             fail_job(
                 db,
                 job,
                 (
-                    "Nuclei URL scan failed. "
-                    f"Exit code: "
-                    f"{result.returncode}. "
-                    f"Error: "
-                    f"{result.stderr[-800:]}"
+                    f"Nuclei URL scan incomplete: {reason}. "
+                    f"Partial findings retained. {summary}. Error: {result.stderr[-300:]}"
                 ),
             )
             return
 
-        timed_out = result.returncode == 124
-
     finish_job(
         db,
         job,
-        (
-            "Nuclei URL scan finished" + (" with hard timeout" if timed_out else "") + ". "
-            f"Targets: {len(targets)}. "
-            f"Created: {created}. "
-            f"Updated: {updated}. "
-            f"Reopened: {reopened}. "
-            f"Malformed results: {malformed}"
-        ),
+        f"Nuclei URL scan finished. {summary}",
     )

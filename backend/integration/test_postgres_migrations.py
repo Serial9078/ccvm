@@ -236,6 +236,86 @@ def assert_neptun_persistence(connection, url_id, domain_id):
         assert session.scalar(sa.select(UrlScreenshot.filename)) == "updated.png"
         assert session.scalar(sa.select(UrlDetail.title)) == "PostgreSQL integration"
         assert_operator_recovery(connection, session, parent, child)
+        assert_scan_persistence(session, url_id, domain_id)
+
+
+def assert_scan_persistence(session, url_id, domain_id):
+    """Exercise URLProbe upserts and Nuclei imports with native PostgreSQL types."""
+    from app.models.asset import Asset
+    from app.models.domain import Domain
+    from app.models.finding import Finding
+    from app.models.job import Job
+    from app.models.url import Url
+    from app.models.url_detail import UrlDetail
+    from app.plugins import nucleiurl, urlprobe
+    from app.schemas.finding import FindingOut
+
+    session.autoflush = False
+    domain = session.get(Domain, domain_id)
+    original = session.get(Url, url_id)
+    stale = Url(
+        customer_id=domain.customer_id,
+        domain_id=domain_id,
+        url="https://example.test/stale",
+        status_code=200,
+    )
+    asset = Asset(customer_id=domain.customer_id, target=original.url)
+    job = Job(domain_id=domain_id, plugin="urlprobe", status="running")
+    session.add_all([stale, asset, job])
+    session.flush()
+    session.add(UrlDetail(url_id=stale.id, status_code=200))
+    session.commit()
+    output = json.dumps(
+        {
+            "input": original.url,
+            "url": original.url,
+            "location": "/unvisited",
+            "status_code": 204,
+            "content-length": 0,
+            "time": "120ms",
+        }
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            urlprobe.subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, output, ""),
+        )
+        urlprobe.run_urlprobe(session, job)
+    session.expire_all()
+    assert job.status == "finished", job.message
+    detail = session.scalar(sa.select(UrlDetail).where(UrlDetail.url_id == original.id))
+    assert detail.final_url == original.url and detail.content_length == 0
+    assert detail.response_time_seconds == pytest.approx(0.12)
+    assert (
+        session.scalar(sa.select(UrlDetail.status_code).where(UrlDetail.url_id == stale.id)) is None
+    )
+    assert stale.status_code is None
+    assert nucleiurl.select_scan_urls(session, domain) == [original.url]
+    result = {
+        "template-id": "postgres-ci-template",
+        "matched-at": original.url,
+        "info": {
+            "name": "PostgreSQL synthetic finding",
+            "severity": "low",
+            "classification": {"cvss-score": 7.5},
+        },
+    }
+    assert nucleiurl.import_nuclei_result(session, job, asset, result) == (True, False)
+    assert nucleiurl.import_nuclei_result(session, job, asset, result) == (False, False)
+    session.commit()
+    finding = session.scalar(sa.select(Finding).where(Finding.asset_id == asset.id))
+    assert FindingOut.model_validate(finding).cvss_score == "7.5"
+    assert session.scalar(sa.select(sa.func.count()).select_from(Finding)) == 1
+    finding.status = "fixed"
+    session.commit()
+    assert nucleiurl.import_nuclei_result(session, job, asset, result) == (False, True)
+    session.commit()
+    assert finding.status == "open"
+    print(
+        "PostgreSQL scans: URLProbe fresh/stale upserts and idempotent Nuclei imports passed",
+        flush=True,
+    )
 
 
 def assert_operator_recovery(connection, session, parent, child):
