@@ -6,9 +6,11 @@ Base commit: `6173b43ef02177ae706e68c2106a7a6547d88841`.
 
 Current coverage includes the 76 backend cases documented in
 [Neptun reconciliation](neptun-integration.md), sixteen Nuclei scope cases,
-ten Git safeguard cases, and the separate PostgreSQL test covering thirteen
+33 worker-maintenance cases (125 backend cases total), ten Git safeguard cases,
+and the separate PostgreSQL test covering thirteen
 migrations and fifteen application tables. The original repair evidence below
-is retained.
+is retained. [Operator recovery](worker-recovery.md) is also exercised against that fresh CI service;
+the maintenance command is never invoked against an existing installation by CI.
 
 ## Nuclei URL target boundary
 

@@ -1,5 +1,7 @@
 """Opt-in integration check for the disposable GitHub Actions PostgreSQL service."""
 
+import importlib.util
+import io
 import json
 import os
 import re
@@ -233,6 +235,51 @@ def assert_neptun_persistence(connection, url_id, domain_id):
         assert session.scalar(sa.select(sa.func.count()).select_from(UrlScreenshot)) == 1
         assert session.scalar(sa.select(UrlScreenshot.filename)) == "updated.png"
         assert session.scalar(sa.select(UrlDetail.title)) == "PostgreSQL integration"
+        assert_operator_recovery(connection, session, parent, child)
+
+
+def assert_operator_recovery(connection, session, parent, child):
+    """The exact maintenance payload runs only on the disposable CI database."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models.job import Job
+
+    spec = importlib.util.spec_from_file_location(
+        "worker_recovery", BACKEND.parent / "scripts/recover-worker.py"
+    )
+    recovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recovery)
+    snapshots = [
+        {column.name: getattr(job, column.name) for column in Job.__table__.columns}
+        for job in (parent, child)
+    ]
+    session.commit()
+    factory = sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
+    code = compile(recovery.RECOVER_IN_BACKEND, "<reviewed-worker-recovery>", "exec")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("app.database.session.SessionLocal", factory)
+        changed = json.loads(json.dumps(snapshots))
+        changed[1]["progress"] += 1
+        patch.setattr(
+            sys, "stdin", io.StringIO(json.dumps({"worker_stopped": True, "jobs": changed}))
+        )
+        with pytest.raises(RuntimeError, match="Job changed since backup"):
+            exec(code, {})
+        assert connection.scalar(sa.select(Job.status).where(Job.id == child.id)) == "running"
+
+        patch.setattr(
+            sys, "stdin", io.StringIO(json.dumps({"worker_stopped": True, "jobs": snapshots}))
+        )
+        exec(code, {})
+    session.expire_all()
+    assert parent.status == "finished"
+    assert child.status == "failed" and child.progress == 100
+    assert child.pipeline_id == "ci-pipeline" and child.parent_job_id == parent.id
+    print(
+        "PostgreSQL worker recovery: changed-snapshot rollback and selected-job update passed",
+        flush=True,
+    )
 
 
 def test_empty_postgresql_database_migrates_to_head():
