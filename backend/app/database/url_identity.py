@@ -18,7 +18,7 @@ def postgres_url_digest(element, compiler, **kwargs):
     # backslashes before the immutable text -> bytea cast to preserve them
     # literally, including sequences such as \xAB and \123. All functions
     # here are PostgreSQL core IMMUTABLE functions; no extension is needed.
-    return f"sha256((replace({value}, chr(92), (chr(92) || chr(92))))::bytea)"
+    return f"sha256(replace({value}, chr(92), chr(92) || chr(92))::bytea)"
 
 
 @compiles(url_digest, "sqlite")

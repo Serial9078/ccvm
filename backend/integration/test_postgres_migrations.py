@@ -603,6 +603,34 @@ def assert_operator_readonly_snapshot(connection):
     print("Operator read-only row fingerprints and URL index verification passed", flush=True)
 
 
+def assert_downgrade_preserves_long_urls(engine, url):
+    with engine.begin() as connection:
+        domain = connection.execute(
+            sa.text("SELECT id, customer_id FROM domains WHERE name='existing.test'")
+        ).one()
+        connection.execute(
+            sa.text(
+                "INSERT INTO urls (customer_id, domain_id, url, method, source) "
+                "VALUES (:customer, :domain, :url, 'GET', 'downgrade-regression')"
+            ),
+            {"customer": domain.customer_id, "domain": domain.id, "url": url_regression_value()},
+        )
+        before = all_data_rows(connection)
+    output = alembic_command(
+        url,
+        "downgrade",
+        "7f91c32a60d1",
+        log_name="downgrade-refuses-long-url",
+        expect_success=False,
+    )
+    assert "ProgramLimitExceeded" in output
+    with engine.connect() as connection:
+        assert MigrationContext.configure(connection).get_current_heads() == ("bc64c6f0e217",)
+        assert all_data_rows(connection) == before
+        assert_schema_matches_models(connection)
+    print("PostgreSQL downgrade refusal preserved schema, long URLs and dependent rows", flush=True)
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -658,6 +686,7 @@ def test_empty_postgresql_database_migrates_to_head():
         with engine.connect() as connection:
             assert set(MigrationContext.configure(connection).get_current_heads()) == expected_heads
             assert_schema_matches_models(connection)
+        assert_downgrade_preserves_long_urls(engine, url)
     finally:
         try:
             with engine.connect() as connection:

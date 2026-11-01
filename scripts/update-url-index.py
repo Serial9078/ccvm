@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
+VERSION = "1.0.0"
 BASE = "e51860b931bec53c8b7ba9375c101678374d40af"
 BRANCH = "sprint-1.0.2-feature-architecture"
 OLD_REVISION = "7f91c32a60d1"
@@ -423,6 +424,7 @@ def main():
     os.umask(0o077)
     if socket.gethostname().split(".")[0] != "neptun":
         raise RuntimeError("This operator command is restricted to Neptun")
+    print(f"CCVM URL identity updater {VERSION}; reviewed target {args.target}", flush=True)
     root = Path("/opt/ccvm").resolve()
     directory = Path(git(root, "rev-parse", "--absolute-git-dir"))
     with (directory / "ccvm-pr6-update.lock").open("a") as lock:
