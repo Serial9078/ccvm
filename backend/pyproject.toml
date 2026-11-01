@@ -10,6 +10,10 @@ target-version = "py312"
 select = ["E", "F", "I", "B"]
 ignore = []
 
+[tool.ruff.lint.isort]
+# Keep classification stable when checking backend and root-level scripts together.
+known-first-party = ["alembic", "app", "integration"]
+
 [tool.ruff.lint.flake8-bugbear]
 # Depends declares FastAPI injection metadata; it does not create a shared DB session.
 extend-immutable-calls = ["fastapi.Depends"]

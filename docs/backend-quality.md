@@ -4,6 +4,11 @@ Investigation date: 2026-11-01 (Europe/Berlin).
 Base branch: `sprint-1.0.2-feature-architecture`.
 Base commit: `6173b43ef02177ae706e68c2106a7a6547d88841`.
 
+Current deployed-source coverage is documented in
+[Neptun reconciliation](neptun-integration.md): 76 backend cases, ten Git
+safeguard cases, and the separate PostgreSQL test covering thirteen migrations
+and fifteen application tables. The original repair evidence below is retained.
+
 ## Reproduced causes
 
 The historical [CI run 29188742847](https://github.com/Serial9078/ccvm/actions/runs/29188742847)

@@ -9,11 +9,12 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.engine import URL
+
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy.engine import URL
 
 BACKEND = Path(__file__).resolve().parents[1]
 ARTIFACTS = BACKEND / "integration-artifacts"

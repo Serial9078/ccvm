@@ -21,13 +21,16 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip check
       - name: Check Python formatting
-        run: black --check app alembic tests integration
+        run: black --check --config pyproject.toml app alembic tests integration ../scripts
       - name: Lint Python
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
-        run: ruff check app alembic tests integration
+        run: ruff check --config pyproject.toml app alembic tests integration ../scripts
       - name: Run backend tests
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python -m pytest -q
+      - name: Verify Neptun reconciliation safeguards
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: python -m unittest discover -s ../scripts/tests -v
 
   postgres-migrations:
     runs-on: ubuntu-latest
@@ -47,7 +50,7 @@ jobs:
         ports:
           - 5432/tcp
         options: >-
-          --health-cmd "pg_isready -U ccvm_ci"
+          --health-cmd "pg_isready -U ccvm_ci -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -94,3 +97,5 @@ jobs:
           node-version: "22"
       - run: npm ci
       - run: npm run build
+      - name: Check screenshot service JavaScript syntax
+        run: node --check ../screenshot-service/server.js

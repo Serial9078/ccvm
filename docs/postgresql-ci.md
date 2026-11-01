@@ -4,6 +4,11 @@ Investigation: 2026-11-01 (Europe/Berlin).
 Base: `cb6979946e98512c556990ea306eb11caa28e2c8` on
 `sprint-1.0.2-feature-architecture`, including the merged backend CI repair (#1).
 
+The [Neptun reconciliation](neptun-integration.md) extends this gate to the
+actual 4.4.0 sources: thirteen migrations, fifteen application tables, and
+head `7f91c32a60d1`. Earlier validation results below retain their historical
+commit/run context.
+
 ## What the job proves
 
 The separate `postgres-migrations` job in `.github/workflows/ci.yml`:
@@ -25,13 +30,13 @@ The separate `postgres-migrations` job in `.github/workflows/ci.yml`:
    absence of all user tables, views, materialized views, foreign tables, and
    sequences before migration. A nonempty database fails without migration.
 6. Executes `python -m alembic -c alembic.ini upgrade head` in a fresh process.
-   This uses the repository's real `alembic/env.py` and all eight revisions,
+   This uses the repository's real `alembic/env.py` and all thirteen revisions,
    without `Base.metadata.create_all`, `stamp`, skipped revisions, precreated
    application tables, or swallowed migration errors.
 7. Reads the actual version table through `MigrationContext` and compares it
    with the single head reported by `ScriptDirectory`. The current head is
-   `05c7a5c03d2f`. It also logs Alembic `current --verbose` and `heads --verbose`.
-8. Compares the migrated schema with all twelve ORM tables: table/column
+   `7f91c32a60d1`. It also logs Alembic `current --verbose` and `heads --verbose`.
+8. Compares the migrated schema with all fifteen ORM tables: table/column
    presence, PostgreSQL types and lengths, nullability, indexes, unique
    constraints, foreign keys, and server defaults. Primary-key columns are
    checked explicitly because Alembic autogeneration does not cover that check.
@@ -49,9 +54,10 @@ The separate `postgres-migrations` job in `.github/workflows/ci.yml`:
 The existing backend job still runs every original regression test with its
 SQLite isolation intact. Seventeen additional offline tests validate the CI
 connection guard, including invalid IDs/ports, retry database separation, and
-ignoring inherited production-style configuration. The unit-suite total is 54;
-the separate PostgreSQL job runs one end-to-end integration test. Black and Ruff
-also cover the new `integration` directory.
+ignoring inherited production-style configuration. The unit-suite total is 76;
+the separate PostgreSQL job runs one end-to-end integration test. The reconciliation adds 22 feature cases and ten standalone Git safeguard
+tests; the original 37 cases remain. Black and Ruff also cover `integration`
+and `scripts`.
 
 ## Isolation boundaries
 
