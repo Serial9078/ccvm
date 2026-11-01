@@ -1,6 +1,7 @@
 import json
+import re
 import subprocess
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -13,6 +14,111 @@ from app.models.url import Url
 KATANA_TIMEOUT_SECONDS = 45
 KATANA_DEPTH = 2
 KATANA_CRAWL_DURATION = "30s"
+
+
+BLOCKED_EXTENSIONS = {
+    ".7z",
+    ".aac",
+    ".avi",
+    ".avif",
+    ".bmp",
+    ".css",
+    ".csv",
+    ".doc",
+    ".docx",
+    ".eot",
+    ".flac",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".map",
+    ".mjs",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ogg",
+    ".otf",
+    ".pdf",
+    ".png",
+    ".rar",
+    ".svg",
+    ".tar",
+    ".tgz",
+    ".tif",
+    ".tiff",
+    ".ts",
+    ".ttf",
+    ".txt",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".xls",
+    ".xlsx",
+    ".xml",
+    ".zip",
+}
+
+
+BLOCKED_PATH_PREFIXES = (
+    "/assets/",
+    "/cdn-cgi/",
+    "/css/",
+    "/fonts/",
+    "/font/",
+    "/images/",
+    "/image/",
+    "/img/",
+    "/js/",
+    "/scripts/",
+    "/static/",
+    "/vendor/",
+    "/webfonts/",
+)
+
+
+BLOCKED_EXACT_PATHS = {
+    "/apple-touch-icon.png",
+    "/browserconfig.xml",
+    "/favicon.ico",
+    "/manifest.json",
+    "/robots.txt",
+    "/sitemap",
+    "/sitemap.xml",
+}
+
+
+BLOCKED_CONTENT_TYPES = (
+    "application/font",
+    "application/javascript",
+    "application/octet-stream",
+    "application/pdf",
+    "application/vnd.ms-fontobject",
+    "application/wasm",
+    "application/x-font",
+    "application/x-javascript",
+    "audio/",
+    "font/",
+    "image/",
+    "text/css",
+    "text/javascript",
+    "video/",
+)
+
+
+INDEX_FILENAMES = {
+    "default.htm",
+    "default.html",
+    "index.htm",
+    "index.html",
+}
 
 
 def get_domain(
@@ -97,37 +203,160 @@ def extract_katana_url(
         str(discovered_url).strip() if discovered_url else None,
         str(method).upper(),
         normalized_status_code,
-        str(content_type) if content_type else None,
+        str(content_type).strip() if content_type else None,
     )
+
+
+def normalize_path(
+    path: str,
+) -> str:
+    normalized_path = path or "/"
+
+    normalized_path = re.sub(
+        r"/{2,}",
+        "/",
+        normalized_path,
+    )
+
+    path_parts = normalized_path.rstrip("/").split("/")
+
+    if path_parts and path_parts[-1].lower() in INDEX_FILENAMES:
+        path_parts = path_parts[:-1]
+        normalized_path = "/".join(path_parts) or "/"
+
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+
+    if normalized_path != "/":
+        normalized_path = normalized_path.rstrip("/")
+
+    return normalized_path
 
 
 def normalize_url(
     value: str,
-) -> str:
-    return value.strip()
+) -> str | None:
+    raw_value = value.strip()
+
+    if not raw_value:
+        return None
+
+    try:
+        parsed = urlsplit(raw_value)
+    except ValueError:
+        return None
+
+    scheme = parsed.scheme.lower()
+
+    if scheme not in {"http", "https"}:
+        return None
+
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+
+    if not hostname:
+        return None
+
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+
+    if ":" in hostname and not hostname.startswith("["):
+        normalized_hostname = f"[{hostname}]"
+    else:
+        normalized_hostname = hostname
+
+    if (
+        port is not None
+        and not (scheme == "http" and port == 80)
+        and not (scheme == "https" and port == 443)
+    ):
+        netloc = f"{normalized_hostname}:{port}"
+    else:
+        netloc = normalized_hostname
+
+    normalized_path = normalize_path(parsed.path)
+
+    return urlunsplit(
+        (
+            scheme,
+            netloc,
+            normalized_path,
+            parsed.query,
+            "",
+        )
+    )
 
 
 def is_domain_url(
     discovered_url: str,
     domain_name: str,
 ) -> bool:
-    parsed = urlparse(discovered_url)
-
-    if not parsed.scheme or not parsed.netloc:
+    try:
+        parsed = urlsplit(discovered_url)
+    except ValueError:
         return False
 
-    hostname = (parsed.hostname or "").lower()
-    normalized_domain = domain_name.lower()
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    normalized_domain = domain_name.lower().rstrip(".")
 
     return hostname == normalized_domain or hostname.endswith(f".{normalized_domain}")
+
+
+def has_blocked_extension(
+    path: str,
+) -> bool:
+    lowered_path = path.lower()
+
+    return any(lowered_path.endswith(extension) for extension in BLOCKED_EXTENSIONS)
+
+
+def has_blocked_content_type(
+    content_type: str | None,
+) -> bool:
+    if not content_type:
+        return False
+
+    normalized_content_type = content_type.split(";", 1)[0].strip().lower()
+
+    return any(
+        normalized_content_type.startswith(blocked_type) for blocked_type in BLOCKED_CONTENT_TYPES
+    )
+
+
+def should_collect_url(
+    discovered_url: str,
+    content_type: str | None = None,
+) -> bool:
+    try:
+        parsed = urlsplit(discovered_url)
+    except ValueError:
+        return False
+
+    path = (parsed.path or "/").lower()
+
+    if path in BLOCKED_EXACT_PATHS:
+        return False
+
+    if path.startswith(BLOCKED_PATH_PREFIXES):
+        return False
+
+    if has_blocked_extension(path):
+        return False
+
+    if has_blocked_content_type(content_type):
+        return False
+
+    return True
 
 
 def collect_host_urls(
     host: Host,
     domain: Domain,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, int]:
     collected: dict[str, dict] = {}
     execution_failures = 0
+    filtered_urls = 0
 
     targets = [
         f"https://{host.hostname}",
@@ -188,20 +417,32 @@ def collect_host_urls(
             if not discovered_url:
                 continue
 
-            discovered_url = normalize_url(discovered_url)
+            normalized_url = normalize_url(discovered_url)
 
-            if not is_domain_url(
-                discovered_url,
-                domain.name,
-            ):
+            if not normalized_url:
+                filtered_urls += 1
                 continue
 
-            parsed = urlparse(discovered_url)
+            if not is_domain_url(
+                normalized_url,
+                domain.name,
+            ):
+                filtered_urls += 1
+                continue
+
+            if not should_collect_url(
+                normalized_url,
+                content_type,
+            ):
+                filtered_urls += 1
+                continue
+
+            parsed = urlsplit(normalized_url)
             hostname = (parsed.hostname or "").lower()
 
-            collected[discovered_url] = {
+            collected[normalized_url] = {
                 "hostname": hostname,
-                "url": discovered_url,
+                "url": normalized_url,
                 "method": method,
                 "status_code": status_code,
                 "content_type": content_type,
@@ -215,6 +456,7 @@ def collect_host_urls(
     return (
         list(collected.values()),
         execution_failures,
+        filtered_urls,
     )
 
 
@@ -284,6 +526,7 @@ def run_katana(
     collected_rows_by_url: dict[str, dict] = {}
     processed_hosts = 0
     execution_failures = 0
+    filtered_urls = 0
 
     for host in hosts:
         if not host.hostname:
@@ -301,12 +544,17 @@ def run_katana(
             )
             db.commit()
 
-        host_urls, host_failures = collect_host_urls(
+        (
+            host_urls,
+            host_failures,
+            host_filtered_urls,
+        ) = collect_host_urls(
             host,
             domain,
         )
 
         execution_failures += host_failures
+        filtered_urls += host_filtered_urls
 
         for discovered in host_urls:
             hostname = discovered["hostname"]
@@ -343,6 +591,8 @@ def run_katana(
                 f"{len(hosts)} hosts. "
                 f"Unique URLs collected: "
                 f"{len(collected_rows_by_url)}. "
+                f"Filtered URLs: "
+                f"{filtered_urls}. "
                 f"Failures: "
                 f"{execution_failures}"
             )
@@ -371,6 +621,7 @@ def run_katana(
             f"Unique URLs collected: "
             f"{len(collected_rows_by_url)}. "
             f"New URLs created: {created}. "
+            f"Filtered URLs: {filtered_urls}. "
             f"Execution failures: "
             f"{execution_failures}"
         ),

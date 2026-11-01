@@ -19,6 +19,7 @@ def prevent_external_io(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
 
 
 @pytest.fixture

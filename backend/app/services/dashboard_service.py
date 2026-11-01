@@ -10,6 +10,7 @@ from app.models.job import Job
 from app.models.port import Port
 from app.models.subdomain import Subdomain
 from app.models.technology import Technology
+from app.models.url import Url
 
 
 def count_findings_by_severity(db: Session, severity: str) -> int:
@@ -42,7 +43,13 @@ def get_scanner_chart(db: Session):
         .all()
     )
 
-    return [{"label": scanner or "unknown", "value": count} for scanner, count in rows]
+    return [
+        {
+            "label": scanner or "unknown",
+            "value": count,
+        }
+        for scanner, count in rows
+    ]
 
 
 def get_dashboard_summary(db: Session) -> dict:
@@ -59,6 +66,7 @@ def get_dashboard_summary(db: Session) -> dict:
         "hosts": db.query(Host).count(),
         "ports": db.query(Port).count(),
         "technologies": db.query(Technology).count(),
+        "urls": db.query(Url).count(),
         "assets": db.query(Asset).count(),
         "jobs": db.query(Job).count(),
         "running_jobs": db.query(Job).filter(Job.status == "running").count(),

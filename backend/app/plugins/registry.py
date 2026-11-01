@@ -3,14 +3,31 @@ from collections.abc import Callable
 from sqlalchemy.orm import Session
 
 from app.models.job import Job
-from app.plugins.katana import run_katana
-from app.worker.main import (
+from app.plugins.headerfindings import (
+    run_headerfindings,
+)
+from app.plugins.headerprobe import (
+    run_headerprobe,
+)
+from app.plugins.katana import (
+    run_katana,
+)
+from app.plugins.legacy import (
     run_dnsx,
     run_dummy,
     run_httpx,
     run_naabu,
     run_nuclei,
     run_subfinder,
+)
+from app.plugins.nucleiurl import (
+    run_nucleiurl,
+)
+from app.plugins.screenshot import (
+    run_screenshot,
+)
+from app.plugins.urlprobe import (
+    run_urlprobe,
 )
 
 PluginHandler = Callable[
@@ -28,6 +45,11 @@ PLUGIN_REGISTRY: dict[
     "httpx": run_httpx,
     "naabu": run_naabu,
     "katana": run_katana,
+    "urlprobe": run_urlprobe,
+    "headerprobe": run_headerprobe,
+    "headerfindings": run_headerfindings,
+    "screenshot": run_screenshot,
+    "nucleiurl": run_nucleiurl,
     "nuclei": run_nuclei,
     "dummy": run_dummy,
 }

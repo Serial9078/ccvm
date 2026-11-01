@@ -10,6 +10,9 @@ from app.models.scan import Scan
 from app.models.subdomain import Subdomain
 from app.models.technology import Technology
 from app.models.url import Url
+from app.models.url_detail import UrlDetail
+from app.models.url_screenshot import UrlScreenshot
+from app.models.url_security import UrlSecurity
 
 __all__ = [
     "Asset",
@@ -24,4 +27,7 @@ __all__ = [
     "Subdomain",
     "Technology",
     "Url",
+    "UrlDetail",
+    "UrlScreenshot",
+    "UrlSecurity",
 ]
