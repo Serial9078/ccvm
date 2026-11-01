@@ -36,8 +36,12 @@ into `sprint-1.0.2-feature-architecture`. The starting server commit must be
 The command checks the deployment branch, local edits, runtime bind mounts,
 single worker and scanner processes, active jobs, database revision and URL
 index. The application's database name, server address, port and version must
-match the existing PostgreSQL 16 container used for the backup. It refuses active or queued jobs, unexpected edits, untracked source
-collisions and changes outside the reviewed backend correction.
+match the existing PostgreSQL 16 container used for the backup. Updater 1.0.1
+normalizes PostgreSQL's host-mask notation (`172.18.0.6/32` or IPv6 `/128`)
+before comparing the exact host address with Docker. A shared subnet never
+allows a different server address. Actual mismatches report the compared
+non-secret fields. It refuses active or queued jobs, unexpected edits, untracked
+source collisions and changes outside the reviewed backend correction.
 
 On apply it closes API submissions, checks the queue again, freezes the verified
 idle worker main process with SIGSTOP, and keeps its container available for
