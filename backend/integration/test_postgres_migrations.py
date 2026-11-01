@@ -1,5 +1,7 @@
 """Opt-in integration check for the disposable GitHub Actions PostgreSQL service."""
 
+import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -49,7 +51,7 @@ def ci_database_url(environ):
     )
 
 
-def alembic_command(url, *args, log_name=None):
+def alembic_command(url, *args, log_name=None, expect_success=True):
     # Run the real env.py in a fresh process, separate from SQLite unit-test imports.
     environ = {
         key: value
@@ -82,7 +84,11 @@ def alembic_command(url, *args, log_name=None):
     output = result.stdout + result.stderr
     print(f"alembic {' '.join(args)} (exit {result.returncode})\n{output}", flush=True)
     log.write_text(output)
-    assert result.returncode == 0, f"alembic {' '.join(args)} failed; see captured output"
+    if expect_success:
+        assert result.returncode == 0, f"alembic {' '.join(args)} failed; see captured output"
+    else:
+        assert result.returncode != 0, f"alembic {' '.join(args)} unexpectedly succeeded"
+    return output
 
 
 def schema_snapshot(connection):
@@ -129,6 +135,11 @@ def assert_schema_matches_models(connection):
         opts={"compare_type": True, "compare_server_default": compare_defaults},
     )
     differences = compare_metadata(context, Base.metadata)
+    if differences:
+        for index in Base.metadata.tables["urls"].indexes:
+            if index.unique:
+                print(f"Expected URL index: {context.impl._compile_element(index.expressions[1])}")
+        print(f"Observed URL indexes: {sa.inspect(connection).get_indexes('urls')}")
     assert not differences, f"Migrated schema differs from ORM metadata: {differences!r}"
     inspector = sa.inspect(connection)
     assert set(inspector.get_table_names()) == set(Base.metadata.tables) | {"alembic_version"}
@@ -224,17 +235,47 @@ def assert_neptun_persistence(connection, url_id, domain_id):
 
         failed_probe = build_result(url_id, "https://example.test", None, {}, "timeout")
         bulk_upsert_security(session, [failed_probe])
-        assert session.scalar(sa.select(UrlSecurity.security_score)) is None
+        assert (
+            session.scalar(
+                sa.select(UrlSecurity.security_score).where(UrlSecurity.url_id == url_id)
+            )
+            is None
+        )
         successful_probe = build_result(url_id, "https://example.test", 200, {}, None)
         bulk_upsert_security(session, [successful_probe])
-        assert session.scalar(sa.select(sa.func.count()).select_from(UrlSecurity)) == 1
-        assert session.scalar(sa.select(UrlSecurity.security_score)) == 5
+        assert (
+            session.scalar(
+                sa.select(sa.func.count())
+                .select_from(UrlSecurity)
+                .where(UrlSecurity.url_id == url_id)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                sa.select(UrlSecurity.security_score).where(UrlSecurity.url_id == url_id)
+            )
+            == 5
+        )
 
         upsert_screenshot(session, {"url_id": url_id, "filename": "first.png"})
         upsert_screenshot(session, {"url_id": url_id, "filename": "updated.png"})
-        assert session.scalar(sa.select(sa.func.count()).select_from(UrlScreenshot)) == 1
-        assert session.scalar(sa.select(UrlScreenshot.filename)) == "updated.png"
-        assert session.scalar(sa.select(UrlDetail.title)) == "PostgreSQL integration"
+        assert (
+            session.scalar(
+                sa.select(sa.func.count())
+                .select_from(UrlScreenshot)
+                .where(UrlScreenshot.url_id == url_id)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(sa.select(UrlScreenshot.filename).where(UrlScreenshot.url_id == url_id))
+            == "updated.png"
+        )
+        assert (
+            session.scalar(sa.select(UrlDetail.title).where(UrlDetail.url_id == url_id))
+            == "PostgreSQL integration"
+        )
         assert_operator_recovery(connection, session, parent, child)
         assert_scan_persistence(session, url_id, domain_id)
 
@@ -362,6 +403,234 @@ def assert_operator_recovery(connection, session, parent, child):
     )
 
 
+def url_regression_value(chunks=70):
+    # Deterministic high-entropy text; repeated characters would compress and
+    # could accidentally pass through the old B-tree index.
+    return "https://example.test/search?q=" + "".join(
+        hashlib.sha256(str(index).encode()).hexdigest() for index in range(chunks)
+    )
+
+
+def all_data_rows(connection):
+    snapshot = {}
+    for name in sa.inspect(connection).get_table_names():
+        if name == "alembic_version":
+            continue
+        table = sa.Table(name, sa.MetaData(), autoload_with=connection)
+        snapshot[name] = [
+            dict(row._mapping)
+            for row in connection.execute(sa.select(table).order_by(*table.primary_key.columns))
+        ]
+    return snapshot
+
+
+def seed_url_upgrade_regression(engine):
+    """Keep an existing URL graph committed across the real schema upgrade."""
+    from sqlalchemy.orm import Session
+
+    from app.models.customer import Customer
+    from app.models.domain import Domain
+    from app.models.host import Host
+    from app.models.job import Job
+    from app.models.url import Url
+    from app.models.url_detail import UrlDetail
+    from app.models.url_screenshot import UrlScreenshot
+    from app.models.url_security import UrlSecurity
+
+    with Session(engine) as session:
+        customer = Customer(name="Existing URL Customer")
+        session.add(customer)
+        session.flush()
+        domain = Domain(customer_id=customer.id, name="existing.test")
+        session.add(domain)
+        session.flush()
+        host = Host(
+            customer_id=customer.id, domain_id=domain.id, hostname="existing.test", alive=True
+        )
+        session.add(host)
+        session.flush()
+        url = Url(
+            customer_id=customer.id,
+            domain_id=domain.id,
+            host_id=host.id,
+            url="https://existing.test/preserved",
+            method="GET",
+            source="katana",
+        )
+        session.add(url)
+        session.flush()
+        session.add_all(
+            [
+                UrlDetail(url_id=url.id, title="Preserved intelligence", status_code=200),
+                UrlSecurity(url_id=url.id, security_score=50),
+                UrlScreenshot(url_id=url.id, filename="existing.png"),
+                Job(
+                    domain_id=domain.id,
+                    plugin="katana",
+                    status="failed",
+                    progress=100,
+                    message="Existing failed scan retained",
+                ),
+            ]
+        )
+        session.commit()
+        row = {
+            "customer_id": customer.id,
+            "domain_id": domain.id,
+            "host_id": host.id,
+            "url": url_regression_value(),
+            "method": "GET",
+            "source": "katana",
+        }
+        # Reproduce the exact pre-fix PostgreSQL error and prove the entire
+        # attempted bulk insert rolls back rather than leaving a partial import.
+        before = session.scalar(sa.select(sa.func.count()).select_from(Url))
+        with pytest.raises(sa.exc.DBAPIError) as error, session.begin_nested():
+            session.execute(
+                sa.text(
+                    "INSERT INTO urls (customer_id, domain_id, host_id, url, method, source) "
+                    "VALUES (:customer_id, :domain_id, :host_id, :url, :method, :source) "
+                    "ON CONFLICT (domain_id, url) DO NOTHING"
+                ),
+                row,
+            )
+        assert error.value.orig.pgcode == "54000", error.value
+        assert "uq_urls_domain_url" in str(error.value.orig)
+        assert session.scalar(sa.select(sa.func.count()).select_from(Url)) == before
+    with engine.connect() as connection:
+        return all_data_rows(connection)
+
+
+def assert_long_url_persistence(connection):
+    from sqlalchemy.orm import Session
+
+    from app.database.url_identity import url_digest
+    from app.models.domain import Domain
+    from app.models.host import Host
+    from app.models.job import Job
+    from app.models.url import Url
+    from app.plugins import katana
+
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        domain = session.scalar(sa.select(Domain).where(Domain.name == "existing.test"))
+        host = session.scalar(sa.select(Host).where(Host.domain_id == domain.id))
+        original = url_regression_value()
+        changed = original + "&tail=distinct"
+        base = {
+            "customer_id": domain.customer_id,
+            "domain_id": domain.id,
+            "host_id": host.id,
+            "method": "GET",
+            "source": "katana",
+        }
+        assert (
+            katana.bulk_insert_urls(
+                session, [{**base, "url": value} for value in (original, original, changed)]
+            )
+            == 2
+        )
+        assert katana.bulk_insert_urls(session, [{**base, "url": original}]) == 0
+        assert set(session.scalars(sa.select(Url.url))) >= {original, changed}
+        # Expression indexing must handle literal backslashes and UTF-8, rather
+        # than interpreting bytea escape sequences or requiring pgcrypto.
+        for suffix in (
+            "",
+            r"&q=\xAB\123\\",
+            "&q=Grüße/東京",
+            "&q=a%2Fb",
+            url_regression_value(160),
+        ):
+            value = original + suffix
+            actual = session.scalar(sa.select(url_digest(sa.literal(value))))
+            assert bytes(actual) == hashlib.sha256(value.encode()).digest()
+            katana.bulk_insert_urls(session, [{**base, "url": value}])
+        other = Domain(customer_id=domain.customer_id, name="other-existing.test")
+        session.add(other)
+        session.flush()
+        assert (
+            katana.bulk_insert_urls(session, [{**base, "domain_id": other.id, "url": original}])
+            == 1
+        )
+        # Raw SQL and ordinary ORM updates must enforce the same identity.
+        record = session.scalar(
+            sa.select(Url).where(Url.domain_id == domain.id, Url.url == changed)
+        )
+        record.url = original + "&updated=1"
+        session.commit()
+        assert katana.bulk_insert_urls(session, [{**base, "url": record.url}]) == 0
+        with pytest.raises(sa.exc.IntegrityError), session.begin_nested():
+            session.execute(
+                sa.text(
+                    "INSERT INTO urls (customer_id, domain_id, url, method, source) "
+                    "VALUES (:customer_id, :domain_id, :url, 'GET', 'raw')"
+                ),
+                {**base, "url": original},
+            )
+        job = Job(domain_id=domain.id, plugin="katana", status="running")
+        session.add(job)
+        session.commit()
+        discovered = {
+            "hostname": host.hostname,
+            "url": original + "&pipeline=1",
+            "method": "GET",
+            "status_code": 200,
+            "content_type": "text/html",
+        }
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(katana, "collect_host_urls", lambda *args: ([discovered], 0, 0))
+            katana.run_katana(session, job)
+        assert job.status == "finished" and job.progress == 100, job.message
+        print(
+            "PostgreSQL Katana: long URLs, literal text, domain identity and job completion passed",
+            flush=True,
+        )
+
+
+def assert_operator_readonly_snapshot(connection):
+    spec = importlib.util.spec_from_file_location(
+        "update_url_index", BACKEND.parent / "scripts/update-url-index.py"
+    )
+    operator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(operator)
+    before = all_data_rows(connection)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(operator.STATE_CODE, "<operator-read-only-snapshot>", "exec"), {})
+    snapshot = json.loads(output.getvalue())
+    operator.validate_state(snapshot, expected=operator.REVISION)
+    assert snapshot["tables"]["urls"]["count"] == len(before["urls"])
+    assert all_data_rows(connection) == before
+    print("Operator read-only row fingerprints and URL index verification passed", flush=True)
+
+
+def assert_downgrade_preserves_long_urls(engine, url):
+    with engine.begin() as connection:
+        domain = connection.execute(
+            sa.text("SELECT id, customer_id FROM domains WHERE name='existing.test'")
+        ).one()
+        connection.execute(
+            sa.text(
+                "INSERT INTO urls (customer_id, domain_id, url, method, source) "
+                "VALUES (:customer, :domain, :url, 'GET', 'downgrade-regression')"
+            ),
+            {"customer": domain.customer_id, "domain": domain.id, "url": url_regression_value()},
+        )
+        before = all_data_rows(connection)
+    output = alembic_command(
+        url,
+        "downgrade",
+        "7f91c32a60d1",
+        log_name="downgrade-refuses-long-url",
+        expect_success=False,
+    )
+    assert "ProgramLimitExceeded" in output
+    with engine.connect() as connection:
+        assert MigrationContext.configure(connection).get_current_heads() == ("bc64c6f0e217",)
+        assert all_data_rows(connection) == before
+        assert_schema_matches_models(connection)
+    print("PostgreSQL downgrade refusal preserved schema, long URLs and dependent rows", flush=True)
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -399,19 +668,25 @@ def test_empty_postgresql_database_migrates_to_head():
         script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
         expected_heads = set(script.get_heads())
         assert len(expected_heads) == 1, f"Expected one revision head: {expected_heads!r}"
-        alembic_command(url, "upgrade", "head", log_name="upgrade-from-empty")
+        alembic_command(url, "upgrade", "7f91c32a60d1", log_name="upgrade-from-empty")
+        existing_rows = seed_url_upgrade_regression(engine)
+        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-urls")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
             actual_heads = set(MigrationContext.configure(connection).get_current_heads())
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
+            assert all_data_rows(connection) == existing_rows
+            assert_operator_readonly_snapshot(connection)
+            assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
         alembic_command(url, "upgrade", "head", log_name="upgrade-at-head")
         with engine.connect() as connection:
             assert set(MigrationContext.configure(connection).get_current_heads()) == expected_heads
             assert_schema_matches_models(connection)
+        assert_downgrade_preserves_long_urls(engine, url)
     finally:
         try:
             with engine.connect() as connection:

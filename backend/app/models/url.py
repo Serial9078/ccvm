@@ -1,9 +1,9 @@
 from sqlalchemy import (
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     Mapped,
@@ -12,18 +12,11 @@ from sqlalchemy.orm import (
 )
 
 from app.database.session import Base
+from app.database.url_identity import url_digest
 
 
 class Url(Base):
     __tablename__ = "urls"
-
-    __table_args__ = (
-        UniqueConstraint(
-            "domain_id",
-            "url",
-            name="uq_urls_domain_url",
-        ),
-    )
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -52,6 +45,10 @@ class Url(Base):
     url: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+    )
+
+    __table_args__ = (
+        Index("uq_urls_domain_url_sha256", "domain_id", url_digest(url), unique=True),
     )
 
     method: Mapped[str] = mapped_column(
