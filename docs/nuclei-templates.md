@@ -9,7 +9,7 @@ The URL plugin now prepares an explicit template directory before launching the
 scanner and passes it using `-t`. The default is
 `backend/.scanner-data/nuclei-templates` on the host, exposed as
 `/app/.scanner-data/nuclei-templates` through the existing backend bind mount.
-This data is ignored by Git and survives worker container replacement without
+This data is excluded from Git and Docker build contexts and survives worker container replacement without
 changing private Compose configuration. `NUCLEI_TEMPLATES_DIR` can select an
 existing custom catalog.
 
