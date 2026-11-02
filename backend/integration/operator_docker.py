@@ -66,7 +66,11 @@ def assert_paused_worker_maintenance(url):
             root = Path(directory)
             shutil.copy2(BACKEND / "requirements.txt", root / "requirements.txt")
             (root / "Dockerfile").write_text(
+                "FROM projectdiscovery/nuclei:v3.11.0 AS nuclei\n"
                 "FROM python:3.12-slim\n"
+                "COPY --from=nuclei /usr/local/bin/nuclei /usr/local/bin/nuclei\n"
+                "RUN apt-get update && apt-get install -y ca-certificates musl "
+                "&& rm -rf /var/lib/apt/lists/*\n"
                 "COPY requirements.txt /tmp/requirements.txt\n"
                 "RUN pip install --no-cache-dir -r /tmp/requirements.txt\n"
                 "WORKDIR /app\n"
@@ -127,6 +131,9 @@ def assert_paused_worker_maintenance(url):
                 "paused; rows preserved and unpause passed",
                 flush=True,
             )
+            from integration.nuclei_runtime import assert_nuclei_runtime
+
+            assert_nuclei_runtime(command, image, root)
     finally:
         if created:
             command("docker", "unpause", worker, check=False)

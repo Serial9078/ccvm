@@ -722,7 +722,7 @@ def assert_finding_url_persistence(connection):
         print("PostgreSQL HeaderFindings and Nuclei retained full >8KB finding URLs", flush=True)
 
 
-def assert_header_resume_transaction(connection):
+def assert_header_resume_transaction(connection, mode="header"):
     """Run the operator's exact recovery transaction, including changed-row refusal."""
     from sqlalchemy.orm import Session
 
@@ -731,6 +731,14 @@ def assert_header_resume_transaction(connection):
     from app.worker.main import claim_next_job
 
     operator = finding_operator()
+    position, old_status, old_progress = 7, "running", 10
+    if mode == "nuclei":
+        spec = importlib.util.spec_from_file_location(
+            "nuclei_template_operator", BACKEND.parent / "scripts/update-nuclei-templates.py"
+        )
+        operator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operator)
+        position, old_status, old_progress = 9, "failed", 100
     with connection.begin_nested() as fixture_transaction:
         with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
             domain = session.scalar(sa.select(Domain).where(Domain.name == "existing.test"))
@@ -738,13 +746,25 @@ def assert_header_resume_transaction(connection):
             for index, plugin in enumerate(operator.STAGES):
                 job = Job(
                     domain_id=domain.id,
-                    pipeline_id="ci-header-resume",
+                    pipeline_id=f"ci-{mode}-resume",
                     plugin=plugin,
                     parent_job_id=jobs[-1].id if jobs else None,
-                    status="finished" if index < 7 else "running" if index == 7 else "queued",
-                    progress=100 if index < 7 else 10 if index == 7 else 0,
-                    message="Correlating security headers for 119 HTML URLs" if index == 7 else "",
-                    worker="ccvm-worker-01" if index <= 7 else None,
+                    status=(
+                        "finished"
+                        if index < position
+                        else old_status if index == position else "queued"
+                    ),
+                    progress=100 if index < position else old_progress if index == position else 0,
+                    message=(
+                        (
+                            "Correlating security headers for 119 HTML URLs"
+                            if mode == "header"
+                            else "Nuclei URL scan incomplete: no templates provided for scan"
+                        )
+                        if index == position
+                        else ""
+                    ),
+                    worker="ccvm-worker-01" if index <= position else None,
                 )
                 session.add(job)
                 session.flush()
@@ -754,8 +774,8 @@ def assert_header_resume_transaction(connection):
                 {column.name: getattr(job, column.name) for column in Job.__table__.columns}
                 for job in jobs
             ]
-            selection = (jobs[7].id, jobs[7].uuid)
-            state = {"jobs": rows, "active": rows[7:]}
+            selection = (jobs[position].id, jobs[position].uuid)
+            state = {"jobs": rows, "active": rows[7:] if mode == "header" else []}
             assert operator.selected_pipeline(state, selection) == rows
 
             class ExistingTransactionEngine:
@@ -778,7 +798,9 @@ def assert_header_resume_transaction(connection):
                         {},
                     )
                 session.expire_all()
-                assert jobs[7].status == "running" and jobs[7].progress == 10
+                assert (
+                    jobs[position].status == old_status and jobs[position].progress == old_progress
+                )
                 exec(
                     compile(
                         operator.requeue_source(rows, selection),
@@ -788,8 +810,8 @@ def assert_header_resume_transaction(connection):
                     {},
                 )
             session.expire_all()
-            assert jobs[7].status == "queued" and jobs[7].progress == 0
-            assert jobs[7].worker is None and jobs[7].uuid == selection[1]
+            assert jobs[position].status == "queued" and jobs[position].progress == 0
+            assert jobs[position].worker is None and jobs[position].uuid == selection[1]
             for before, job in zip(rows, jobs, strict=True):
                 for field in set(before) - (
                     {"status", "progress", "message", "worker"} if job.id == selection[0] else set()
@@ -798,9 +820,11 @@ def assert_header_resume_transaction(connection):
             assert claim_next_job(session).id == selection[0]
         fixture_transaction.rollback()
     print(
-        "PostgreSQL selected HeaderFindings retry preserved UUID, dependencies and other jobs",
+        f"PostgreSQL selected {mode} retry preserved UUID, dependencies and other jobs",
         flush=True,
     )
+    if mode == "header":
+        assert_header_resume_transaction(connection, mode="nuclei")
 
 
 def assert_finding_downgrade_refuses_truncation(engine, url):

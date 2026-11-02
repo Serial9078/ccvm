@@ -223,7 +223,7 @@ def requeue_source(rows, selection):
     )
 
 
-def verify(runtime, module, root, target, selection):
+def ready_api(runtime, selection):
     def request(port, path):
         with runtime.opener.open(f"http://127.0.0.1:{port}{path}", timeout=5) as response:
             return json.load(response)
@@ -256,6 +256,12 @@ def verify(runtime, module, root, target, selection):
         time.sleep(2)
     else:
         raise RuntimeError("Frontend API proxy did not recover")
+    return request
+
+
+def verify(runtime, module, root, target, selection):
+    request = ready_api(runtime, selection)
+    path = f"/api/v1/jobs/{selection[0]}"
     for _ in range(45):
         job = request(8088, path)
         if job["uuid"] != selection[1]:
@@ -279,10 +285,21 @@ def verify(runtime, module, root, target, selection):
     raise RuntimeError("HeaderFindings did not finish within 90s; job retained, no duplicate retry")
 
 
-def apply(root, target, selection, module, runtime, plan):
+def apply(
+    root,
+    target,
+    selection,
+    module,
+    runtime,
+    plan,
+    *,
+    journal_name="ccvm-header-findings-resume.json",
+    backup_prefix="ccvm-header-findings-before-",
+    install_runtime=None,
+):
     before, changes = plan
     directory = Path(module.git(root, "rev-parse", "--absolute-git-dir"))
-    marker = directory / "ccvm-header-findings-resume.json"
+    marker = directory / journal_name
     if marker.exists():
         previous = json.loads(marker.read_text())
         if previous["target"] != target or previous["selection"] != list(selection):
@@ -295,7 +312,7 @@ def apply(root, target, selection, module, runtime, plan):
     initial = runtime.preflight(root)
     expected = REVISION if before == target else OLD_REVISION
     validate_state(initial, selection=selection, expected=expected)
-    backup = Path(tempfile.mkdtemp(prefix="ccvm-header-findings-before-", dir=directory))
+    backup = Path(tempfile.mkdtemp(prefix=backup_prefix, dir=directory))
     for name in module.CONFIGS:
         path = root / name
         if path.is_file():
@@ -329,6 +346,9 @@ def apply(root, target, selection, module, runtime, plan):
         if before != target:
             mutated = True
             module.git(root, "merge", "--ff-only", target)
+        if install_runtime is not None:
+            install_runtime(runtime, backup)
+        elif before != target:
             runtime.migrate()
         after = runtime.state()
         write_json(backup / "after-migration.json", after)

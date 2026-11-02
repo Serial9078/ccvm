@@ -49,6 +49,7 @@ def finding_result(**extra):
 
 
 def mock_scanner(monkeypatch, *, lines=(), exit_code=0, timeout=False, stats=()):
+    monkeypatch.setattr(nucleiurl, "prepare_templates", lambda: Path("/ci/nuclei-templates"))
     launches, sleeps = [], []
     process = SimpleNamespace(returncode=exit_code)
     polls = iter([None, exit_code] if stats or timeout else [exit_code])
@@ -94,6 +95,16 @@ def test_success_without_findings_is_success(db, scan, monkeypatch):
     nucleiurl.run_nucleiurl(db, scan.job)
     assert scan.job.status == "finished" and scan.job.progress == 100
     assert db.query(Finding).count() == 0
+
+
+def test_template_preparation_failure_is_failed_before_scanner_launch(db, scan, monkeypatch):
+    def unavailable():
+        raise RuntimeError("template download unavailable")
+
+    monkeypatch.setattr(nucleiurl, "prepare_templates", unavailable)
+    nucleiurl.run_nucleiurl(db, scan.job)
+    assert scan.job.status == "failed" and scan.job.progress == 100
+    assert "template download unavailable" in scan.job.message
 
 
 def test_duplicate_lines_are_idempotent_with_worker_autoflush_disabled(db, scan, monkeypatch):
@@ -178,6 +189,8 @@ def test_live_progress_uses_scanner_stats_instead_of_elapsed_timeout(db, scan, m
     )
     nucleiurl.run_nucleiurl(db, scan.job)
     assert "-stats-json" in launches[0]
+    assert launches[0][launches[0].index("-t") + 1] == "/ci/nuclei-templates"
+    assert launches[0][launches[0].index("-update-template-dir") + 1] == "/ci/nuclei-templates"
     assert "-silent" not in launches[0]
     assert observed[0][0] == 23  # 20% of execution range 10..75, after 600s.
     assert "40/200" in observed[0][1]
@@ -320,6 +333,8 @@ def test_stats_tail_handles_large_noisy_log_and_partial_last_record(tmp_path):
 
 
 def test_missing_scanner_fails_cleanly(db, scan, monkeypatch):
+    monkeypatch.setattr(nucleiurl, "prepare_templates", lambda: Path("/ci/nuclei-templates"))
+
     def missing(*args, **kwargs):
         raise FileNotFoundError("synthetic missing nuclei binary")
 

@@ -16,6 +16,7 @@ from app.models.finding import Finding
 from app.models.job import Job
 from app.models.url import Url
 from app.models.url_detail import UrlDetail
+from app.plugins.nuclei_templates import error_summary, prepare_templates
 
 NUCLEI_TIMEOUT_SECONDS = 1200
 MAX_URLS_PER_DOMAIN = 40
@@ -655,6 +656,15 @@ def run_nucleiurl(
         return
 
     job.status = "running"
+    job.progress = 5
+    job.message = "Preparing Nuclei scan templates"
+    db.commit()
+    try:
+        templates = prepare_templates()
+    except Exception as exc:
+        fail_job(db, job, f"Nuclei template preparation failed: {type(exc).__name__}: {exc}")
+        return
+
     job.progress = 10
     job.message = f"Starting prioritized Nuclei URL scan " f"for {len(targets)} targets"
     db.commit()
@@ -675,6 +685,10 @@ def run_nucleiurl(
 
         command = [
             "nuclei",
+            "-t",
+            str(templates),
+            "-update-template-dir",
+            str(templates),
             "-l",
             str(target_file),
             "-jsonl",
@@ -901,7 +915,8 @@ def run_nucleiurl(
                 job,
                 (
                     f"Nuclei URL scan incomplete: {reason}. "
-                    f"Partial findings retained. {summary}. Error: {result.stderr[-300:]}"
+                    f"Partial findings retained. {summary}. "
+                    f"Error: {error_summary(result.stdout, result.stderr)}"
                 ),
             )
             return

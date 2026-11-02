@@ -1,0 +1,2 @@
+# Scanner data persists through the existing /app bind mount.
+.scanner-data/
