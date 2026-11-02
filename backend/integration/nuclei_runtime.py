@@ -24,6 +24,9 @@ http:
 
 def assert_nuclei_runtime(command, image, root):
     assert os.environ.get("GITHUB_ACTIONS") == "true"
+    # Docker needs an existing mountpoint beneath a read-only parent bind.
+    # The production operator creates this same host directory before the helper.
+    (BACKEND / ".scanner-data").mkdir(exist_ok=True)
     cache = root / "scanner-data"
     cache.mkdir()
     mount = f"type=bind,src={cache},dst=/app/.scanner-data"
@@ -43,7 +46,7 @@ def assert_nuclei_runtime(command, image, root):
             "-B",
             "-c",
             code,
-            timeout=180,
+            timeout=300,
         )
 
     result = json.loads(

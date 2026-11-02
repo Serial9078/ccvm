@@ -6,7 +6,10 @@ import copy
 import functools
 import io
 import json
+import subprocess
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import test_update_header_findings as header_test
 
@@ -116,6 +119,34 @@ class NucleiTemplateUpdateTests(unittest.TestCase):
                     state["active"] = [{"id": 99, "status": "queued"}]
                 with self.assertRaises(RuntimeError):
                     nuclei.selected_pipeline(state, SELECTION)
+
+    def test_real_provision_hook_creates_mountpoint_and_bounds_combined_helper(self):
+        backup = self.root / "private-backup"
+        backup.mkdir()
+        runtime = SimpleNamespace(
+            worker_info={"Config": {"Env": []}},
+            prefix=["docker"],
+            maintenance_args=["run", "--workdir", "/app", "image", "-c"],
+        )
+
+        def provision(command, **kwargs):
+            cache = self.root / "backend/.scanner-data"
+            self.assertTrue(cache.is_dir())
+            self.assertIn(f"type=bind,src={cache},dst=/app/.scanner-data", command)
+            self.assertEqual(kwargs["timeout"], 300)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    {"directory": nuclei.CATALOG, "yaml_files": 100, "selected_templates": 50}
+                ),
+                "",
+            )
+
+        with patch.object(nuclei.subprocess, "run", provision):
+            with contextlib.redirect_stdout(io.StringIO()):
+                nuclei.install_templates(self.root, runtime, backup)
+        self.assertTrue((backup / "templates.json").is_file())
 
 
 if __name__ == "__main__":

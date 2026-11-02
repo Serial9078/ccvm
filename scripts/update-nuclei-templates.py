@@ -123,7 +123,7 @@ def install_templates(root, runtime, backup):
         "--mount",
         f"type=bind,src={cache},dst=/app/.scanner-data",
     ]
-    result = runtime.maintenance_python("""
+    source = """
 import json
 from app.plugins.nuclei_templates import prepare_templates, yaml_count, selected_template_count
 from app.plugins.nucleiurl import NUCLEI_TAGS, NUCLEI_SEVERITIES
@@ -131,8 +131,18 @@ directory = prepare_templates()
 loaded = selected_template_count(directory, NUCLEI_TAGS, NUCLEI_SEVERITIES)
 print(json.dumps({'directory': str(directory), 'yaml_files': yaml_count(directory),
                   'selected_templates': loaded}))
-""")
-    status = json.loads(result)
+"""
+    # The bounded download (120s) and catalog listing (90s) share this helper.
+    result = subprocess.run(
+        [*runtime.prefix, *runtime.maintenance_args, source],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("Template provisioning failed: " + result.stderr[-2000:])
+    status = json.loads(result.stdout)
     (backup / "templates.json").write_text(json.dumps(status, indent=2))
     print(
         f"Templates ready: {status['yaml_files']} YAML files; "
