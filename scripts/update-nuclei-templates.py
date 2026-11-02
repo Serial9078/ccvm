@@ -7,21 +7,22 @@ import functools
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import types
 from pathlib import Path
 
-VERSION = "1.1.0"
-BASE = "827fec9aed5d784c742b46bf3af7df9c9f739078"
+VERSION = "1.2.0"
+BASE = "4097a65cb443badd2c31c43b265a0cc0aaa219db"
 REVISION = "d91e6a2f4c80"
 CATALOG = "/app/.scanner-data/nuclei-templates"
-RETRY_MESSAGE = (
-    "Retrying Nuclei URL scan with its persisted ignore policy and execution diagnostics"
-)
-JOURNAL_NAME = "ccvm-nuclei-runtime-retry.json"
-BACKUP_PREFIX = "ccvm-nuclei-runtime-before-"
+RETRY_MESSAGE = "Retrying Nuclei URL scan with the full catalog execution budget"
+JOURNAL_NAME = "ccvm-nuclei-budget-retry.json"
+BACKUP_PREFIX = "ccvm-nuclei-budget-before-"
+INTERRUPTED_JOB = None
 STAGES = (
     "subfinder",
     "dnsx",
@@ -63,20 +64,43 @@ print(json.dumps({'requeued': payload['job_id'], 'pipeline_id': payload['pipelin
 """
 
 
-def selected_pipeline(state, selection):
+def selected_pipeline(state, selection, *, allow_running=False, allow_recorded_stop=False):
     selected = next((row for row in state["jobs"] if row["id"] == selection[0]), None)
     if not selected or selected["uuid"] != selection[1]:
         raise RuntimeError("Selected job identity does not match")
     message = selected.get("message") or ""
-    diagnosed_failure = "no templates provided for scan" in message or (
-        "hard timeout after 1200s" in message and "Could not read nuclei-ignore file" in message
+    diagnosed_failure = (
+        "no templates provided for scan" in message
+        or (
+            "hard timeout after 1200s" in message and "Could not read nuclei-ignore file" in message
+        )
+        or ("hard timeout after 7200s" in message and re.search(r"Requests: \d+/\d+", message))
+    )
+    interrupted = selected == INTERRUPTED_JOB or (
+        allow_recorded_stop and message.startswith("Nuclei URL scan incomplete: exit code 1.")
+    )
+    running = (
+        allow_running
+        and selected["status"] == "running"
+        and 10 <= selected["progress"] < 100
+        and selected["worker"] == "ccvm-worker-01"
+        and re.fullmatch(
+            r"Nuclei URL scan running\. Targets: \d+\. Elapsed: \d+s\. "
+            r"Limit: 7200s\. Requests: \d+/\d+\. Results: \d+",
+            message,
+        )
     )
     if (
         selected["plugin"] != "nucleiurl"
-        or selected["status"] != "failed"
-        or selected["progress"] != 100
         or not selected["pipeline_id"]
-        or not diagnosed_failure
+        or not (
+            running
+            or (
+                selected["status"] == "failed"
+                and selected["progress"] == 100
+                and (diagnosed_failure or interrupted)
+            )
+        )
     ):
         raise RuntimeError("Selected job is not the diagnosed template or ignore-policy failure")
     rows = [row for row in state["jobs"] if row["pipeline_id"] == selected["pipeline_id"]]
@@ -91,7 +115,8 @@ def selected_pipeline(state, selection):
             raise RuntimeError("Pipeline dependencies or domain changed")
         if index < 9 and (row["status"] != "finished" or row["progress"] != 100):
             raise RuntimeError("All earlier stages must already be finished")
-    if state["active"]:
+    expected_active = [{"id": selection[0], "plugin": "nucleiurl", "status": "running"}]
+    if state["active"] != (expected_active if running else []):
         raise RuntimeError("Other queued or running work exists; retry refused")
     return rows
 
@@ -120,6 +145,10 @@ def install_templates(root, runtime, backup):
     )
     if settings.get("NUCLEI_TEMPLATES_DIR", CATALOG) != CATALOG:
         raise RuntimeError("Worker has a different explicit template directory; preserved")
+    if int(settings.get("CCVM_NUCLEI_TIMEOUT_SECONDS", 28800)) < 28800:
+        raise RuntimeError(
+            "Worker has a shorter explicit scan budget; private configuration preserved"
+        )
     cache = root / "backend" / ".scanner-data"
     if cache.is_symlink() or (cache.exists() and not cache.is_dir()):
         raise RuntimeError("Unexpected scanner data path; preserved")
@@ -162,6 +191,76 @@ print(json.dumps({'directory': str(directory), 'yaml_files': yaml_count(director
         f"{status['selected_templates']} selected by the real Nuclei engine.",
         flush=True,
     )
+
+
+def interrupt_for_budget(root, target, selection, header, module, runtime):
+    """Back up before SIGINT; let the original worker import partial findings."""
+    global INTERRUPTED_JOB
+    normal_validator, scanners = module.validate_state, module.SCANNERS
+
+    def validate_live(state, *, expected=None):
+        header.validate_schema(state, expected=expected)
+        selected_pipeline(state, selection, allow_running=True, allow_recorded_stop=True)
+
+    # All existing container, mount, database identity, worker and other-scanner
+    # checks remain in force. Only the selected Nuclei child may be active;
+    # its exact argv, parent, private targets, UUID and PID handle are checked
+    # again inside the worker namespace immediately before sending SIGINT.
+    module.validate_state = validate_live
+    module.SCANNERS = scanners - {"nuclei"}
+    try:
+        state = runtime.preflight(root)
+    finally:
+        module.validate_state, module.SCANNERS = normal_validator, scanners
+    rows = selected_pipeline(state, selection, allow_running=True, allow_recorded_stop=True)
+    if rows[9]["status"] == "failed":
+        try:
+            selected_pipeline(state, selection)
+        except RuntimeError:
+            pass  # A recorded SIGINT still needs its exact terminal-row proof below.
+        else:
+            return True  # Already timed out; standard backed-up retry can proceed.
+    settings = dict(
+        item.split("=", 1) for item in runtime.worker_info["Config"].get("Env", []) if "=" in item
+    )
+    if (
+        settings.get("NUCLEI_TEMPLATES_DIR", CATALOG) != CATALOG
+        or int(settings.get("CCVM_NUCLEI_TIMEOUT_SECONDS", 28800)) < 28800
+    ):
+        raise RuntimeError("Custom scanner settings require inspection; active scan preserved")
+    directory = Path(module.git(root, "rev-parse", "--absolute-git-dir"))
+    backup = Path(tempfile.mkdtemp(prefix="ccvm-nuclei-interrupt-before-", dir=directory))
+    for name in module.CONFIGS:
+        source = root / name
+        if source.is_file():
+            destination = backup / "config" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+    header.write_json(backup / "before.json", state)
+    runtime.prepare_maintenance(backup)
+    runtime.database_backup(backup / "database.dump")
+    print(f"Private pre-interruption backup: {backup}", flush=True)
+    source = module.git(root, "show", f"{target}:backend/app/plugins/nuclei_control.py")
+    source += (
+        "\nprint(json.dumps(interrupt_two_hour_scan(json.loads(" + repr(json.dumps(rows)) + "))))"
+    )
+    result = json.loads(runtime.docker("exec", "ccvm-worker", "python", "-c", source))
+    header.write_json(backup / "interruption.json", result)
+    if result.get("phase") == "finished":
+        print("Selected Nuclei scan already finished; no retry needed.", flush=True)
+        return False
+    if (
+        result.get("phase") != "stopped"
+        or result["job"]["id"] != selection[0]
+        or (result["job"]["uuid"] != selection[1])
+    ):
+        raise RuntimeError("Selected graceful interruption was not confirmed")
+    INTERRUPTED_JOB = result["job"]
+    print(
+        "Selected Nuclei attempt stopped gracefully; partial findings and logs retained.",
+        flush=True,
+    )
+    return True
 
 
 def verify(runtime, module, root, target, selection, *, ready_api):
@@ -209,7 +308,14 @@ def main():
     parser.add_argument("--target", required=True)
     parser.add_argument("--job", required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--restart-running",
+        action="store_true",
+        help="back up and gracefully restart the selected two-hour scan",
+    )
     args = parser.parse_args()
+    if args.restart_running and not args.apply:
+        parser.error("--restart-running requires --apply")
     os.umask(0o077)
     if socket.gethostname().split(".")[0] != "neptun":
         raise RuntimeError("This command is restricted to Neptun")
@@ -227,6 +333,14 @@ def main():
         runtime = module.Runtime()
         print(f"CCVM Nuclei templates updater {VERSION}; reviewed target {args.target}", flush=True)
         if args.apply:
+            marker = directory / JOURNAL_NAME
+            resumed = marker.exists() and json.loads(marker.read_text()).get("phase") in {
+                "requeue-intent",
+                "resumed",
+            }
+            if args.restart_running and not resumed:
+                if not interrupt_for_budget(root, args.target, selection, header, module, runtime):
+                    return
             header.apply(
                 root,
                 args.target,

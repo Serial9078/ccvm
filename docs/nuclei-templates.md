@@ -35,12 +35,20 @@ the engine exits zero and lists some templates.
 ## Execution and evidence
 
 The fixed 20-minute cap could interrupt the full catalog across many URLs.
-`CCVM_NUCLEI_TIMEOUT_SECONDS` now sets the absolute limit, defaulting to 7,200
+`CCVM_NUCLEI_TIMEOUT_SECONDS` now sets the absolute limit, defaulting to 28,800
 seconds. `CCVM_NUCLEI_STALL_SECONDS` defaults to 300 seconds without a change in
 reported request or match counters. Missing statistics also trigger this stall
 limit. Each limit must be a positive integer. Request rate remains 30 per second,
 concurrency remains 5, and URL selection retains the same limits and domain rules.
 No URL or template subset is silently removed to report a successful scan.
+
+The production catalog reported 671,217 planned requests for 37 selected URLs.
+Observed counters rose from 22,425 to 24,919 over 60 seconds, approximately 42
+counted requests per second. A linear estimate at that pace leaves about four
+hours and twenty minutes; request mix and the engine's total may change. The
+previous two-hour default was therefore inadequate despite healthy progress.
+The new eight-hour ceiling provides room without increasing rate or concurrency;
+the five-minute inactivity guard and explicit operator overrides still apply.
 
 Nuclei receives both `-no-stdin` and a closed child stdin. Progress uses scanner
 statistics, with the current absolute limit visible in the job message. A failed
@@ -57,13 +65,34 @@ through a new public file endpoint.
 
 ## Existing Neptun deployment
 
-`scripts/update-nuclei-templates.py` version 1.1.0 supports source commit
-`827fec9aed5d784c742b46bf3af7df9c9f739078` and the reviewed target. Use
+`scripts/update-nuclei-templates.py` version 1.2.0 supports source commit
+`4097a65cb443badd2c31c43b265a0cc0aaa219db` and the reviewed target. Use
 `--target FULL_MERGE_SHA --job ID:UUID` for read-only preflight, and add `--apply`
 to install the correction. The selected NucleiURL job must have the diagnosed
-missing-template failure, or the original 1,200-second timeout together with the
-missing-ignore error. All nine earlier stages must be finished; other active
-work stops the update.
+missing-template failure, the original 1,200-second timeout together with the
+missing-ignore error, or the diagnosed 7,200-second timeout with request counters.
+All nine earlier stages must be finished; other active work stops the update.
+
+For the already running two-hour attempt, `--apply --restart-running` explicitly
+enables a narrow graceful restart. The old worker captured its limit before
+launching the scanner; changing source or environment cannot extend that active
+call. The operator first verifies the original container, mounts, schema,
+database identity and complete pipeline, then backs up the database and private
+configuration before any signal. A helper in the worker namespace rechecks the
+pipeline and requires exactly one Nuclei child of PID 1 with the original argv,
+rate, private target file, live progress and matching job UUID. A Linux PID handle
+binds SIGINT to that process, avoiding PID reuse. It never signals the worker or
+uses a forced-kill fallback. The original worker imports partial findings and
+records its normal failed terminal state before the staged retry can proceed.
+
+The current host-spray strategy does not populate the engine's per-template
+resume state. Completed requests will be repeated; the operation retains raw
+results, imported findings and diagnostics rather than claiming checkpoint
+continuation. The exact terminal row is journaled in the private attempt for
+response-loss recovery. A missing or changed record refuses the retry. An
+explicit shorter private budget or custom catalog is preserved and stops this
+operator. Attempts within 200 seconds of their original deadline are preserved;
+once the diagnosed timeout occurs the standard failed-job retry can be used.
 
 The existing staged updater backs up the database and private configuration,
 pauses the worker, and checks all-table row fingerprints. The same-image helper
@@ -73,8 +102,8 @@ then reloads, and a locked, snapshot-checked transaction requeues only the selec
 job. IDs, UUIDs, completed stages and results are preserved. The schema and Compose
 configuration are unchanged.
 
-The new `ccvm-nuclei-runtime-retry.json` journal is separate from the earlier
-template-install retry journal. Recorded retry intent prevents duplicate
+The new `ccvm-nuclei-budget-retry.json` journal is separate from both earlier
+template and ignore-policy retry journals. Recorded retry intent prevents duplicate
 requeues after a lost response. Unknown state leaves the API closed; failed
 preparation can restore source only, never restore or downgrade the database.
 A final running status proves startup; terminal scan completion still needs to
@@ -84,15 +113,26 @@ be observed.
 
 Offline tests cover legacy catalog repair, policy restoration in replacement
 containers, preserving custom policies, refusing absent policies, and meaningful
-error messages. Execution tests cover progress beyond 20 minutes, the absolute
-cap, stalled counters, missing telemetry, partial findings and retained evidence.
+error messages. Execution tests cover progress beyond two hours, explicit
+operator limits, stalled counters, missing telemetry, partial findings and
+retained evidence. Control tests refuse changed UUIDs, parents, arguments,
+other active jobs, PID reuse and missing interruption records. Signal denial
+leaves the running state untouched. Backup ordering and exact-row retry are
+checked separately.
 Disposable PostgreSQL tests execute the selected retry transaction. Docker CI
 uses Nuclei v3.11.0 to install/list official templates, proves catalog and policy
 reuse after container replacement, and runs the complete plugin against an
 isolated synthetic HTTP fixture. That test checks the real scanner stderr and
 retained execution diagnostics, with no external route from the scan network.
+It also starts a bounded long synthetic scan in the same namespace, sends the
+verified child SIGINT through a PID handle, checks exit code 1 and retained raw
+results, and proves response-loss recovery sends no second signal. The native
+control fixture supplies synthetic job snapshots; real PostgreSQL covers the
+locked retry transaction independently.
 
 References:
 [official CLI documentation](https://github.com/projectdiscovery/nuclei-docs/blob/main/docs/nuclei/get-started.md),
 [official ignore reader](https://github.com/projectdiscovery/nuclei/blob/v3.11.0/pkg/catalog/config/ignorefile.go),
-[official installer](https://github.com/projectdiscovery/nuclei/blob/v3.11.0/pkg/installer/template.go).
+[official installer](https://github.com/projectdiscovery/nuclei/blob/v3.11.0/pkg/installer/template.go),
+[native interrupt handler](https://github.com/projectdiscovery/nuclei/blob/v3.11.0/cmd/nuclei/main.go),
+[host-spray execution](https://github.com/projectdiscovery/nuclei/blob/v3.11.0/pkg/core/execute_options.go).
