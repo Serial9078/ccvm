@@ -2,6 +2,7 @@
 
 import json
 import os
+import textwrap
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -32,6 +33,15 @@ def assert_nuclei_runtime(command, image, root):
     mount = f"type=bind,src={cache},dst=/app/.scanner-data"
 
     def prepare(code):
+        # The real worker runs as root. Return ownership of only this disposable
+        # cache to the CI user so host assertions and TemporaryDirectory cleanup
+        # can inspect the installer-created private directories.
+        wrapped = (
+            "import os\ntry:\n" + textwrap.indent(code, "    ") + "\nfinally:\n"
+            "    for directory, subdirs, files in os.walk('/app/.scanner-data'):\n"
+            "        for path in [directory, *(os.path.join(directory, f) for f in files)]:\n"
+            f"            os.chown(path, {os.getuid()}, {os.getgid()}, follow_symlinks=False)\n"
+        )
         return command(
             "docker",
             "run",
@@ -45,7 +55,7 @@ def assert_nuclei_runtime(command, image, root):
             image,
             "-B",
             "-c",
-            code,
+            wrapped,
             timeout=300,
         )
 
