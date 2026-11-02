@@ -77,7 +77,9 @@ def assert_nuclei_runtime(command, image, root):
             prepare(
                 "import json, subprocess; "
                 "from app.plugins.nuclei_templates import prepare_templates, yaml_count; "
+                "original_run=subprocess.run; "
                 "subprocess.run=lambda *a, **k: "
+                "original_run(*a, **k) if a[0]==['nuclei', '-version'] else "
                 "(_ for _ in ()).throw(AssertionError('Unexpected download')); "
                 "print(json.dumps({'count': yaml_count(prepare_templates())}))"
             )
@@ -99,6 +101,9 @@ def assert_nuclei_runtime(command, image, root):
     catalog = root / "synthetic-catalog"
     catalog.mkdir()
     (catalog / "smoke.yaml").write_text(SMOKE_TEMPLATE)
+    (catalog / ".nuclei-ignore").write_bytes(
+        (cache / "nuclei-templates/.nuclei-ignore").read_bytes()
+    )
     command("docker", "network", "create", "--internal", network)
     try:
         command(
@@ -133,6 +138,8 @@ def assert_nuclei_runtime(command, image, root):
             f"type=bind,src={BACKEND},dst=/app,readonly",
             "--mount",
             f"type=bind,src={catalog},dst=/synthetic-catalog,readonly",
+            "--mount",
+            mount,
             "--env",
             "DATABASE_URL=sqlite://",
             "--env",
@@ -144,6 +151,7 @@ def assert_nuclei_runtime(command, image, root):
             "-c",
             r"""
 import hashlib, json, time, urllib.request
+from pathlib import Path
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 import app.models
@@ -189,6 +197,13 @@ with Session(engine, autoflush=False) as db:
     assert job.status == 'finished' and job.progress == 100, job.message
     finding = db.query(Finding).one()
     assert finding.template_id == 'ccvm-ci-smoke' and finding.matched_at == target
+    attempts = list(Path('/app/.scanner-data/nuclei-runs').glob('job-*'))
+    assert len(attempts) == 1
+    stderr = (attempts[0] / 'nuclei.stderr.log').read_text()
+    assert 'Could not read nuclei-ignore' not in stderr
+    assert 'Could not parse nuclei-ignore' not in stderr
+    assert (Path('/root/.config/nuclei') / '.nuclei-ignore').is_file()
+    assert (attempts[0] / 'execution.json').is_file()
     print(json.dumps({'job_status': job.status, 'findings': 1}))
 """,
             timeout=120,
@@ -202,3 +217,4 @@ with Session(engine, autoflush=False) as db:
     finally:
         command("docker", "rm", "--force", server, check=False)
         command("docker", "network", "rm", network, check=False)
+        prepare("pass")  # Return ownership of retained diagnostics to the CI user.

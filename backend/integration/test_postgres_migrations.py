@@ -759,7 +759,8 @@ def assert_header_resume_transaction(connection, mode="header"):
                         (
                             "Correlating security headers for 119 HTML URLs"
                             if mode == "header"
-                            else "Nuclei URL scan incomplete: no templates provided for scan"
+                            else "Nuclei URL scan incomplete: hard timeout after 1200s. "
+                            "[ERR] Could not read nuclei-ignore file: no such file"
                         )
                         if index == position
                         else ""

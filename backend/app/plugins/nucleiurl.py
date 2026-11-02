@@ -1,9 +1,11 @@
 import json
 import math
+import os
 import subprocess
 import tempfile
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -16,9 +18,10 @@ from app.models.finding import Finding
 from app.models.job import Job
 from app.models.url import Url
 from app.models.url_detail import UrlDetail
-from app.plugins.nuclei_templates import error_summary, prepare_templates
+from app.plugins.nuclei_templates import DEFAULT_DIRECTORY, error_summary, prepare_templates
 
-NUCLEI_TIMEOUT_SECONDS = 1200
+NUCLEI_TIMEOUT_SECONDS = 7200
+NUCLEI_STALL_SECONDS = 300
 MAX_URLS_PER_DOMAIN = 40
 MAX_URLS_PER_ORIGIN = 12
 PROGRESS_POLL_SECONDS = 5
@@ -612,6 +615,38 @@ def valid_result(item: object) -> bool:
     return isinstance(classification, dict) and bool(extract_matched_url(item))
 
 
+@contextmanager
+def retained_scan_directory(job: Job):
+    root = Path(
+        os.environ.get("CCVM_NUCLEI_LOG_DIR", str(DEFAULT_DIRECTORY.parent / "nuclei-runs"))
+    )
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = Path(tempfile.mkdtemp(prefix=f"job-{job.id}-", dir=root))
+    write_diagnostic(directory / "identity.json", {"job_id": job.id, "uuid": job.uuid})
+    yield str(directory)  # Retain every attempt, including failures and partial results.
+
+
+def write_diagnostic(path: Path, value: dict) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=".write-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def execution_limits() -> tuple[int, int]:
+    maximum = int(os.environ.get("CCVM_NUCLEI_TIMEOUT_SECONDS", NUCLEI_TIMEOUT_SECONDS))
+    stall = int(os.environ.get("CCVM_NUCLEI_STALL_SECONDS", NUCLEI_STALL_SECONDS))
+    if maximum <= 0 or stall <= 0:
+        raise ValueError("Nuclei execution limits must be positive seconds")
+    return maximum, stall
+
+
 def run_nucleiurl(
     db: Session,
     job: Job,
@@ -661,6 +696,7 @@ def run_nucleiurl(
     db.commit()
     try:
         templates = prepare_templates()
+        timeout_seconds, stall_seconds = execution_limits()
     except Exception as exc:
         fail_job(db, job, f"Nuclei template preparation failed: {type(exc).__name__}: {exc}")
         return
@@ -669,9 +705,7 @@ def run_nucleiurl(
     job.message = f"Starting prioritized Nuclei URL scan " f"for {len(targets)} targets"
     db.commit()
 
-    with tempfile.TemporaryDirectory(
-        prefix="ccvm-nuclei-url-",
-    ) as temporary_directory:
+    with retained_scan_directory(job) as temporary_directory:
         working_directory = Path(temporary_directory)
 
         target_file = working_directory / "targets.txt"
@@ -695,6 +729,7 @@ def run_nucleiurl(
             "-o",
             str(result_file),
             "-no-color",
+            "-no-stdin",
             "-severity",
             NUCLEI_SEVERITIES,
             "-tags",
@@ -725,6 +760,10 @@ def run_nucleiurl(
         process: subprocess.Popen | None = None
         execution_started = time.monotonic()
         hard_timeout_reached = False
+        stall_reached = False
+        last_activity = 0
+        last_counts = (-1, -1)
+        last_stats = None
 
         stdout_file = working_directory / "nuclei.stdout.log"
 
@@ -745,14 +784,35 @@ def run_nucleiurl(
                     command,
                     stdout=stdout_handle,
                     stderr=stderr_handle,
+                    stdin=subprocess.DEVNULL,
                     text=True,
                 )
 
                 while process.poll() is None:
                     elapsed_seconds = int(time.monotonic() - execution_started)
+                    stats = read_scan_stats(stderr_file) or read_scan_stats(stdout_file)
+                    if stats:
+                        last_stats = stats
+                        counts = (stats["requests"], stats["matched"])
+                        if counts != last_counts:
+                            last_counts, last_activity = counts, elapsed_seconds
+                    write_diagnostic(
+                        working_directory / "progress.json",
+                        {
+                            "elapsed_seconds": elapsed_seconds,
+                            "last_stats": last_stats,
+                            "last_activity_seconds": last_activity,
+                            "timeout_seconds": timeout_seconds,
+                            "stall_seconds": stall_seconds,
+                        },
+                    )
 
-                    if elapsed_seconds >= NUCLEI_TIMEOUT_SECONDS:
-                        hard_timeout_reached = True
+                    if (
+                        elapsed_seconds >= timeout_seconds
+                        or elapsed_seconds - last_activity >= stall_seconds
+                    ):
+                        hard_timeout_reached = elapsed_seconds >= timeout_seconds
+                        stall_reached = not hard_timeout_reached
 
                         process.terminate()
 
@@ -763,8 +823,6 @@ def run_nucleiurl(
                             process.wait()
 
                         break
-
-                    stats = read_scan_stats(stderr_file) or read_scan_stats(stdout_file)
 
                     current_job = db.get(
                         Job,
@@ -787,6 +845,7 @@ def run_nucleiurl(
                             "Nuclei URL scan running. "
                             f"Targets: {len(targets)}. "
                             f"Elapsed: {elapsed_seconds}s. "
+                            f"Limit: {timeout_seconds}s. "
                             f"{statistics}"
                         )
                         db.commit()
@@ -812,7 +871,21 @@ def run_nucleiurl(
             )
 
             return_code = (
-                124 if hard_timeout_reached else (process.returncode if process is not None else 1)
+                124
+                if hard_timeout_reached or stall_reached
+                else (process.returncode if process is not None else 1)
+            )
+            last_stats = read_scan_stats(stderr_file) or read_scan_stats(stdout_file) or last_stats
+            write_diagnostic(
+                working_directory / "execution.json",
+                {
+                    "return_code": return_code,
+                    "hard_timeout": hard_timeout_reached,
+                    "stalled": stall_reached,
+                    "last_stats": last_stats,
+                    "timeout_seconds": timeout_seconds,
+                    "stall_seconds": stall_seconds,
+                },
             )
 
             result = subprocess.CompletedProcess(
@@ -827,10 +900,24 @@ def run_nucleiurl(
                 process.kill()
                 process.wait()
 
+            write_diagnostic(
+                working_directory / "execution.json",
+                {
+                    "exception": f"{type(exc).__name__}: {exc}",
+                    "last_stats": last_stats,
+                    "timeout_seconds": timeout_seconds,
+                    "stall_seconds": stall_seconds,
+                },
+            )
             fail_job(
                 db,
                 job,
-                ("Nuclei URL execution failed: " f"{type(exc).__name__}: " f"{exc}"),
+                (
+                    "Nuclei URL execution failed: "
+                    f"{type(exc).__name__}: "
+                    f"{exc}. "
+                    f"Diagnostics: {working_directory}"
+                ),
             )
             return
 
@@ -900,14 +987,24 @@ def run_nucleiurl(
             f"Targets: {len(targets)}. Created: {created}. Updated: {updated}. "
             f"Reopened: {reopened}. Malformed results: {malformed}"
         )
+        statistics = (
+            f" Requests: {last_stats['requests']}/{last_stats['total']}. "
+            f"Results: {last_stats['matched']}."
+            if last_stats
+            else " No scanner statistics received."
+        )
         if result.returncode != 0 or malformed:
             reason = (
-                f"hard timeout after {NUCLEI_TIMEOUT_SECONDS}s"
+                f"hard timeout after {timeout_seconds}s"
                 if hard_timeout_reached
                 else (
-                    f"exit code {result.returncode}"
-                    if result.returncode != 0
-                    else "malformed scanner output"
+                    f"no scanner progress for {stall_seconds}s"
+                    if stall_reached
+                    else (
+                        f"exit code {result.returncode}"
+                        if result.returncode != 0
+                        else "malformed scanner output"
+                    )
                 )
             )
             fail_job(
@@ -915,8 +1012,9 @@ def run_nucleiurl(
                 job,
                 (
                     f"Nuclei URL scan incomplete: {reason}. "
-                    f"Partial findings retained. {summary}. "
-                    f"Error: {error_summary(result.stdout, result.stderr)}"
+                    f"Partial findings retained. {summary}.{statistics} "
+                    f"Diagnostics: {working_directory}. "
+                    f"Error: {error_summary(result.stdout, result.stderr, limit=250)}"
                 ),
             )
             return
@@ -924,5 +1022,5 @@ def run_nucleiurl(
     finish_job(
         db,
         job,
-        f"Nuclei URL scan finished. {summary}",
+        f"Nuclei URL scan finished. {summary}.{statistics}",
     )

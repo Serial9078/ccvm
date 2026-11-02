@@ -13,11 +13,15 @@ import time
 import types
 from pathlib import Path
 
-VERSION = "1.0.0"
-BASE = "e2a7fc16592e88b54a25313f8b6c57abe14132f9"
+VERSION = "1.1.0"
+BASE = "827fec9aed5d784c742b46bf3af7df9c9f739078"
 REVISION = "d91e6a2f4c80"
 CATALOG = "/app/.scanner-data/nuclei-templates"
-RETRY_MESSAGE = "Retrying Nuclei URL scan after installing persistent scan templates"
+RETRY_MESSAGE = (
+    "Retrying Nuclei URL scan with its persisted ignore policy and execution diagnostics"
+)
+JOURNAL_NAME = "ccvm-nuclei-runtime-retry.json"
+BACKUP_PREFIX = "ccvm-nuclei-runtime-before-"
 STAGES = (
     "subfinder",
     "dnsx",
@@ -63,14 +67,18 @@ def selected_pipeline(state, selection):
     selected = next((row for row in state["jobs"] if row["id"] == selection[0]), None)
     if not selected or selected["uuid"] != selection[1]:
         raise RuntimeError("Selected job identity does not match")
+    message = selected.get("message") or ""
+    diagnosed_failure = "no templates provided for scan" in message or (
+        "hard timeout after 1200s" in message and "Could not read nuclei-ignore file" in message
+    )
     if (
         selected["plugin"] != "nucleiurl"
         or selected["status"] != "failed"
         or selected["progress"] != 100
         or not selected["pipeline_id"]
-        or "no templates provided for scan" not in (selected["message"] or "")
+        or not diagnosed_failure
     ):
-        raise RuntimeError("Selected job is not the diagnosed missing-template failure")
+        raise RuntimeError("Selected job is not the diagnosed template or ignore-policy failure")
     rows = [row for row in state["jobs"] if row["pipeline_id"] == selected["pipeline_id"]]
     if [row["plugin"] for row in rows] != list(STAGES) or rows[9]["id"] != selection[0]:
         raise RuntimeError("Unexpected discovery pipeline topology")
@@ -125,12 +133,15 @@ def install_templates(root, runtime, backup):
     ]
     source = """
 import json
-from app.plugins.nuclei_templates import prepare_templates, yaml_count, selected_template_count
+from app.plugins.nuclei_templates import (
+    prepare_templates, yaml_count, selected_template_count, IGNORE_FILENAME,
+)
 from app.plugins.nucleiurl import NUCLEI_TAGS, NUCLEI_SEVERITIES
 directory = prepare_templates()
 loaded = selected_template_count(directory, NUCLEI_TAGS, NUCLEI_SEVERITIES)
 print(json.dumps({'directory': str(directory), 'yaml_files': yaml_count(directory),
-                  'selected_templates': loaded}))
+                  'selected_templates': loaded,
+                  'ignore_policy': (directory / IGNORE_FILENAME).is_file()}))
 """
     # The bounded download (120s) and catalog listing (90s) share this helper.
     result = subprocess.run(
@@ -143,6 +154,8 @@ print(json.dumps({'directory': str(directory), 'yaml_files': yaml_count(director
     if result.returncode:
         raise RuntimeError("Template provisioning failed: " + result.stderr[-2000:])
     status = json.loads(result.stdout)
+    if not status.get("ignore_policy"):
+        raise RuntimeError("The catalog's official ignore policy was not confirmed")
     (backup / "templates.json").write_text(json.dumps(status, indent=2))
     print(
         f"Templates ready: {status['yaml_files']} YAML files; "
@@ -221,8 +234,8 @@ def main():
                 module,
                 runtime,
                 plan,
-                journal_name="ccvm-nuclei-templates-retry.json",
-                backup_prefix="ccvm-nuclei-templates-before-",
+                journal_name=JOURNAL_NAME,
+                backup_prefix=BACKUP_PREFIX,
                 install_runtime=functools.partial(install_templates, root),
             )
         else:
