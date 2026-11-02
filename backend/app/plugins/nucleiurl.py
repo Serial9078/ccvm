@@ -20,7 +20,7 @@ from app.models.url import Url
 from app.models.url_detail import UrlDetail
 from app.plugins.nuclei_templates import DEFAULT_DIRECTORY, error_summary, prepare_templates
 
-NUCLEI_TIMEOUT_SECONDS = 7200
+NUCLEI_TIMEOUT_SECONDS = 28800
 NUCLEI_STALL_SECONDS = 300
 MAX_URLS_PER_DOMAIN = 40
 MAX_URLS_PER_ORIGIN = 12

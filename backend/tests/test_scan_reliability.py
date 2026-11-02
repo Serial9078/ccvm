@@ -1,6 +1,9 @@
 """Regressions for incomplete scans and actual worker sessions; no external IO."""
 
+import copy
 import json
+import os
+import signal
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +18,7 @@ from app.models.finding import Finding
 from app.models.job import Job
 from app.models.url import Url
 from app.models.url_detail import UrlDetail
-from app.plugins import nucleiurl, urlprobe
+from app.plugins import nuclei_control, nucleiurl, urlprobe
 from app.worker import main as worker
 
 
@@ -130,6 +133,175 @@ def test_scan_with_progress_can_continue_beyond_the_old_twenty_minute_limit(db, 
     assert scan.job.status == "finished", scan.job.message
     assert "terminate" not in calls
     assert "Requests: 2/100" in scan.job.message
+
+
+def test_full_catalog_with_progress_continues_past_two_hours(db, scan, monkeypatch):
+    calls = mock_execution_sequence(monkeypatch, [7000, 7300], [224250, 236550])
+    nucleiurl.run_nucleiurl(db, scan.job)
+    assert scan.job.status == "finished", scan.job.message
+    assert "terminate" not in calls
+
+
+def test_explicit_operator_execution_limit_is_still_enforced(db, scan, monkeypatch):
+    monkeypatch.setenv("CCVM_NUCLEI_TIMEOUT_SECONDS", "7200")
+    calls = mock_execution_sequence(monkeypatch, [7000, 7300], [224250, 236550])
+    nucleiurl.run_nucleiurl(db, scan.job)
+    assert scan.job.status == "failed" and "hard timeout after 7200s" in scan.job.message
+    assert "terminate" in calls
+
+
+@pytest.fixture
+def active_nuclei_attempt(db, scan, monkeypatch, tmp_path):
+    calls, _ = mock_scanner(monkeypatch)
+    nucleiurl.run_nucleiurl(db, scan.job)
+    monkeypatch.setattr(nuclei_control.time, "monotonic", lambda: 1000.0)
+    argv = calls[0]
+    directory = Path(argv[argv.index("-l") + 1]).parent
+    nucleiurl.write_diagnostic(
+        directory / "progress.json",
+        {
+            "elapsed_seconds": 445,
+            "timeout_seconds": 7200,
+            "last_stats": {"requests": 24919, "total": 671217},
+        },
+    )
+    # The controller sees the real argv emitted by the plugin, rather than a
+    # second copy of its argument builder. Its pinned catalog check is isolated.
+    monkeypatch.setattr(nuclei_control, "DEFAULT_DIRECTORY", Path("/ci/nuclei-templates"))
+    selected = {
+        column.name: getattr(scan.job, column.name) for column in scan.job.__table__.columns
+    }
+    selected.update(
+        status="running",
+        progress=11,
+        worker="ccvm-worker-01",
+        message=(
+            "Nuclei URL scan running. Targets: 37. Elapsed: 445s. Limit: 7200s. "
+            "Requests: 24919/671217. Results: 0"
+        ),
+    )
+    rows = [{"id": -i, "status": "finished", "progress": 100} for i in range(9)] + [selected]
+    expected = copy.deepcopy(rows)
+    state = {"rows": rows, "active": [selected["id"]]}
+    monkeypatch.setattr(
+        nuclei_control, "snapshot", lambda pipeline: (state["rows"], state["active"])
+    )
+    proc = tmp_path / "proc"
+    path = proc / "42"
+    path.mkdir(parents=True)
+    (path / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+    (path / "stat").write_text("42 (nuclei) " + " ".join(["S", "1", *(["0"] * 17), "1234"]))
+    sent = []
+    monkeypatch.setattr(
+        nuclei_control.os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY)
+    )
+
+    def interrupt(descriptor, number):
+        sent.append(number)
+        state["rows"][9].update(
+            status="failed",
+            progress=100,
+            message=(
+                "Nuclei URL scan incomplete: exit code 1. Partial findings retained. "
+                "Requests: 24919/671217."
+            ),
+        )
+        state["active"] = []
+
+    monkeypatch.setattr(nuclei_control.signal, "pidfd_send_signal", interrupt)
+    return SimpleNamespace(
+        state=state, expected=expected, proc=proc, path=path, directory=directory, sent=sent
+    )
+
+
+def test_budget_restart_signals_only_verified_child_and_journals_terminal_row(
+    active_nuclei_attempt,
+):
+    attempt = active_nuclei_attempt
+    before = copy.deepcopy(attempt.expected[:9])
+    result = nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc)
+    assert attempt.sent == [signal.SIGINT]
+    assert result["phase"] == "stopped" and result["job"] == attempt.state["rows"][9]
+    assert attempt.state["rows"][:9] == before
+    # The exact recorded row supports response-loss recovery without another signal.
+    assert nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc) == result
+    assert len(attempt.sent) == 1
+    assert (attempt.directory / "results.jsonl").is_file()
+
+
+@pytest.mark.parametrize(
+    "defect", ["uuid", "parent", "argv", "other-scanner", "earlier-job", "other-work"]
+)
+def test_budget_restart_refuses_changed_identity_or_work(active_nuclei_attempt, defect):
+    attempt = active_nuclei_attempt
+    if defect == "uuid":
+        attempt.state["rows"][9]["uuid"] = "changed"
+    elif defect == "parent":
+        text = (attempt.path / "stat").read_text().replace(") S 1 ", ") S 99 ")
+        (attempt.path / "stat").write_text(text)
+    elif defect == "argv":
+        text = (
+            (attempt.path / "cmdline")
+            .read_bytes()
+            .replace(b"-rate-limit\0" b"30", b"-rate-limit\0" b"300")
+        )
+        (attempt.path / "cmdline").write_bytes(text)
+    elif defect == "other-scanner":
+        extra = attempt.proc / "43"
+        extra.mkdir()
+        (extra / "cmdline").write_bytes((attempt.path / "cmdline").read_bytes())
+        (extra / "stat").write_text((attempt.path / "stat").read_text().replace("42 (", "43 ("))
+    elif defect == "earlier-job":
+        attempt.state["rows"][0]["status"] = "failed"
+    else:
+        attempt.state["active"].append(12345)
+    with pytest.raises(RuntimeError):
+        nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc)
+    assert not attempt.sent
+
+
+def test_budget_restart_refuses_missing_exact_stop_record(active_nuclei_attempt):
+    attempt = active_nuclei_attempt
+    nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc)
+    attempt.state["rows"][9]["message"] = "another failure"
+    with pytest.raises(RuntimeError, match="No matching"):
+        nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc)
+    assert len(attempt.sent) == 1
+
+
+def test_budget_restart_refuses_pid_reuse_before_signal(active_nuclei_attempt, monkeypatch):
+    attempt = active_nuclei_attempt
+    original = nuclei_control.inspect_scan
+    inspected = []
+
+    def inspect(*args, **kwargs):
+        info, directory = original(*args, **kwargs)
+        inspected.append(info)
+        if len(inspected) > 1:
+            info["start"] = "different-process"
+        return info, directory
+
+    monkeypatch.setattr(nuclei_control, "inspect_scan", inspect)
+    with pytest.raises(RuntimeError, match="Scanner process changed"):
+        nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc)
+    assert not attempt.sent
+    assert not (attempt.directory / "budget-interruption.json").exists()
+
+
+def test_budget_restart_permission_denied_keeps_running_state(active_nuclei_attempt, monkeypatch):
+    attempt = active_nuclei_attempt
+
+    def denied(descriptor, number):
+        attempt.sent.append(number)
+        raise PermissionError("fixture signal denial")
+
+    monkeypatch.setattr(nuclei_control.signal, "pidfd_send_signal", denied)
+    with pytest.raises(PermissionError):
+        nuclei_control.interrupt_two_hour_scan(attempt.expected, proc=attempt.proc)
+    assert attempt.sent == [signal.SIGINT]
+    assert attempt.state["rows"][9]["status"] == "running"
+    marker = json.loads((attempt.directory / "budget-interruption.json").read_text())
+    assert marker["phase"] == "intent"
 
 
 def test_stalled_scan_retains_counters_logs_and_partial_findings(db, scan, monkeypatch, tmp_path):

@@ -150,7 +150,7 @@ def assert_nuclei_runtime(command, image, root):
             "-B",
             "-c",
             r"""
-import hashlib, json, time, urllib.request
+import copy, hashlib, json, subprocess, tempfile, time, urllib.request
 from pathlib import Path
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -164,6 +164,7 @@ from app.models.url import Url
 from app.models.url_detail import UrlDetail
 from app.models.finding import Finding
 from app.plugins.nucleiurl import run_nucleiurl
+from app.plugins import nucleiurl, nuclei_control
 for attempt in range(20):
     try:
         with urllib.request.urlopen('http://nuclei-ci.example.test:8000/', timeout=2) as response:
@@ -193,7 +194,17 @@ with Session(engine, autoflush=False) as db:
     db.flush()
     db.add(UrlDetail(url_id=url.id, status_code=200, content_type='text/html'))
     db.commit()
-    run_nucleiurl(db, job)
+    native_popen = subprocess.Popen
+    launched = []
+    def capture(command, **kwargs):
+        if '-l' in command and '-stats' in command:
+            launched.append(command)
+        return native_popen(command, **kwargs)
+    subprocess.Popen = capture
+    try:
+        run_nucleiurl(db, job)
+    finally:
+        subprocess.Popen = native_popen
     assert job.status == 'finished' and job.progress == 100, job.message
     finding = db.query(Finding).one()
     assert finding.template_id == 'ccvm-ci-smoke' and finding.matched_at == target
@@ -204,6 +215,63 @@ with Session(engine, autoflush=False) as db:
     assert 'Could not parse nuclei-ignore' not in stderr
     assert (Path('/root/.config/nuclei') / '.nuclei-ignore').is_file()
     assert (attempts[0] / 'execution.json').is_file()
+    # Exercise the real same-namespace PID handle and Nuclei SIGINT handler.
+    # The database snapshot here is synthetic; locked PostgreSQL retry behavior
+    # is checked separately by assert_header_resume_transaction(mode='nuclei').
+    control_catalog = Path('/app/.scanner-data/control-catalog')
+    control_catalog.mkdir()
+    text = Path('/synthetic-catalog/smoke.yaml').read_text()
+    paths = '\n'.join('      - "{{BaseURL}}/?request-%d"' % i for i in range(2000))
+    (control_catalog / 'slow.yaml').write_text(text.replace('      - "{{BaseURL}}/"', paths))
+    nuclei_control.DEFAULT_DIRECTORY = control_catalog
+    attempt = Path(tempfile.mkdtemp(prefix='job-125-', dir='/app/.scanner-data/nuclei-runs'))
+    identity = '11111111-1111-4111-8111-111111111111'
+    (attempt / 'identity.json').write_text(json.dumps({'job_id': 125, 'uuid': identity}))
+    (attempt / 'targets.txt').write_text(target + '\n')
+    command = list(launched[0])
+    for flag, value in {'-t': control_catalog, '-update-template-dir': control_catalog,
+                        '-l': attempt / 'targets.txt', '-o': attempt / 'results.jsonl'}.items():
+        command[command.index(flag) + 1] = str(value)
+    with ((attempt / 'nuclei.stdout.log').open('w') as stdout,
+          (attempt / 'nuclei.stderr.log').open('w') as stderr):
+        child = native_popen(command, stdin=subprocess.DEVNULL,
+                             stdout=stdout, stderr=stderr, text=True)
+        try:
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                assert child.poll() is None, (attempt / 'nuclei.stderr.log').read_text()
+                stats = nucleiurl.read_scan_stats(attempt / 'nuclei.stderr.log')
+                if stats and stats['requests'] > 0:
+                    break
+                time.sleep(0.2)
+            else:
+                raise AssertionError('No active native scan statistics before interruption')
+            nucleiurl.write_diagnostic(attempt / 'progress.json', {
+                'elapsed_seconds': 5, 'timeout_seconds': 7200, 'last_stats': stats})
+            rows = [{'id': i, 'status': 'finished', 'progress': 100} for i in range(9)]
+            rows.append({'id': 125, 'uuid': identity, 'pipeline_id': 'isolated-control',
+                         'plugin': 'nucleiurl', 'worker': 'ccvm-worker-01',
+                         'status': 'running', 'progress': 11,
+                         'message': 'Nuclei URL scan running. Targets: 37. Elapsed: 445s. '
+                                    'Limit: 7200s. Requests: 24919/671217. Results: 0'})
+            expected = copy.deepcopy(rows)
+            def snapshot(pipeline):
+                code = child.poll()
+                if code is not None:
+                    assert code == 1, code
+                    rows[9].update(status='failed', progress=100, message=(
+                        'Nuclei URL scan incomplete: exit code 1. Partial findings retained.'))
+                return copy.deepcopy(rows), [] if code is not None else [125]
+            nuclei_control.snapshot = snapshot
+            record = nuclei_control.interrupt_two_hour_scan(expected)
+            assert record['phase'] == 'stopped' and child.wait(timeout=10) == 1
+            assert nuclei_control.interrupt_two_hour_scan(expected) == record
+            assert (attempt / 'results.jsonl').stat().st_size > 0
+            assert 'Creating resume file:' in (attempt / 'nuclei.stderr.log').read_text()
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
     print(json.dumps({'job_status': job.status, 'findings': 1}))
 """,
             timeout=120,
@@ -212,6 +280,11 @@ with Session(engine, autoflush=False) as db:
         print(
             "Real Nuclei URL plugin finished and imported one finding against the isolated "
             "HTTP fixture; scanner network had no external route",
+            flush=True,
+        )
+        print(
+            "Real Nuclei budget control: exact child interrupted using a PID handle; "
+            "partial raw results retained and repeated control sent no second signal",
             flush=True,
         )
     finally:

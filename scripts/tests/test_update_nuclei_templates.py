@@ -21,6 +21,7 @@ class NucleiTemplateUpdateTests(unittest.TestCase):
     git = header_test.HeaderFindingsUpdateTests.git
 
     def setUp(self):
+        nuclei.INTERRUPTED_JOB = None
         header_test.HeaderFindingsUpdateTests.setUp(self)
         self.header = header_test.load("nuclei_staged_operator_test", "update-header-findings.py")
         self.header.OLD_REVISION = self.header.REVISION
@@ -119,6 +120,94 @@ class NucleiTemplateUpdateTests(unittest.TestCase):
         state["jobs"][9]["message"] = "Nuclei URL scan incomplete: hard timeout after 1200s"
         with self.assertRaises(RuntimeError):
             nuclei.selected_pipeline(state, SELECTION)
+
+    def test_diagnosed_two_hour_limit_can_be_retried(self):
+        self.runtime.snapshot["jobs"][9]["message"] = (
+            "Nuclei URL scan incomplete: hard timeout after 7200s. "
+            "Partial findings retained. Requests: 250000/671217."
+        )
+        self.apply()
+        self.assertEqual(self.runtime.snapshot["jobs"][9]["status"], "queued")
+
+    def running_scan(self):
+        row = self.runtime.snapshot["jobs"][9]
+        row.update(
+            status="running",
+            progress=11,
+            message=(
+                "Nuclei URL scan running. Targets: 37. Elapsed: 445s. Limit: 7200s. "
+                "Requests: 24919/671217. Results: 0"
+            ),
+        )
+        self.runtime.snapshot["active"] = [
+            {"id": row["id"], "plugin": row["plugin"], "status": row["status"]}
+        ]
+        self.runtime.worker_info = {"Config": {"Env": []}}
+        return row
+
+    def test_live_scan_requires_explicit_narrow_control_and_no_other_work(self):
+        self.running_scan()
+        with self.assertRaises(RuntimeError):
+            nuclei.selected_pipeline(self.runtime.state(), SELECTION)
+        nuclei.selected_pipeline(self.runtime.state(), SELECTION, allow_running=True)
+        self.runtime.snapshot["active"].append({"id": 999, "plugin": "dummy", "status": "queued"})
+        with self.assertRaises(RuntimeError):
+            nuclei.selected_pipeline(self.runtime.state(), SELECTION, allow_running=True)
+
+    def test_backup_precedes_graceful_interruption_and_only_exact_terminal_row_can_retry(self):
+        row = self.running_scan()
+        before = copy.deepcopy(self.runtime.snapshot["jobs"][:9])
+        old_docker = self.runtime.docker
+        old_git = self.module.git
+
+        def git(root, *args):
+            if args[0] == "show" and args[1].endswith(":backend/app/plugins/nuclei_control.py"):
+                return "import json\ndef interrupt_two_hour_scan(rows): return {}"
+            return old_git(root, *args)
+
+        def docker(*args):
+            if args[:3] == ("exec", "ccvm-worker", "python"):
+                self.assertIn("backup", self.runtime.actions)
+                compile(args[-1], "<control-source>", "exec")
+                self.runtime.actions.append("graceful-interrupt")
+                row.update(
+                    status="failed",
+                    progress=100,
+                    message=("Nuclei URL scan incomplete: exit code 1. Partial findings retained."),
+                )
+                self.runtime.snapshot["active"] = []
+                return json.dumps({"phase": "stopped", "job": row})
+            return old_docker(*args)
+
+        with patch.object(self.module, "git", git), patch.object(self.runtime, "docker", docker):
+            self.assertTrue(
+                nuclei.interrupt_for_budget(
+                    self.root, self.target, SELECTION, self.header, self.module, self.runtime
+                )
+            )
+            self.assertLess(
+                self.runtime.actions.index("backup"),
+                self.runtime.actions.index("graceful-interrupt"),
+            )
+            self.assertIn("nuclei", self.module.SCANNERS)
+            self.apply()
+        self.assertEqual(self.runtime.snapshot["jobs"][:9], before)
+        self.assertEqual(self.runtime.snapshot["jobs"][9]["status"], "queued")
+        changed = self.runtime.state()
+        changed["jobs"][9].update(status="failed", progress=100, message="unrelated exit code 1")
+        with self.assertRaises(RuntimeError):
+            nuclei.selected_pipeline(changed, SELECTION)
+
+    def test_shorter_private_budget_preserves_the_running_scan(self):
+        self.running_scan()
+        self.runtime.worker_info["Config"]["Env"] = ["CCVM_NUCLEI_TIMEOUT_SECONDS=7200"]
+        with self.assertRaisesRegex(RuntimeError, "Custom scanner settings"):
+            nuclei.interrupt_for_budget(
+                self.root, self.target, SELECTION, self.header, self.module, self.runtime
+            )
+        self.assertEqual(self.runtime.snapshot["jobs"][9]["status"], "running")
+        self.assertNotIn("backup", self.runtime.actions)
+        self.assertNotIn("requeue", self.runtime.actions)
 
     def test_changed_identity_parent_and_other_active_work_are_refused(self):
         for defect in ("uuid", "parent", "running", "different-failure", "other-work"):
