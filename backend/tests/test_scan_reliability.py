@@ -65,7 +65,7 @@ def mock_scanner(monkeypatch, *, lines=(), exit_code=0, timeout=False, stats=())
         kwargs["stderr"].flush()
         return process
 
-    clock = iter([0, nucleiurl.NUCLEI_TIMEOUT_SECONDS if timeout else 600])
+    clock = iter([0, nucleiurl.NUCLEI_TIMEOUT_SECONDS if timeout else 30])
     monkeypatch.setattr(nucleiurl.subprocess, "Popen", launch)
     monkeypatch.setattr(nucleiurl.time, "monotonic", lambda: next(clock, 600))
     monkeypatch.setattr(nucleiurl.time, "sleep", lambda seconds: sleeps.append(seconds))
@@ -88,6 +88,72 @@ def test_hard_timeout_is_incomplete_and_keeps_partial_findings(db, scan, monkeyp
     assert "timeout" in scan.job.message.lower()
     assert "terminate" in launches and not sleeps
     assert db.query(Finding).count() == 1
+
+
+def mock_execution_sequence(monkeypatch, ticks, counts, *, lines=()):
+    stats = (
+        [json.dumps({"percent": "1", "requests": str(counts[0]), "total": "100"})] if counts else []
+    )
+    calls, _ = mock_scanner(monkeypatch, stats=stats, lines=lines)
+    launch = nucleiurl.subprocess.Popen
+    handles = []
+    clock = iter([0, *ticks])
+
+    def start(*args, **kwargs):
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert "-no-stdin" in args[0]
+        process = launch(*args, **kwargs)
+        polls = iter([None] * len(ticks) + [0])
+        process.poll = lambda: next(polls, 0)
+        handles.append(kwargs["stderr"])
+        return process
+
+    remaining = iter(counts[1:] if counts else [])
+
+    def progress(seconds):
+        value = next(remaining, None)
+        if value is not None:
+            handles[0].write(
+                json.dumps({"percent": "2", "requests": str(value), "total": "100"}) + "\n"
+            )
+            handles[0].flush()
+
+    monkeypatch.setattr(nucleiurl.subprocess, "Popen", start)
+    monkeypatch.setattr(nucleiurl.time, "monotonic", lambda: next(clock, ticks[-1]))
+    monkeypatch.setattr(nucleiurl.time, "sleep", progress)
+    return calls
+
+
+def test_scan_with_progress_can_continue_beyond_the_old_twenty_minute_limit(db, scan, monkeypatch):
+    calls = mock_execution_sequence(monkeypatch, [10, 1800], [1, 2])
+    nucleiurl.run_nucleiurl(db, scan.job)
+    assert scan.job.status == "finished", scan.job.message
+    assert "terminate" not in calls
+    assert "Requests: 2/100" in scan.job.message
+
+
+def test_stalled_scan_retains_counters_logs_and_partial_findings(db, scan, monkeypatch, tmp_path):
+    calls = mock_execution_sequence(
+        monkeypatch, [10, 311], [1, 1], lines=[json.dumps(finding_result())]
+    )
+    nucleiurl.run_nucleiurl(db, scan.job)
+    assert scan.job.status == "failed" and "no scanner progress for 300s" in scan.job.message
+    assert "Requests: 1/100" in scan.job.message and "terminate" in calls
+    assert db.query(Finding).count() == 1
+    directory = next((tmp_path / "nuclei-runs").glob("job-*"))
+    execution = json.loads((directory / "execution.json").read_text())
+    assert execution["stalled"] and not execution["hard_timeout"]
+    assert execution["last_stats"]["requests"] == 1
+    assert (directory / "targets.txt").read_text().strip() == scan.url.url
+    assert (directory / "results.jsonl").is_file()
+    assert json.loads((directory / "identity.json").read_text())["uuid"] == scan.job.uuid
+
+
+def test_scanner_without_statistics_is_stopped_and_reports_missing_telemetry(db, scan, monkeypatch):
+    mock_execution_sequence(monkeypatch, [301], None)
+    nucleiurl.run_nucleiurl(db, scan.job)
+    assert scan.job.status == "failed" and "No scanner statistics received" in scan.job.message
+    assert "no scanner progress for 300s" in scan.job.message
 
 
 def test_success_without_findings_is_success(db, scan, monkeypatch):
@@ -192,7 +258,7 @@ def test_live_progress_uses_scanner_stats_instead_of_elapsed_timeout(db, scan, m
     assert launches[0][launches[0].index("-t") + 1] == "/ci/nuclei-templates"
     assert launches[0][launches[0].index("-update-template-dir") + 1] == "/ci/nuclei-templates"
     assert "-silent" not in launches[0]
-    assert observed[0][0] == 23  # 20% of execution range 10..75, after 600s.
+    assert observed[0][0] == 23  # 20% of execution range 10..75.
     assert "40/200" in observed[0][1]
     assert scan.job.status == "finished" and scan.job.progress == 100
 

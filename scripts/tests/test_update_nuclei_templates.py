@@ -69,8 +69,8 @@ class NucleiTemplateUpdateTests(unittest.TestCase):
                 self.module,
                 self.runtime,
                 plan,
-                journal_name="ccvm-nuclei-templates-retry.json",
-                backup_prefix="ccvm-nuclei-templates-before-",
+                journal_name=nuclei.JOURNAL_NAME,
+                backup_prefix=nuclei.BACKUP_PREFIX,
                 install_runtime=self.install,
             )
 
@@ -97,11 +97,28 @@ class NucleiTemplateUpdateTests(unittest.TestCase):
         self.assertFalse(self.runtime.paused)
 
     def test_repeat_only_verifies_and_uses_a_separate_journal(self):
+        old_journal = self.root / ".git/ccvm-nuclei-templates-retry.json"
+        old_journal.write_text('{"phase": "resumed", "target": "previous-template-fix"}')
         self.apply()
         self.runtime.actions.clear()
         self.apply()
         self.assertEqual(self.runtime.actions, [])
         self.assertFalse((self.root / ".git/ccvm-header-findings-resume.json").exists())
+        self.assertEqual(json.loads(old_journal.read_text())["target"], "previous-template-fix")
+
+    def test_diagnosed_old_timeout_and_missing_ignore_policy_can_be_retried(self):
+        self.runtime.snapshot["jobs"][9]["message"] = (
+            "Nuclei URL scan incomplete: hard timeout after 1200s. "
+            "Error: [ERR] Could not read nuclei-ignore file: no such file"
+        )
+        self.apply()
+        self.assertEqual(self.runtime.snapshot["jobs"][9]["status"], "queued")
+
+    def test_unrelated_timeout_cannot_be_retried(self):
+        state = self.runtime.state()
+        state["jobs"][9]["message"] = "Nuclei URL scan incomplete: hard timeout after 1200s"
+        with self.assertRaises(RuntimeError):
+            nuclei.selected_pipeline(state, SELECTION)
 
     def test_changed_identity_parent_and_other_active_work_are_refused(self):
         for defect in ("uuid", "parent", "running", "different-failure", "other-work"):
@@ -138,7 +155,12 @@ class NucleiTemplateUpdateTests(unittest.TestCase):
                 command,
                 0,
                 json.dumps(
-                    {"directory": nuclei.CATALOG, "yaml_files": 100, "selected_templates": 50}
+                    {
+                        "directory": nuclei.CATALOG,
+                        "yaml_files": 100,
+                        "selected_templates": 50,
+                        "ignore_policy": True,
+                    }
                 ),
                 "",
             )

@@ -14,7 +14,9 @@ os.environ["DATABASE_URL"] = "sqlite://"
 
 
 @pytest.fixture(autouse=True)
-def prevent_external_io(monkeypatch):
+def prevent_external_io(monkeypatch, tmp_path):
+    monkeypatch.setenv("CCVM_NUCLEI_LOG_DIR", str(tmp_path / "nuclei-runs"))
+
     def forbidden(*args, **kwargs):
         pytest.fail("Tests must not open network connections or launch scanner processes")
 
