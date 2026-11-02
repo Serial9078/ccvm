@@ -250,6 +250,7 @@ def test_nuclei_rejects_empty_domain():
 
 
 def test_nuclei_launch_disables_redirects(domain, customer, db, monkeypatch):
+    monkeypatch.setattr(nucleiurl, "prepare_templates", lambda: Path("/ci/nuclei-templates"))
     asset = Asset(customer_id=customer["id"], target="https://example.test/")
     record = Url(customer_id=customer["id"], domain_id=domain["id"], url="https://example.test/")
     job = Job(domain_id=domain["id"], plugin="nucleiurl", status="queued")
