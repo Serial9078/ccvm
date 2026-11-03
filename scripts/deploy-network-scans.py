@@ -60,8 +60,8 @@ with engine.connect().execution_options(isolation_level='REPEATABLE READ') as co
         "SELECT id, plugin, status FROM jobs WHERE status IN ('queued','running') ORDER BY id"
     ).mappings()]
     revision = connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar_one()
-    customer = connection.exec_driver_sql(
-        'SELECT id, uuid, name FROM customers WHERE id=:customer_id',
+    customer = connection.execute(sa.text(
+        'SELECT id, uuid, name FROM customers WHERE id=:customer_id'),
         {'customer_id': CUSTOMER_ID}
     ).mappings().one_or_none()
     indexes = [dict(row) for row in connection.exec_driver_sql(

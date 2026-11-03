@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "deploy-network-scans.py"
@@ -292,6 +293,191 @@ class NetworkDeploymentGitGuards(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "untracked"):
                     operator.source_plan(module, root, target)
                 self.assertEqual((root / "docker-compose.yml").read_text(), "private compose")
+
+
+class NetworkDeploymentSequence(unittest.TestCase):
+    def exercise(self, fail=None):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".git").mkdir()
+            (root / "frontend/dist").mkdir(parents=True)
+            (root / "frontend/dist/index.html").write_text("old frontend")
+            (root / "docker-compose.yml").write_text("private source")
+            actions = []
+            config = {
+                "services": {
+                    "backend": {"image": "original-backend"},
+                    "worker": {"image": "original-worker"},
+                }
+            }
+
+            def git(root, *args):
+                if args == ("rev-parse", "--absolute-git-dir"):
+                    return str(root / ".git")
+                actions.append("advance-source")
+                return ""
+
+            def build(module, runtime, root, target, backup):
+                actions.append("build")
+                built = backup / "built"
+                built.mkdir()
+                (built / "index.html").write_text("new frontend")
+                return "fixture-new-worker", built
+
+            class Runtime:
+                def __init__(self):
+                    self.snapshot = snapshot()
+                    self.paused, self.api = False, True
+                    self.worker_image = operator.WORKER_IMAGE
+                    self.worker_info = self.info("worker")
+                    self.opener = SimpleNamespace(
+                        open=lambda *a, **k: io.BytesIO(
+                            (root / "frontend/dist/index.html").read_bytes()
+                        )
+                    )
+
+                def info(self, name):
+                    return {
+                        "Image": self.worker_image if name == "worker" else operator.BACKEND_IMAGE,
+                        "State": {"Running": True},
+                        "Config": {
+                            "Env": [],
+                            "Labels": {
+                                "com.docker.compose.project": "ccvm",
+                                "com.docker.compose.project.config_files": str(
+                                    root / "docker-compose.yml"
+                                ),
+                                "com.docker.compose.project.working_dir": str(root),
+                            },
+                        },
+                    }
+
+                def preflight(self, root):
+                    return copy.deepcopy(self.snapshot)
+
+                def prepare_maintenance(self, backup):
+                    actions.append("helper")
+
+                def state(self):
+                    return copy.deepcopy(self.snapshot)
+
+                def freeze(self):
+                    actions.append("pause")
+                    self.paused = True
+
+                def resume(self):
+                    actions.append("resume")
+                    self.paused = False
+
+                def database_backup(self, path):
+                    assert self.paused and not self.api
+                    actions.append("backup")
+                    if fail == "backup":
+                        raise RuntimeError("backup failed")
+                    path.write_bytes(b"verified dump")
+
+                def migrate(self):
+                    assert self.paused and not self.api and "backup" in actions
+                    actions.append("migrate")
+                    if fail == "migration":
+                        raise RuntimeError("migration failed")
+                    self.snapshot = migrated(self.snapshot)
+                    if fail == "fingerprint":
+                        self.snapshot["tables"]["ports"]["sha256"] = "changed"
+
+                def docker(self, *args):
+                    if args[0] == "inspect":
+                        return json.dumps(
+                            self.info("worker" if args[-1] == "ccvm-worker" else "backend")
+                        )
+                    if args[0] == "image":
+                        return json.dumps([{"Id": "new-worker-image"}])
+                    if args[0] in {"stop", "start"}:
+                        self.api = args[0] == "start"
+                        actions.append("start-api" if self.api else "stop-api")
+                    if args[0] == "compose":
+                        if "config" in args:
+                            resolved = copy.deepcopy(config)
+                            if (root / operator.OVERRIDE).exists():
+                                for name, changes in json.loads(
+                                    (root / operator.OVERRIDE).read_text()
+                                )["services"].items():
+                                    resolved["services"][name].update(changes)
+                            return json.dumps(resolved)
+                        name = args[-1]
+                        actions.append("replace-" + name)
+                        if name == "worker":
+                            if fail == "replace-worker":
+                                raise RuntimeError("replacement failed")
+                            self.worker_image = "new-worker-image"
+                        else:
+                            self.api = True
+                    return ""
+
+            runtime = Runtime()
+
+            def verify(runtime):
+                actions.append("verify-api")
+                if fail == "api":
+                    raise RuntimeError("API failed")
+
+            def publish(runtime, root, built):
+                actions.append("publish")
+                operator.install_frontend(built, root / "frontend/dist")
+
+            module = SimpleNamespace(git=git)
+            plan = operator.BASE, ["backend/app/main.py"]
+            with (
+                patch.object(operator, "source_plan", return_value=plan),
+                patch.object(operator, "build_artifacts", build),
+                patch.object(operator, "validate_service"),
+                patch.object(operator, "verify_api", verify),
+                patch.object(operator, "publish_frontend", publish),
+                patch.object(
+                    operator, "start_once", side_effect=lambda *a: actions.append("queue")
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                if fail:
+                    with self.assertRaises(RuntimeError):
+                        operator.apply(module, runtime, root, "c" * 40, plan)
+                else:
+                    operator.apply(module, runtime, root, "c" * 40, plan)
+            self.assertEqual((root / "docker-compose.yml").read_text(), "private source")
+            if fail:
+                self.assertNotIn("queue", actions)
+                if fail == "backup":
+                    self.assertNotIn("advance-source", actions)
+                    self.assertTrue(runtime.api)
+                    self.assertFalse(runtime.paused)
+                else:
+                    self.assertFalse(runtime.api)
+                    self.assertTrue(runtime.paused)
+            else:
+                expected = [
+                    "build",
+                    "helper",
+                    "stop-api",
+                    "pause",
+                    "backup",
+                    "advance-source",
+                    "migrate",
+                    "resume",
+                    "replace-worker",
+                    "replace-backend",
+                    "verify-api",
+                    "publish",
+                    "queue",
+                ]
+                self.assertEqual(actions, expected)
+
+    def test_artifacts_backup_migration_replacements_and_submission_have_safe_order(self):
+        self.exercise()
+
+    def test_failures_keep_scans_unsubmitted_and_unknown_runtime_closed(self):
+        for stage in ("backup", "migration", "fingerprint", "replace-worker", "api"):
+            with self.subTest(stage=stage):
+                self.exercise(stage)
 
 
 if __name__ == "__main__":
