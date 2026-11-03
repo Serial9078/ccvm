@@ -93,6 +93,21 @@ guessed CVE. Findings are attributed to the individual customer's IP asset and
 deduplicated across scans. A repeated positive observation reopens an existing
 fixed finding. Missing NSE output does not automatically close earlier findings.
 
+SMB protocol/signing NSE results are host-scoped. When both TCP 139 and 445 are
+open, Nmap selects 445; otherwise it uses 139. CCVM evaluates those results once
+on that selected transport and displays a host-level reference on the companion
+service. A missing result on the selected transport still fails coverage; the
+reference never counts as a separate successful enumeration.
+
+`scripts/correct-network-audit.py` installs the reviewed correction and can
+re-evaluate one diagnosed failed audit from retained evidence. It requires a
+successful original process exit, the exact frozen command/targets/port scope,
+complete XML, unchanged service evidence, and only duplicate SMB-139 coverage
+errors. It changes the selected audit status/check references while preserving
+findings, discovery results and scan counters. It performs no network probes,
+creates no pipeline, and refuses to declare an audit complete while a real
+required enumeration remains unavailable. Customer/scope arguments remain local.
+
 This foundation is not Tenable feature parity. UDP/SNMP discovery, authenticated
 SSH/WinRM/SNMPv3 inventories, vendor advisory/OVAL feeds, installed-patch checks,
 credential management, distributed sensors and scheduled reassessment remain
