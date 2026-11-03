@@ -1,4 +1,5 @@
 import copy
+import ipaddress
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
@@ -270,6 +271,43 @@ def test_silence_in_a_probed_protocol_is_incomplete_not_a_clean_audit(
     assert result["findings_created"] == 0
 
 
+@pytest.mark.parametrize(
+    ("signing", "expected_status", "findings"),
+    [
+        ("", "failed", 0),
+        ("Couldn't establish a SMBv2 connection.", "failed", 0),
+        ("Message signing enabled and required", "finished", 0),
+        ("Message signing is disabled and not required!", "finished", 1),
+    ],
+)
+def test_smb2_requires_a_signing_result_and_reports_disabled_signing(
+    client, customer, db, monkeypatch, tmp_path, signing, expected_status, findings
+):
+    run = queue(client, customer, ports="445")
+    discovery = xml(ports="445").replace('name="ssh"', 'name="microsoft-ds"')
+    enumeration = (
+        '<script id="smb-protocols" output="SMB"><table key="dialects">'
+        "<elem>3.1.1</elem></table></script>"
+    )
+    scripts = [enumeration]
+    if signing:
+        node = ET.Element("script", id="smb2-security-mode", output=signing)
+        scripts.append(ET.tostring(node, encoding="unicode"))
+    audit = xml(ports="445", scripts=scripts).replace('name="ssh"', 'name="microsoft-ds"')
+    scanner(monkeypatch, tmp_path, [discovery, audit])
+    process_job(db, claim_next_job(db))
+    process_job(db, claim_next_job(db))
+    assert db.get(Job, run["jobs"][1]["id"]).status == expected_status
+    assert db.query(Finding).count() == findings
+
+
+def test_exclusions_cannot_leave_multicast_hidden_in_a_mixed_supernet():
+    parent, excluded_target = ipaddress.ip_network("192.0.0.0/2"), ipaddress.ip_network("224.0.0.1")
+    exclusions = [str(net) for net in parent.address_exclude(excluded_target)]
+    with pytest.raises(ValueError, match="Multicast"):
+        build_scope(str(parent), exclusions, "custom", "22", 100, 600)
+
+
 def test_cancel_queued_scan_starts_nothing(client, customer, db):
     run = queue(client, customer)
     assert client.post(f"/api/v1/network-scans/{run['id']}/cancel").status_code == 200
@@ -404,6 +442,10 @@ def test_truncated_xml_retains_only_completed_hosts_and_is_incomplete(
         ),
         (
             '<script id="smb2-security-mode" output="Message signing enabled but not required"/>',
+            ["smb-signing-optional"],
+        ),
+        (
+            '<script id="smb2-security-mode" output="Message signing is disabled!"/>',
             ["smb-signing-optional"],
         ),
         ('<script id="rdp-enum-encryption" output="Native RDP: SUCCESS"/>', ["rdp-without-nla"]),

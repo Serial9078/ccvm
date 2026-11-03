@@ -180,13 +180,21 @@ try {
   assert.deepEqual(submitted[0].exclusions, ["192.0.2.2", "192.0.2.3/32"]);
   await mkdir("test-artifacts", { recursive: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  await page.screenshot({ path: "test-artifacts/network-scans.png", fullPage: true });
+  await page.screenshot({
+    path: "test-artifacts/network-scans.png",
+    fullPage: true,
+    animations: "disabled",
+  });
   await page.getByRole("button", { name: "Observed services" }).click();
   await page.getByRole("dialog").getByText("OpenSSH 8.2", { exact: true }).waitFor();
   await page.getByRole("dialog").getByText("ssh2-enum-algos: completed", { exact: true }).waitFor();
   await page.getByRole("dialog").getByText("ssh2-enum-algos: completed", { exact: true }).click();
   await page.getByRole("dialog").getByText("diffie-hellman-group1-sha1", { exact: true }).waitFor();
-  await page.screenshot({ path: "test-artifacts/network-services.png", fullPage: true });
+  await page.screenshot({
+    path: "test-artifacts/network-services.png",
+    fullPage: true,
+    animations: "disabled",
+  });
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByRole("button", { name: "Cancel scan", exact: true }).click();
   await page.getByText("CANCELLING", { exact: true }).waitFor();

@@ -241,6 +241,8 @@ def import_audit(db, scan, job, report):
             }
             if any(script["id"] == "ssl-cert" for script in scripts):
                 expected.add("ssl-enum-ciphers")
+            if network_rules.smb2_advertised(scripts):
+                expected.add("smb2-security-mode")
             service["checks"] = [
                 {
                     "check": check,

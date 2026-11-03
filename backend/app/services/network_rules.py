@@ -23,9 +23,25 @@ def completed(script):
         )
     if script["id"] == "smb-protocols":
         return bool(node.findall("table[@key='dialects']/elem"))
+    if script["id"] == "smb2-security-mode":
+        return bool(
+            re.search(
+                r"Message signing (?:enabled (?:and required|but not required)|(?:is )?disabled)",
+                script["output"],
+            )
+        )
     if script["id"] == "rdp-enum-encryption":
         return bool(re.search(r":\s*SUCCESS", script["output"]))
     return bool(script["output"])
+
+
+def smb2_advertised(scripts):
+    return any(
+        re.fullmatch(r"[23](?:\.\d+)+", (node.text or "").strip())
+        for script in scripts
+        if script["id"] == "smb-protocols"
+        for node in ET.fromstring(script["xml"]).findall("table[@key='dialects']/elem")
+    )
 
 
 def checks_for(service):
@@ -143,7 +159,7 @@ def findings(service, scripts):
                     script,
                 )
         elif identifier == "smb2-security-mode":
-            if re.search(r"Message signing (?:enabled but not required|disabled)", output):
+            if re.search(r"Message signing (?:enabled but not required|(?:is )?disabled)", output):
                 add(
                     "smb-signing-optional",
                     "SMB signing is not required",

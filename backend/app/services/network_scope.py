@@ -121,6 +121,9 @@ def build_scope(target, exclusions, profile, ports, rate, timeout_seconds) -> Sc
         )
     address = ipaddress.IPv4Address if net.version == 4 else ipaddress.IPv6Address
     targets = [str(address(number)) for start, end in intervals for number in range(start, end + 1)]
+    # Mixed supernets may contain prohibited addresses despite their first address.
+    for value in targets:
+        network(value)
     return Scope(
         str(net),
         targets,
