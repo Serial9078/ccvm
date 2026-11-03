@@ -163,6 +163,12 @@ class NetworkDeploymentGuards(unittest.TestCase):
             self.assertEqual(service["environment"], {"CCVM_NETWORK_ALLOWED_CIDRS": "192.0.2.0/24"})
             self.assertEqual(service["pull_policy"], "never")
 
+    def test_omitted_restart_policy_matches_dockers_explicit_no_default(self):
+        config, container, image = service_fixture()
+        config["services"]["worker"].pop("restart")
+        container["HostConfig"]["RestartPolicy"]["Name"] = "no"
+        operator.validate_service(config, "worker", container, image)
+
     def test_frontend_publish_keeps_bind_directory_and_previous_client_assets(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

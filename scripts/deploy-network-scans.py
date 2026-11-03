@@ -269,7 +269,7 @@ def validate_service(config, service, container, image):
         (spec.get("user", inherited.get("User")) or "root") == (actual.get("User") or "root"),
         bool(spec.get("privileged")) == container["HostConfig"]["Privileged"],
         bool(spec.get("read_only")) == container["HostConfig"]["ReadonlyRootfs"],
-        spec.get("restart", "") == container["HostConfig"]["RestartPolicy"]["Name"],
+        (spec.get("restart") or "no") == (container["HostConfig"]["RestartPolicy"]["Name"] or "no"),
     ]
     expected_mounts = set()
     for mount in spec.get("volumes", []):
@@ -301,8 +301,23 @@ def validate_service(config, service, container, image):
     }
     checks.append(expected_ports == actual_ports)
     if not all(checks):
+        names = (
+            "environment",
+            "image",
+            "command",
+            "entrypoint",
+            "working_dir",
+            "user",
+            "privileged",
+            "read_only",
+            "restart",
+            "mounts",
+            "networks",
+            "ports",
+        )
+        fields = ", ".join(name for name, valid in zip(names, checks, strict=True) if not valid)
         raise RuntimeError(
-            f"{service}: Compose/container configuration differs; originals preserved"
+            f"{service}: Compose/container configuration differs in {fields}; originals preserved"
         )
 
 
