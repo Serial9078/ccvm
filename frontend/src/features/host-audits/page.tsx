@@ -580,7 +580,7 @@ export function HostAudits() {
     window.addEventListener("pagehide", clear);
     window.addEventListener("pageshow", clear);
     return () => {
-      sessionGeneration.current++;
+      clear();
       window.removeEventListener("pagehide", clear);
       window.removeEventListener("pageshow", clear);
     };
