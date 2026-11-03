@@ -8,15 +8,18 @@ import base64
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import logging
+import os
 import resource
+import signal
 import sys
 from pathlib import Path
 
 import paramiko
 import requests
-import winrm
+from winrm.protocol import Protocol
 
 MAX_OUTPUT = 8 * 1024 * 1024
 
@@ -111,14 +114,17 @@ def restricted_session(session, endpoint, ca_bundle):
     return session
 
 
-def winrm_collect(payload):
-    target = payload["target"]
+def winrm_protocol(payload):
+    target = str(ipaddress.ip_address(payload["target"]))
     if ":" in target:
         target = f"[{target}]"
     endpoint = f"https://{target}:{payload['port']}/wsman"
-    session = winrm.Session(
-        endpoint,
-        auth=(payload["username"], payload["secrets"]["password"]),
+    # Session's convenience URL parser rewrites bracketed IPv6 URLs in pywinrm
+    # 0.5.0. Protocol accepts the exact verified literal-IP HTTPS endpoint.
+    protocol = Protocol(
+        endpoint=endpoint,
+        username=payload["username"],
+        password=payload["secrets"]["password"],
         transport="ntlm",
         server_cert_validation="validate",
         ca_trust_path=payload.get("ca_bundle"),
@@ -127,21 +133,47 @@ def winrm_collect(payload):
         operation_timeout_sec=15,
         read_timeout_sec=20,
     )
-    transport = session.protocol.transport
+    if protocol.transport.endpoint != endpoint:
+        raise TransportFailure("invalid_request")
+    return protocol, endpoint
+
+
+def winrm_collect(payload):
+    protocol, endpoint = winrm_protocol(payload)
+    transport = protocol.transport
     http = restricted_session(transport.build_session(), endpoint, payload.get("ca_bundle"))
     source = Path(__file__).with_name("windows_inventory.ps1").read_text()
     mode = payload["mode"]
     if mode not in {"connection", "inventory"}:
         raise TransportFailure("invalid_request")
+    shell, command = None, None
     try:
-        result = session.run_ps(f"$ccvmMode = '{mode}'\n" + source)
-        if result.status_code != 0:
+        shell = protocol.open_shell(noprofile=True, codepage=65001, idle_timeout="PT60S")
+        encoded = base64.b64encode(
+            (f"$ccvmMode = '{mode}'\n" + source).encode("utf-16-le")
+        ).decode()
+        command = protocol.run_command(
+            shell,
+            "powershell",
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            skip_cmd_shell=True,
+        )
+        stdout, stderr, status = protocol.get_command_output(shell, command)
+        if status != 0:
             raise TransportFailure("remote_command_failed")
-        if len(result.std_out) > MAX_OUTPUT:
+        if len(stdout) > MAX_OUTPUT:
             raise TransportFailure("output_limit")
-        return json.loads(result.std_out.decode("utf-8-sig"))
+        return json.loads(stdout.decode("utf-8-sig"))
     finally:
-        http.close()
+        try:
+            if shell and command:
+                protocol.cleanup_command(shell, command)
+        finally:
+            try:
+                if shell:
+                    protocol.close_shell(shell, close_session=False)
+            finally:
+                http.close()
 
 
 def main():
@@ -154,6 +186,10 @@ def main():
         if len(incoming) > 512 * 1024:
             raise TransportFailure("invalid_request")
         payload = json.loads(incoming)
+        # Independent wall-clock enforcement still stops remote authentication
+        # if the parent is blocked while checking database cancellation state.
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
+        signal.alarm(45 if payload["mode"] == "connection" else 180)
         data = winrm_collect(payload) if payload["kind"] == "winrm" else ssh_collect(payload)
         output = json.dumps({"inventory": data}, ensure_ascii=True).encode()
         if len(output) > MAX_OUTPUT:

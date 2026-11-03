@@ -414,18 +414,30 @@ def test_winrm_transport_uses_https_validation_ntlm_and_a_fixed_collector(monkey
     seen = []
     http = SimpleNamespace(close=lambda: None, send=lambda request, **kw: None)
 
-    def session(endpoint, **options):
-        seen.append((endpoint, options))
+    def protocol(**options):
+        seen.append(options)
+
+        def command(shell, executable, arguments, **kwargs):
+            assert shell == "shell" and executable == "powershell"
+            assert kwargs["skip_cmd_shell"] is True
+            assert "-NoProfile" in arguments and "-NonInteractive" in arguments
+            seen.append(base64.b64decode(arguments[-1]).decode("utf-16-le"))
+            return "command"
+
         return SimpleNamespace(
-            protocol=SimpleNamespace(transport=SimpleNamespace(build_session=lambda: http)),
-            run_ps=lambda script: seen.append(script)
-            or SimpleNamespace(
-                status_code=0,
-                std_out=__import__("json").dumps(inventory("Windows")).encode(),
+            transport=SimpleNamespace(build_session=lambda: http, endpoint=options["endpoint"]),
+            open_shell=lambda **kw: "shell",
+            run_command=command,
+            get_command_output=lambda *args: (
+                __import__("json").dumps(inventory("Windows")).encode(),
+                b"",
+                0,
             ),
+            cleanup_command=lambda *args: seen.append("cleaned-command"),
+            close_shell=lambda *args, **kw: seen.append("closed-shell"),
         )
 
-    monkeypatch.setattr(host_audit_transport.winrm, "Session", session)
+    monkeypatch.setattr(host_audit_transport, "Protocol", protocol)
     result = host_audit_transport.winrm_collect(
         {
             "target": "2001:db8::1",
@@ -437,14 +449,36 @@ def test_winrm_transport_uses_https_validation_ntlm_and_a_fixed_collector(monkey
         }
     )
     assert result["os"]["family"] == "Windows"
-    assert seen[0][0] == "https://[2001:db8::1]:5986/wsman"
-    assert seen[0][1]["transport"] == "ntlm"
-    assert seen[0][1]["server_cert_validation"] == "validate"
-    assert seen[0][1]["proxy"] is None
-    assert seen[0][1]["send_cbt"] is True
+    assert seen[0]["endpoint"] == "https://[2001:db8::1]:5986/wsman"
+    assert seen[0]["transport"] == "ntlm"
+    assert seen[0]["server_cert_validation"] == "validate"
+    assert seen[0]["proxy"] is None
+    assert seen[0]["send_cbt"] is True
     assert "Win32_Product" not in seen[1]
     assert "Get-HotFix" in seen[1]
     assert PASSWORD not in seen[1]
+    assert seen[-2:] == ["cleaned-command", "closed-shell"]
+
+
+@pytest.mark.parametrize(
+    "target,endpoint",
+    [
+        ("192.0.2.1", "https://192.0.2.1:5986/wsman"),
+        ("2001:db8::1", "https://[2001:db8::1]:5986/wsman"),
+    ],
+)
+def test_real_winrm_constructor_preserves_literal_https_endpoint(target, endpoint):
+    protocol, url = host_audit_transport.winrm_protocol(
+        {
+            "target": target,
+            "port": 5986,
+            "username": "fixture",
+            "secrets": {"password": PASSWORD},
+        }
+    )
+    assert url == protocol.transport.endpoint == endpoint
+    assert protocol.transport.server_cert_validation == "validate"
+    assert protocol.transport.auth_method == "ntlm"
 
 
 @pytest.mark.parametrize("cancel", [False, True])

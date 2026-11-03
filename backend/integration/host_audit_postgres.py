@@ -74,10 +74,48 @@ def seed_network_history(engine):
                 )
             )
             db.commit()
+            identities = {
+                "scan": scan.id,
+                "customer": customer.id,
+                "host": host.id,
+                "ip_asset": asset.id,
+                "network_asset": scan.asset_id,
+                "discovery": scan.discovery_job_id,
+                "audit": scan.audit_job_id,
+            }
     print(
         "Seeded existing completed network jobs and service evidence before inventory migration",
         flush=True,
     )
+    return identities
+
+
+def remove_network_fixture(engine, identities):
+    """Remove only this disposable fixture after its migration preservation proof.
+
+    The subsequent historical operator test intentionally downgrades an empty
+    network schema. Real retained history must (and does) block that downgrade.
+    """
+    from app.models.asset import Asset
+    from app.models.host import Host
+    from app.models.job import Job
+    from app.models.network_scan import NetworkObservation, NetworkScan
+
+    with Session(engine) as db:
+        scan = db.get(NetworkScan, identities["scan"])
+        assert scan.customer_id == identities["customer"] and scan.target == "192.0.2.11/32"
+        assert scan.discovery_job.status == scan.audit_job.status == "finished"
+        for model, column, values in (
+            (NetworkObservation, NetworkObservation.scan_id, [identities["scan"]]),
+            (NetworkScan, NetworkScan.id, [identities["scan"]]),
+            (Job, Job.id, [identities["audit"]]),
+            (Job, Job.id, [identities["discovery"]]),
+            (Host, Host.id, [identities["host"]]),
+            (Asset, Asset.id, [identities["ip_asset"], identities["network_asset"]]),
+            (Customer, Customer.id, [identities["customer"]]),
+        ):
+            db.execute(sa.delete(model).where(column.in_(values)))
+        db.commit()
 
 
 def seed(db):

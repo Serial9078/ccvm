@@ -1222,9 +1222,10 @@ def test_empty_postgresql_database_migrates_to_head():
             "Network deployment fingerprints: existing ports and all prior rows preserved",
             flush=True,
         )
-        from integration.host_audit_postgres import seed_network_history
+        from integration.host_audit_postgres import remove_network_fixture, seed_network_history
 
-        seed_network_history(engine)
+        without_network_fixture = existing_rows
+        network_fixture = seed_network_history(engine)
         with engine.connect() as connection:
             existing_rows = all_data_rows(connection)
         existing_rows["audit_credentials"] = []
@@ -1237,6 +1238,9 @@ def test_empty_postgresql_database_migrates_to_head():
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
+        remove_network_fixture(engine, network_fixture)
+        with engine.connect() as connection:
+            assert all_data_rows(connection) == without_network_fixture
             assert_finding_url_persistence(connection)
             assert_header_resume_transaction(connection)
             assert_long_url_persistence(connection)

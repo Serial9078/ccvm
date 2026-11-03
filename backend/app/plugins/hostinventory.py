@@ -74,6 +74,20 @@ def run_hostinventory(db, job):
         data = host_inventory.collect(payload, cancelled=cancelled)
         # Recheck after collection as well; revocation/scope changes must not be
         # missed between the final poll and publishing a completed inventory.
+        audit = (
+            db.query(HostAudit)
+            .filter(HostAudit.id == audit.id)
+            .with_for_update()
+            .populate_existing()
+            .one()
+        )
+        credential = (
+            db.query(AuditCredential)
+            .filter(AuditCredential.id == credential.id)
+            .with_for_update()
+            .populate_existing()
+            .one()
+        )
         if cancelled():
             raise host_inventory.CollectionCancelled("Host audit cancelled or credential revoked")
         audit.inventory = host_inventory.normalize_inventory(data, credential.kind, audit.mode)

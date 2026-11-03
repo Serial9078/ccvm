@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -63,7 +64,7 @@ class Server(paramiko.ServerInterface):
 
 
 @contextmanager
-def server():
+def server(*, hang=False):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -95,6 +96,10 @@ def server():
             # using this CI host's real package database. No arbitrary commands.
             expected = (BACKEND / "app/services/linux_inventory.py").read_bytes()
             assert bytes(command_source) == expected
+            if hang:
+                while transport.is_active():
+                    time.sleep(0.05)
+                return
             mode = state.command.decode().split()[-1]
             result = subprocess.run(
                 [sys.executable, "-I", "-", mode],
@@ -186,6 +191,15 @@ def main():
         host_inventory.normalize_inventory(result, "ssh_key", "connection")
         assert state.authentications == ["key"]
     print("Native SSH: encrypted private key and connection-only mode")
+    with server(hang=True) as (port, state):
+        deadline = time.monotonic() + 2
+        try:
+            host_inventory.collect(payload(port), cancelled=lambda: time.monotonic() >= deadline)
+            raise AssertionError("Cancelled SSH collection returned successfully")
+        except host_inventory.CollectionCancelled:
+            pass
+        assert state.authentications == ["password"]
+    print("Native SSH: cancellation terminates and reaps the real transport process")
 
 
 if __name__ == "__main__":
