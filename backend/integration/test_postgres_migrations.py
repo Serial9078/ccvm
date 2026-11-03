@@ -1024,6 +1024,18 @@ def assert_network_downgrade_preserves_evidence(engine, url):
     print("PostgreSQL network downgrade refused data loss and preserved all rows", flush=True)
 
 
+def network_deployment_snapshot():
+    spec = importlib.util.spec_from_file_location(
+        "network_deployment_operator", BACKEND.parent / "scripts/deploy-network-scans.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(module.STATE_CODE, "<network-deployment-snapshot>", "exec"), {})
+    return module, json.loads(output.getvalue())
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -1083,7 +1095,14 @@ def test_empty_postgresql_database_migrates_to_head():
         existing_rows["network_observations"] = []
         for row in existing_rows["ports"]:
             row.update(state="open", product=None, version=None, tunnel=None, cpe=None)
+        deployment_operator, deployment_before = network_deployment_snapshot()
         alembic_command(url, "upgrade", "head", log_name="upgrade-existing-urls")
+        _, deployment_after = network_deployment_snapshot()
+        deployment_operator.assert_preserved(deployment_before, deployment_after)
+        print(
+            "Network deployment fingerprints: existing ports and all prior rows preserved",
+            flush=True,
+        )
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
