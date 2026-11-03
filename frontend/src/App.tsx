@@ -11,6 +11,7 @@ import { Domains } from "./features/domains/page";
 import { Findings } from "./features/findings/page";
 import { Hosts } from "./features/hosts/page";
 import { Jobs } from "./features/jobs/page";
+import { Networks } from "./features/networks/page";
 import { Pipelines } from "./features/pipelines/page";
 import { Ports } from "./features/ports/page";
 import { Screenshots } from "./features/screenshots/page";
@@ -49,6 +50,8 @@ export default function App() {
           path="/domains"
           element={<Domains />}
         />
+
+        <Route path="/networks" element={<Networks />} />
 
         <Route
           path="/pipelines"

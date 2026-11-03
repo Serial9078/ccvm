@@ -303,6 +303,8 @@ function PipelineCard({
                 sx={{ fontWeight: 800 }}
               >
                 {pipeline.domain_name
+                  || pipeline.asset_name
+                  || pipeline.asset_target
                   || `Domain #${pipeline.domain_id ?? "-"}`}
               </Typography>
 

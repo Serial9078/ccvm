@@ -8,6 +8,7 @@ from app.api.v1 import (
     findings,
     hosts,
     jobs,
+    network_scans,
     pipelines,
     ports,
     subdomains,
@@ -94,6 +95,7 @@ app.include_router(
     jobs.router,
     prefix="/api/v1",
 )
+app.include_router(network_scans.router, prefix="/api/v1")
 app.include_router(
     findings.router,
     prefix="/api/v1",

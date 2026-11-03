@@ -22,6 +22,9 @@ class PipelineOut(BaseModel):
     pipeline_id: str
     domain_id: int | None = None
     domain_name: str | None = None
+    asset_id: int | None = None
+    asset_name: str | None = None
+    asset_target: str | None = None
 
     status: str
     progress: int

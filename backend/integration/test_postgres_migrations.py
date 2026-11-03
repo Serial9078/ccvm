@@ -614,6 +614,11 @@ def finding_operator():
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Exercise the same legacy safeguards against the additive current schema
+    # in CI; production updater sources retain their pinned revision contracts.
+    module.REVISION = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini"))).get_heads()[
+        0
+    ]
     return module
 
 
@@ -738,6 +743,7 @@ def assert_header_resume_transaction(connection, mode="header"):
         )
         operator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(operator)
+        operator.REVISION = finding_operator().REVISION
         position, old_status, old_progress = 9, "failed", 100
     with connection.begin_nested() as fixture_transaction:
         with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
@@ -894,6 +900,130 @@ def assert_downgrade_preserves_long_urls(engine, url):
     print("PostgreSQL downgrade refusal preserved schema, long URLs and dependent rows", flush=True)
 
 
+def assert_network_postgresql_behavior(connection):
+    """Native JSON, inventory/customer ownership and positive-evidence deduplication."""
+    import xml.etree.ElementTree as ET
+
+    from sqlalchemy.orm import Session
+
+    from app.api.v1.network_scans import start_scan
+    from app.models.asset import Asset
+    from app.models.customer import Customer
+    from app.models.finding import Finding
+    from app.models.network_scan import NetworkScan
+    from app.models.port import Port
+    from app.plugins.network import import_audit, import_discovery
+    from app.schemas.network_scan import NetworkScanCreate
+    from app.services.nmap import script_data
+
+    with connection.begin_nested() as transaction:
+        with Session(
+            bind=connection, join_transaction_mode="create_savepoint", autoflush=False
+        ) as db:
+            customer = Customer(name="Network PostgreSQL CI")
+            db.add(customer)
+            db.commit()
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setenv("CCVM_NETWORK_ALLOWED_CIDRS", "192.0.2.0/24")
+                result = start_scan(
+                    NetworkScanCreate(
+                        customer_id=customer.id,
+                        target="192.0.2.0/30",
+                        exclusions=["192.0.2.2"],
+                        profile="custom",
+                        ports="22",
+                    ),
+                    db,
+                )
+            scan = db.get(NetworkScan, result["id"])
+            assert scan.targets == ["192.0.2.1"]
+            assert (
+                connection.scalar(
+                    sa.text("SELECT pg_typeof(targets)::text FROM network_scans LIMIT 1")
+                )
+                == "json"
+            )
+            script = ET.fromstring(
+                '<script id="ssh2-enum-algos" output="KEX">'
+                '<table key="kex_algorithms"><elem>diffie-hellman-group1-sha1</elem>'
+                "</table></script>"
+            )
+            service = {
+                "port": 22,
+                "protocol": "tcp",
+                "state": "open",
+                "service": "ssh",
+                "product": "OpenSSH",
+                "version": "V" * 3000,
+                "extra_info": None,
+                "tunnel": None,
+                "method": "probed",
+                "confidence": 10,
+                "cpe": ["cpe:/a:openbsd:openssh:8.2"],
+                "scripts": [script_data(script)],
+            }
+            report = {
+                "hosts": {"192.0.2.1": {"ports": [service], "extraports": [], "scripts": []}},
+                "ports": {22},
+                "errors": [],
+                "version": "CI",
+            }
+            import_discovery(db, scan, db.get(Asset, scan.asset_id), report)
+            db.commit()
+            assert import_audit(db, scan, scan.audit_job, report) == (1, 0)
+            assert import_audit(db, scan, scan.audit_job, report) == (0, 1)
+            db.commit()
+            finding = db.query(Finding).filter_by(scanner="network-audit").one()
+            assert finding.cve is None and finding.matched_at == "tcp://192.0.2.1:22"
+            assert db.get(Asset, finding.asset_id).customer_id == customer.id
+            port = db.query(Port).filter_by(source="nmap-network").one()
+            assert port.version == "V" * 3000 and port.cpe == ["cpe:/a:openbsd:openssh:8.2"]
+        transaction.rollback()
+    print(
+        "PostgreSQL network scans: JSON scope, full service evidence "
+        "and idempotent findings passed",
+        flush=True,
+    )
+
+
+def assert_network_downgrade_preserves_evidence(engine, url):
+    from sqlalchemy.orm import Session
+
+    from app.api.v1.network_scans import start_scan
+    from app.models.customer import Customer
+    from app.schemas.network_scan import NetworkScanCreate
+
+    with Session(engine) as db:
+        customer = Customer(name="Retained network evidence")
+        db.add(customer)
+        db.commit()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("CCVM_NETWORK_ALLOWED_CIDRS", "192.0.2.0/24")
+            start_scan(
+                NetworkScanCreate(
+                    customer_id=customer.id, target="192.0.2.1", profile="custom", ports="22"
+                ),
+                db,
+            )
+    with engine.connect() as connection:
+        before = all_data_rows(connection)
+    output = alembic_command(
+        url,
+        "downgrade",
+        "d91e6a2f4c80",
+        log_name="network-downgrade-retains-evidence",
+        expect_success=False,
+    )
+    assert "Network scan/service evidence exists" in output
+    with engine.connect() as connection:
+        assert all_data_rows(connection) == before
+        assert_schema_matches_models(connection)
+        assert set(MigrationContext.configure(connection).get_current_heads()) == {
+            finding_operator().REVISION
+        }
+    print("PostgreSQL network downgrade refused data loss and preserved all rows", flush=True)
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -938,8 +1068,21 @@ def test_empty_postgresql_database_migrates_to_head():
             assert all_data_rows(connection) == existing_rows
             assert_operator_readonly_snapshot(connection)
         seed_finding_url_regression(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO ports (host_id, port, protocol, service, source) "
+                    "SELECT id, 22, 'tcp', 'ssh', 'existing-port-regression' FROM hosts LIMIT 1"
+                )
+            )
         with engine.connect() as connection:
             existing_rows = all_data_rows(connection)
+        # The additive migration must preserve the graph, backfill existing
+        # ports, and create empty network tables without inventing scan work.
+        existing_rows["network_scans"] = []
+        existing_rows["network_observations"] = []
+        for row in existing_rows["ports"]:
+            row.update(state="open", product=None, version=None, tunnel=None, cpe=None)
         alembic_command(url, "upgrade", "head", log_name="upgrade-existing-urls")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
@@ -952,6 +1095,7 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_header_resume_transaction(connection)
             assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
+            assert_network_postgresql_behavior(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
         from integration.operator_docker import assert_paused_worker_maintenance
 
@@ -962,6 +1106,7 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_schema_matches_models(connection)
         assert_finding_downgrade_refuses_truncation(engine, url)
         assert_downgrade_preserves_long_urls(engine, url)
+        assert_network_downgrade_preserves_evidence(engine, url)
     finally:
         try:
             with engine.connect() as connection:

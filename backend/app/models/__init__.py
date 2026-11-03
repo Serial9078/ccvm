@@ -4,6 +4,7 @@ from app.models.domain import Domain
 from app.models.finding import Finding
 from app.models.host import Host
 from app.models.job import Job
+from app.models.network_scan import NetworkObservation, NetworkScan
 from app.models.plugin import Plugin
 from app.models.port import Port
 from app.models.scan import Scan
@@ -21,6 +22,8 @@ __all__ = [
     "Finding",
     "Host",
     "Job",
+    "NetworkScan",
+    "NetworkObservation",
     "Plugin",
     "Port",
     "Scan",

@@ -15,6 +15,9 @@ Cyber Exposure & Vulnerability Management Platform
 
 See ./docs
 
+For scoped IP/CIDR scanning, service inventory and SSH/TLS/SMB/RDP configuration
+checks, see [Network scanning](docs/network-scanning.md).
+
 For backend development checks, tests, and the CI repair report, see
 [Backend quality checks](docs/backend-quality.md).
 

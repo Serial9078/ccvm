@@ -18,6 +18,9 @@ export interface Pipeline {
 
   domain_id?: number | null;
   domain_name?: string | null;
+  asset_id?: number | null;
+  asset_name?: string | null;
+  asset_target?: string | null;
 
   status: string;
   progress: number;

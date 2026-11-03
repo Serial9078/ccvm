@@ -8,6 +8,11 @@ export interface Port {
   service?: string | null;
   banner?: string | null;
   source?: string | null;
+  state?: string;
+  product?: string | null;
+  version?: string | null;
+  tunnel?: string | null;
+  cpe?: string[] | null;
 }
 
 export async function getPorts(): Promise<Port[]> {
