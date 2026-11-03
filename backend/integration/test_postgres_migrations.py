@@ -1212,13 +1212,24 @@ def test_empty_postgresql_database_migrates_to_head():
         for row in existing_rows["ports"]:
             row.update(state="open", product=None, version=None, tunnel=None, cpe=None)
         deployment_operator, deployment_before = network_deployment_snapshot()
-        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-urls")
+        # The retained production operator is pinned to its original schema.
+        # Verify that deployment at its real revision before testing the new
+        # additive migration against populated network history.
+        alembic_command(url, "upgrade", "f93b70a4e628", log_name="upgrade-existing-urls")
         _, deployment_after = network_deployment_snapshot()
         deployment_operator.assert_preserved(deployment_before, deployment_after)
         print(
             "Network deployment fingerprints: existing ports and all prior rows preserved",
             flush=True,
         )
+        from integration.host_audit_postgres import seed_network_history
+
+        seed_network_history(engine)
+        with engine.connect() as connection:
+            existing_rows = all_data_rows(connection)
+        existing_rows["audit_credentials"] = []
+        existing_rows["host_audits"] = []
+        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-network-history")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:

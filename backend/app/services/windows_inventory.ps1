@@ -20,7 +20,7 @@ if ($ccvmMode -eq 'inventory') {
                     Where-Object { $_.DisplayName } |
                     Select-Object @{N='name';E={[string]$_.DisplayName}},
                                   @{N='version';E={[string]$_.DisplayVersion}},
-                                  @{N='architecture';E={'registry'}})
+                                  @{N='architecture';E={'unknown'}})
             }
         }
         $software = @{status=$(if ($rows.Count -gt 10000) {'truncated'} else {'complete'});

@@ -16,6 +16,70 @@ from app.services import audit_vault, host_inventory
 SECRET = "synthetic-pg-inventory-fixture"
 
 
+def seed_network_history(engine):
+    from app.api.v1.network_scans import start_scan
+    from app.models.asset import Asset
+    from app.models.host import Host
+    from app.models.network_scan import NetworkObservation, NetworkScan
+    from app.schemas.network_scan import NetworkScanCreate
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("CCVM_NETWORK_ALLOWED_CIDRS", "192.0.2.0/24")
+        with Session(engine) as db:
+            customer = Customer(name="Retained pre-inventory network history")
+            db.add(customer)
+            db.commit()
+            result = start_scan(
+                NetworkScanCreate(
+                    customer_id=customer.id, target="192.0.2.11", profile="custom", ports="22"
+                ),
+                db,
+            )
+            scan = db.get(NetworkScan, result["id"])
+            for job in (scan.discovery_job, scan.audit_job):
+                job.status, job.progress, job.message = "finished", 100, "Retained network fixture"
+            host = Host(
+                customer_id=customer.id,
+                hostname="retained-host",
+                ip_address="192.0.2.11",
+                source="nmap-network",
+                alive=True,
+            )
+            asset = Asset(
+                customer_id=customer.id, type="ip", target="192.0.2.11", ip_address="192.0.2.11"
+            )
+            db.add_all([host, asset])
+            db.flush()
+            db.add(
+                NetworkObservation(
+                    scan_id=scan.id,
+                    host_id=host.id,
+                    asset_id=asset.id,
+                    ip_address="192.0.2.11",
+                    services=[
+                        {
+                            "port": 22,
+                            "state": "open",
+                            "service": "ssh",
+                            "method": "probed",
+                            "checks": [
+                                {
+                                    "check": "ssh2-enum-algos",
+                                    "status": "completed",
+                                    "output": "retained fixture evidence",
+                                }
+                            ],
+                        }
+                    ],
+                )
+            )
+            db.commit()
+    print(
+        "Seeded existing completed network jobs and service evidence before inventory migration",
+        flush=True,
+    )
+
+
 def seed(db):
     customer = Customer(name="Synthetic authenticated inventory")
     db.add(customer)
