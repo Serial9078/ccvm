@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.deps import get_db
+from app.models.asset import Asset
 from app.models.domain import Domain
 from app.models.job import Job
 from app.schemas.pipeline import PipelineOut
@@ -24,6 +25,9 @@ def calculate_pipeline_status(
 
     if "failed" in statuses:
         return "failed"
+
+    if "cancelled" in statuses:
+        return "cancelled"
 
     if "queued" in statuses:
         return "queued"
@@ -64,6 +68,8 @@ def serialize_pipeline(
     )
 
     domain_name = None
+    asset_id = next((job.asset_id for job in ordered_jobs if job.asset_id is not None), None)
+    asset = db.get(Asset, asset_id) if asset_id is not None else None
 
     if domain_id is not None:
         domain = db.get(
@@ -78,6 +84,9 @@ def serialize_pipeline(
         "pipeline_id": pipeline_id,
         "domain_id": domain_id,
         "domain_name": domain_name,
+        "asset_id": asset_id,
+        "asset_name": asset.name if asset else None,
+        "asset_target": asset.target if asset else None,
         "status": calculate_pipeline_status(ordered_jobs),
         "progress": calculate_pipeline_progress(ordered_jobs),
         "total_jobs": len(ordered_jobs),

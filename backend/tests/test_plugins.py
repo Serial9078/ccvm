@@ -117,6 +117,8 @@ def test_registry_keeps_hardened_katana_and_handles_unknown_plugins():
         "httpx",
         "katana",
         "naabu",
+        "networkaudit",
+        "networkdiscovery",
         "nuclei",
         "nucleiurl",
         "screenshot",

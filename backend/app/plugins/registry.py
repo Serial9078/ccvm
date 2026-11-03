@@ -20,6 +20,7 @@ from app.plugins.legacy import (
     run_nuclei,
     run_subfinder,
 )
+from app.plugins.network import run_networkaudit, run_networkdiscovery
 from app.plugins.nucleiurl import (
     run_nucleiurl,
 )
@@ -51,6 +52,8 @@ PLUGIN_REGISTRY: dict[
     "screenshot": run_screenshot,
     "nucleiurl": run_nucleiurl,
     "nuclei": run_nuclei,
+    "networkdiscovery": run_networkdiscovery,
+    "networkaudit": run_networkaudit,
     "dummy": run_dummy,
 }
 

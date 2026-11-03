@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.session import Base
@@ -16,5 +16,10 @@ class Port(Base):
     service: Mapped[str | None] = mapped_column(String(100), nullable=True)
     banner: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    state: Mapped[str] = mapped_column(String(30), default="open", server_default="open")
+    product: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[str | None] = mapped_column(Text)
+    tunnel: Mapped[str | None] = mapped_column(String(30))
+    cpe: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
 
     host = relationship("Host")

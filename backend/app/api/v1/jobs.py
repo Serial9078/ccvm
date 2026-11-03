@@ -81,6 +81,10 @@ def create_job(
     db: Session = Depends(get_db),
 ):
     plugin = payload.plugin.strip().lower()
+    if plugin in {"networkdiscovery", "networkaudit"}:
+        raise HTTPException(
+            status_code=400, detail="Create scoped network scans via /network-scans"
+        )
 
     if plugin in DISCOVERY_PLUGINS and not payload.domain_id:
         raise HTTPException(

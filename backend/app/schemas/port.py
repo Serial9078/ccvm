@@ -8,6 +8,11 @@ class PortCreate(BaseModel):
     service: str | None = None
     banner: str | None = None
     source: str | None = None
+    state: str = "open"
+    product: str | None = None
+    version: str | None = None
+    tunnel: str | None = None
+    cpe: list[str] | None = None
 
 
 class PortOut(PortCreate):

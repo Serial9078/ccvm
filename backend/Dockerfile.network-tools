@@ -1,0 +1,8 @@
+# Extend the existing worker image so Subfinder/DNSX/HTTPX/Katana/Nuclei remain present.
+# Supply its reviewed local image tag with --build-arg CCVM_WORKER_BASE=... .
+ARG CCVM_WORKER_BASE
+FROM ${CCVM_WORKER_BASE}
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nmap \
+    && rm -rf /var/lib/apt/lists/*

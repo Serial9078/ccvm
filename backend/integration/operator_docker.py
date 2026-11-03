@@ -8,6 +8,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
 BACKEND = Path(__file__).resolve().parents[1]
 
 
@@ -54,6 +57,9 @@ def assert_paused_worker_maintenance(url):
     )
     finding_operator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(finding_operator)
+    finding_operator.REVISION = ScriptDirectory.from_config(
+        Config(str(BACKEND / "alembic.ini"))
+    ).get_heads()[0]
     finding_operator.configure_maintenance(operator)
     runtime = object.__new__(operator.Runtime)
     runtime.prefix = ["docker"]
@@ -134,6 +140,9 @@ def assert_paused_worker_maintenance(url):
             from integration.nuclei_runtime import assert_nuclei_runtime
 
             assert_nuclei_runtime(command, image, root)
+            from integration.network_runtime import assert_network_runtime
+
+            assert_network_runtime(command, image, root)
     finally:
         if created:
             command("docker", "unpause", worker, check=False)

@@ -100,6 +100,17 @@ jobs:
         run: npm audit --audit-level=high
       - run: npm test
       - run: npm run build
+      - name: Verify network scan UI with mocked API and no scan requests
+        run: |
+          export CCVM_TEST_CHROMIUM="$(command -v google-chrome)"
+          npm run test:network-ui
+      - name: Preserve network UI screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frontend/test-artifacts/
+          if-no-files-found: ignore
       - name: Verify default API base in the built frontend
         run: node tests/check-build.mjs dist /api/v1
       - run: npm run lint

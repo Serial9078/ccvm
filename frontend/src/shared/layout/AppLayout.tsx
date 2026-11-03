@@ -51,6 +51,7 @@ const navItems = [
     path: "/pipelines",
     icon: <AccountTreeIcon />,
   },
+  { label: "Network scans", path: "/networks", icon: <LanIcon /> },
   {
     label: "Subdomains",
     path: "/subdomains",
@@ -135,7 +136,7 @@ export function AppLayout() {
         </Typography>
 
         <Chip
-          label="v4.4 Web Intelligence"
+          label="Web + Network Intelligence"
           color="primary"
           size="small"
         />

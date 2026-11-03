@@ -11,6 +11,9 @@ export function Ports() {
     { field: "port", headerName: "Port", width: 120 },
     { field: "protocol", headerName: "Protocol", width: 140 },
     { field: "service", headerName: "Service", flex: 1 },
+    { field: "state", headerName: "State", width: 130 },
+    { field: "product", headerName: "Product", flex: 1 },
+    { field: "version", headerName: "Version", flex: 1 },
     { field: "banner", headerName: "Banner", flex: 2 },
     { field: "source", headerName: "Source", width: 160 },
   ];
