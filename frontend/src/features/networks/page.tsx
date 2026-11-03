@@ -32,6 +32,7 @@ import {
   startNetwork,
 } from "./api";
 import type { NetworkPreview, NetworkRequest } from "./api";
+import { serviceCoverage } from "./coverage";
 
 function failure(error: unknown): string {
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -339,6 +340,52 @@ export function Networks() {
         <DialogContent>
           {detail.isLoading && <LinearProgress />}
           {detail.error && <Alert severity="error">{failure(detail.error)}</Alert>}
+          {detail.data && (
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="h6">Protocol audit coverage</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Counts refer to open service endpoints. Completed means evidence was collected;
+                findings are shown separately. Host references share an audit performed on another
+                port.
+              </Typography>
+              <Table size="small" aria-label="Protocol audit coverage">
+                <TableHead>
+                  <TableRow>
+                    {[
+                      "Service",
+                      "Endpoints",
+                      "Completed",
+                      "Host reference",
+                      "Unavailable",
+                      "No rule",
+                      "Pending",
+                      "Not run",
+                    ].map((label) => (
+                      <TableCell key={label}>{label}</TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {serviceCoverage(detail.data).map((row) => (
+                    <TableRow key={row.label}>
+                      <TableCell>{row.label}</TableCell>
+                      {[
+                        row.total,
+                        row.completed,
+                        row.shared,
+                        row.unavailable,
+                        row.noRule,
+                        row.pending,
+                        row.notRun,
+                      ].map((value, index) => (
+                        <TableCell key={index}>{value}</TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+          )}
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -386,7 +433,9 @@ export function Networks() {
                               </Typography>
                             </details>
                           ))
-                        : "No applicable protocol audit"}
+                        : service.audit_coverage === "no_rule"
+                          ? "No applicable protocol audit"
+                          : "No audit evidence yet"}
                     </TableCell>
                   </TableRow>
                 )),

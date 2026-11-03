@@ -60,6 +60,25 @@ def checks_for(service):
     return result
 
 
+def coverage_for(service, audit_status):
+    checks = service.get("checks") or []
+    if checks:
+        if any(check.get("status") not in {"completed", "host-level"} for check in checks):
+            return "unavailable"
+        return (
+            "shared"
+            if any(check.get("status") == "host-level" for check in checks)
+            else "completed"
+        )
+    if not checks_for(service):
+        return "no_rule"
+    if audit_status in {"queued", "running"}:
+        return "pending"
+    if audit_status in {"cancelled", "skipped"}:
+        return "not_run"
+    return "unavailable"
+
+
 def findings(service, scripts):
     result = []
 

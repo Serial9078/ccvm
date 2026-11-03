@@ -28,6 +28,8 @@ jobs:
       - name: Run backend tests
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python -m pytest -q
+      - name: Verify real SSH handshake, pinning, authentication and read-only inventory on loopback
+        run: python integration/check_host_inventory.py
       - name: Verify Neptun reconciliation safeguards
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python -m unittest discover -s ../scripts/tests -v
@@ -104,6 +106,7 @@ jobs:
         run: |
           export CCVM_TEST_CHROMIUM="$(command -v google-chrome)"
           npm run test:network-ui
+          npm run test:host-audit-ui
       - name: Preserve network UI screenshots
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -124,3 +127,12 @@ jobs:
           node tests/check-build.mjs "$RUNNER_TEMP/ccvm-frontend-configured" https://ccvm-ci.invalid/api/v1
       - name: Check screenshot service JavaScript syntax
         run: node --check ../screenshot-service/server.js
+
+  windows-inventory:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify fixed read-only collector against native Windows OS and registry
+        shell: powershell
+        run: ./backend/integration/check_windows_inventory.ps1

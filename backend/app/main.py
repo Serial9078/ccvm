@@ -1,11 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.v1 import (
     customers,
     dashboard,
     discovery,
     findings,
+    host_audits,
     hosts,
     jobs,
     network_scans,
@@ -96,6 +100,7 @@ app.include_router(
     prefix="/api/v1",
 )
 app.include_router(network_scans.router, prefix="/api/v1")
+app.include_router(host_audits.router, prefix="/api/v1")
 app.include_router(
     findings.router,
     prefix="/api/v1",
@@ -104,6 +109,31 @@ app.include_router(
     dashboard.router,
     prefix="/api/v1",
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, error: RequestValidationError):
+    if request.url.path.startswith("/api/v1/host-audits"):
+        # FastAPI normally echoes invalid input, including nested plaintext
+        # secret fields. Do not include input/context/body on this boundary.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [
+                    {key: item[key] for key in ("loc", "msg", "type")} for item in error.errors()
+                ]
+            },
+        )
+    return await request_validation_exception_handler(request, error)
+
+
+@app.middleware("http")
+async def private_host_audit_responses(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/v1/host-audits"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/health")

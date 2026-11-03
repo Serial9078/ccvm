@@ -1207,6 +1207,8 @@ def test_empty_postgresql_database_migrates_to_head():
         # ports, and create empty network tables without inventing scan work.
         existing_rows["network_scans"] = []
         existing_rows["network_observations"] = []
+        existing_rows["audit_credentials"] = []
+        existing_rows["host_audits"] = []
         for row in existing_rows["ports"]:
             row.update(state="open", product=None, version=None, tunnel=None, cpe=None)
         deployment_operator, deployment_before = network_deployment_snapshot()
@@ -1229,6 +1231,9 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
             assert_network_postgresql_behavior(connection)
+            from integration.host_audit_postgres import assert_native_inventory
+
+            assert_native_inventory(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
         from integration.operator_docker import assert_paused_worker_maintenance
 
@@ -1240,6 +1245,11 @@ def test_empty_postgresql_database_migrates_to_head():
         assert_finding_downgrade_refuses_truncation(engine, url)
         assert_downgrade_preserves_long_urls(engine, url)
         assert_network_downgrade_preserves_evidence(engine, url)
+        from integration.host_audit_postgres import assert_downgrade_retains_inventory
+
+        assert_downgrade_retains_inventory(
+            engine, url, alembic_command, all_data_rows, assert_schema_matches_models
+        )
     finally:
         try:
             with engine.connect() as connection:

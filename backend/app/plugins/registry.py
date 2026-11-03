@@ -9,6 +9,7 @@ from app.plugins.headerfindings import (
 from app.plugins.headerprobe import (
     run_headerprobe,
 )
+from app.plugins.hostinventory import run_hostinventory
 from app.plugins.katana import (
     run_katana,
 )
@@ -54,6 +55,7 @@ PLUGIN_REGISTRY: dict[
     "nuclei": run_nuclei,
     "networkdiscovery": run_networkdiscovery,
     "networkaudit": run_networkaudit,
+    "hostinventory": run_hostinventory,
     "dummy": run_dummy,
 }
 

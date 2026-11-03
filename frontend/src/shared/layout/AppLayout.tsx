@@ -13,6 +13,7 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import PublicIcon from "@mui/icons-material/Public";
 import RadarIcon from "@mui/icons-material/Radar";
 import SettingsIcon from "@mui/icons-material/Settings";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
 
 import {
   Box,
@@ -52,6 +53,7 @@ const navItems = [
     icon: <AccountTreeIcon />,
   },
   { label: "Network scans", path: "/networks", icon: <LanIcon /> },
+  { label: "Authenticated inventory", path: "/host-audits", icon: <VpnKeyIcon /> },
   {
     label: "Subdomains",
     path: "/subdomains",

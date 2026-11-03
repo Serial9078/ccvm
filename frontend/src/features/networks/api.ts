@@ -46,6 +46,7 @@ export interface NetworkScan {
 }
 
 export interface NetworkService {
+  audit_coverage?: string | null;
   port: number;
   protocol: string;
   state: string;
