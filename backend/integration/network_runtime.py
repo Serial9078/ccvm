@@ -145,7 +145,8 @@ with Session(engine, autoflush=False) as db:
         assert job.status == 'finished', job.message
     result = get_scan(scan['id'], db)
     assert result['status'] == 'finished' and result['open_services'] == 1
-    assert result['observations'][0].ip_address == os.environ['CI_ADDRESS']
+    assert result['observations'][0]['ip_address'] == os.environ['CI_ADDRESS']
+    assert result['observations'][0]['services'][0]['audit_coverage'] == 'completed'
     finding = db.query(Finding).one()
     assert finding.template_id == 'nmap:ssh-legacy-kex' and finding.cve is None
     assert finding.scanner == 'network-audit' and 'diffie-hellman-group1-sha1' in finding.raw_json

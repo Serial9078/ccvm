@@ -181,6 +181,18 @@ try {
   await page.getByRole("button", { name: "Lock and clear session", exact: true }).click();
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
   assert.equal(await page.getByRole("button", { name: "View evidence", exact: true }).count(), 0);
+  await page.getByLabel("Operator token", { exact: true }).fill(token);
+  await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
+  await page.getByText("Operator access unlocked", { exact: true }).waitFor();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+  );
+  await page.getByRole("button", { name: "Unlock host audits", exact: true }).waitFor();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
+  );
+  assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByRole("button", { name: "View evidence", exact: true }).count(), 0);
   await page.reload();
   await page.getByRole("button", { name: "Unlock host audits", exact: true }).waitFor();
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");

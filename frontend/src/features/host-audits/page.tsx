@@ -568,13 +568,33 @@ export function HostAudits() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const secure = canUseAuditApi();
+  const sessionGeneration = useRef(0);
+  useEffect(() => {
+    const clear = () => {
+      sessionGeneration.current++;
+      setSession(null);
+      setInput("");
+    };
+    // Full-page navigation can preserve React state in the back/forward cache.
+    // Lock before leaving and again when a cached page is restored.
+    window.addEventListener("pagehide", clear);
+    window.addEventListener("pageshow", clear);
+    return () => {
+      sessionGeneration.current++;
+      window.removeEventListener("pagehide", clear);
+      window.removeEventListener("pageshow", clear);
+    };
+  }, []);
   const unlock = async () => {
+    const generation = ++sessionGeneration.current;
     setBusy(true);
     setError("");
     try {
       await auditRequest(input, `/credentials?customer_id=${Number(customer)}`);
-      setSession({ token: input, customerId: Number(customer) });
-      setInput("");
+      if (generation === sessionGeneration.current) {
+        setSession({ token: input, customerId: Number(customer) });
+        setInput("");
+      }
     } catch (e) {
       setError(errorText(e));
     } finally {
