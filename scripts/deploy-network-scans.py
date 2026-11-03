@@ -24,9 +24,10 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 BASE = "76609bb540cd6851a0cca0f761de37a6ade633c4"
 FEATURE = "ff0db6c686f0bb0c7af3df9a4012acbc76a3a817"
+PUBLICATION_BASE = "70317bddbbfb84800857b933f0309d52e42e9f07"
 BRANCH = "sprint-1.0.2-feature-architecture"
 OLD_REVISION, REVISION = "d91e6a2f4c80", "f93b70a4e628"
 CIDR, CUSTOMER, WORKER_IMAGE, BACKEND_IMAGE = None, None, None, None
@@ -199,7 +200,7 @@ def write_json(path, value):
             os.unlink(temporary)
 
 
-def source_plan(module, root, target):
+def source_plan(module, root, target, *, resume=False):
     def git(*args):
         return module.git(root, *args)
 
@@ -211,9 +212,18 @@ def source_plan(module, root, target):
     ):
         raise RuntimeError("Unexpected deployment checkout")
     before = git("rev-parse", "HEAD")
-    if before not in {BASE, target} or git("rev-parse", f"origin/{BRANCH}") != target:
+    allowed = {BASE, target} | ({PUBLICATION_BASE} if resume else set())
+    if before not in allowed or git("rev-parse", f"origin/{BRANCH}") != target:
         raise RuntimeError("Checkout or deployment target changed")
     git("merge-base", "--is-ancestor", FEATURE, target)
+    if resume:
+        git("merge-base", "--is-ancestor", PUBLICATION_BASE, target)
+        correction = git("diff", "--name-only", PUBLICATION_BASE, target).splitlines()
+        if not correction or any(
+            not name.startswith(("scripts/", "backend/integration/", "docs/"))
+            for name in correction
+        ):
+            raise RuntimeError("Publication recovery must not change running application code")
     directory = Path(git("rev-parse", "--absolute-git-dir"))
     for marker in ("index.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "rebase-merge", "rebase-apply"):
         if (directory / marker).exists():
@@ -485,19 +495,24 @@ def publish_frontend(runtime, root, built):
         "--rm",
         "--network",
         "none",
+        "--workdir",
+        "/tmp",
         "--entrypoint",
         "python",
         "--mount",
-        f"type=bind,src={root / 'scripts/deploy-network-scans.py'},dst=/operator.py,readonly",
+        f"type=bind,src={root / 'scripts/deploy-network-scans.py'},"
+        "dst=/ccvm_deployment_helper.py,readonly",
         "--mount",
         f"type=bind,src={built},dst=/build,readonly",
         "--mount",
         f"type=bind,src={root / 'frontend/dist'},dst=/release",
         BACKEND_IMAGE,
+        "-I",
         "-B",
         "-c",
         "import runpy; from pathlib import Path; "
-        "runpy.run_path('/operator.py')['install_frontend'](Path('/build'), Path('/release'))",
+        "runpy.run_path('/ccvm_deployment_helper.py')['install_frontend']"
+        "(Path('/build'), Path('/release'))",
     )
 
 
@@ -605,11 +620,102 @@ def start_once(runtime, marker, operation):
         print(f"Job {job['id']} {job['plugin']}: {job['status']} {job['progress']}%", flush=True)
 
 
-def apply(module, runtime, root, target, plan):
+def resume_publication(module, runtime, root, target, plan, marker, operation):
+    """Resume only a proven, already migrated/recreated 1.0.0 publication failure."""
+    old = operation.get("target") == PUBLICATION_BASE and operation.get("phase") == "prepared"
+    retry = (
+        operation.get("target") == target
+        and operation.get("phase") == "publication-resume"
+        and operation.get("publication_base") == PUBLICATION_BASE
+    )
+    if (
+        not (old or retry)
+        or operation.get("before") != BASE
+        or operation.get("payload") != PAYLOAD
+        or plan[0] not in {PUBLICATION_BASE, target}
+    ):
+        raise RuntimeError("This is not the recorded publication failure; original state preserved")
+    directory = marker.parent
+    backup = Path(operation["backup"])
+    if backup.parent != directory or not backup.name.startswith("ccvm-network-before-"):
+        raise RuntimeError("Unexpected original backup directory")
+    built = backup / "build/frontend/dist"
+    for path in (built, *built.parents):
+        if path == directory:
+            break
+        if path.is_symlink():
+            raise RuntimeError("Symlink in the retained publication build")
+    if not (built / "index.html").is_file() or any(path.is_symlink() for path in built.rglob("*")):
+        raise RuntimeError("The retained frontend build is missing or contains symlinks")
+    captured = capture_config(root)
+    for name, value in captured.items():
+        saved = backup / "config" / name
+        if saved.is_file() and saved.read_bytes() != value:
+            raise RuntimeError("Private configuration differs from its original backup")
+    config = json.loads(compose(runtime, root, "config", "--format", "json"))
+    if config != json.loads((backup / "compose.json").read_text()):
+        raise RuntimeError("Resolved private Compose settings changed after deployment")
+    expected = build_override(BACKEND_IMAGE, operation["worker_tag"])
+    if json.loads((root / OVERRIDE).read_text()) != expected:
+        raise RuntimeError("The installed network override changed")
+    resolved = json.loads(compose(runtime, root, "config", "--format", "json", override=True))
+    worker, backend = inspect(runtime, "ccvm-worker"), inspect(runtime, "ccvm-backend")
+    originals = json.loads((backup / "containers.json").read_text())
+    if (
+        originals["worker"]["Image"] != WORKER_IMAGE
+        or originals["backend"]["Image"] != BACKEND_IMAGE
+    ):
+        raise RuntimeError("Original image pins do not match the retained backup")
+    for name, info, image in (
+        ("worker", worker, operation["worker_image"]),
+        ("backend", backend, BACKEND_IMAGE),
+    ):
+        if (
+            info["Image"] != image
+            or env_map(info["Config"].get("Env")).get("CCVM_NETWORK_ALLOWED_CIDRS") != CIDR
+        ):
+            raise RuntimeError("Migrated runtime identity or policy changed")
+        validate_service(resolved, name, info, inspect(runtime, image))
+    if not worker["State"]["Running"] or backend["State"]["Paused"]:
+        raise RuntimeError("Unexpected container state for publication recovery")
+    runtime.worker_info = worker
+    runtime.postgres_info = inspect(runtime, "ccvm-postgres")
+    runtime.worker_paused = worker["State"]["Paused"]
+    helper = Path(tempfile.mkdtemp(prefix="publication-helper-", dir=backup))
+    runtime.prepare_maintenance(helper)
+    current = runtime.state()
+    validate_state(current, expected=REVISION)
+    assert_preserved(json.loads((backup / "after.json").read_text()), current)
+    operation.update(target=target, phase="publication-resume", publication_base=PUBLICATION_BASE)
+    write_json(marker, operation)
+    if plan[0] != target:
+        module.git(root, "merge", "--ff-only", target)
+    # The application/schema/images have now been positively verified. A later
+    # static publication error must not stop these coherent services again.
+    runtime.resume()
+    if not backend["State"]["Running"]:
+        runtime.docker("start", "ccvm-backend")
+    verify_installed(runtime, root, operation)
+    verify_api(runtime)
+    publish_frontend(runtime, root, built)
+    with runtime.opener.open("http://127.0.0.1:8090/", timeout=15) as response:
+        if response.read() != (built / "index.html").read_bytes():
+            raise RuntimeError("Recovered frontend does not match its retained build")
+    assert_config(root, captured)
+    operation["phase"] = "activated"
+    write_json(marker, operation)
+    print(f"Publication recovered from retained backup: {backup}", flush=True)
+    start_once(runtime, marker, operation)
+
+
+def apply(module, runtime, root, target, plan, *, resume=False):
     directory = Path(module.git(root, "rev-parse", "--absolute-git-dir"))
     marker = directory / JOURNAL
     if marker.exists():
         operation = json.loads(marker.read_text())
+        if resume and operation.get("phase") in {"prepared", "publication-resume"}:
+            resume_publication(module, runtime, root, target, plan, marker, operation)
+            return
         if operation.get("target") != target or operation.get("payload") != PAYLOAD:
             raise RuntimeError("A different network deployment journal exists")
         if operation["phase"] in {"activated", "scan-intent", "submitted"}:
@@ -780,7 +886,10 @@ def main():
     parser.add_argument("--worker-image", required=True)
     parser.add_argument("--backend-image", required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--resume-publication", action="store_true")
     args = parser.parse_args()
+    if args.resume_publication and not args.apply:
+        parser.error("--resume-publication requires --apply and a retained deployment journal")
     os.umask(0o077)
     root = Path("/opt/ccvm").resolve()
     if socket.gethostname().split(".")[0] != "neptun":
@@ -795,11 +904,11 @@ def main():
     directory = Path(module.git(root, "rev-parse", "--absolute-git-dir"))
     with (directory / "ccvm-network-deployment.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        plan = source_plan(module, root, args.target)
+        plan = source_plan(module, root, args.target, resume=args.resume_publication)
         runtime = module.Runtime()
         print(f"CCVM network deployment {VERSION}; reviewed target {args.target}", flush=True)
         if args.apply:
-            apply(module, runtime, root, args.target, plan)
+            apply(module, runtime, root, args.target, plan, resume=args.resume_publication)
         else:
             validate_state(runtime.preflight(root), expected=OLD_REVISION)
             print(
