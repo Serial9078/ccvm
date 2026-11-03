@@ -102,6 +102,16 @@ def service_fixture():
 
 
 class NetworkDeploymentGuards(unittest.TestCase):
+    def test_publisher_uses_isolated_python_and_never_shadows_stdlib_operator(self):
+        calls = []
+        runtime = SimpleNamespace(docker=lambda *args: calls.append(args))
+        operator.publish_frontend(runtime, Path("/disposable"), Path("/built"))
+        args = calls[0]
+        self.assertEqual(args[args.index("--workdir") + 1], "/tmp")
+        self.assertIn("-I", args)
+        self.assertNotIn("dst=/operator.py", " ".join(args))
+        self.assertIn("dst=/ccvm_deployment_helper.py,readonly", " ".join(args))
+
     def test_only_the_confirmed_idle_customer_schema_and_url_identity_are_accepted(self):
         operator.validate_state(snapshot(), expected=operator.OLD_REVISION)
         changes = [
@@ -299,6 +309,152 @@ class NetworkDeploymentGitGuards(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "untracked"):
                     operator.source_plan(module, root, target)
                 self.assertEqual((root / "docker-compose.yml").read_text(), "private compose")
+
+
+class PublicationRecovery(unittest.TestCase):
+    def test_proven_publication_failure_reuses_build_and_restores_services_without_migration(self):
+        for bad in (None, "image", "data", "scope", "config", "missing-build", "publish"):
+            with self.subTest(bad=bad):
+                self.exercise(bad)
+
+    def test_recovery_also_accepts_coherent_services_that_were_already_resumed(self):
+        self.exercise(None, already_running=True)
+
+    def exercise(self, bad, *, already_running=False):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            directory = root / ".git"
+            backup = directory / "ccvm-network-before-fixture"
+            built = backup / "build/frontend/dist"
+            built.mkdir(parents=True)
+            (built / "index.html").write_text("cached build")
+            (root / "frontend/dist").mkdir(parents=True)
+            (root / "frontend/dist/index.html").write_text("old UI")
+            (root / "docker-compose.yml").write_text("private unchanged")
+            config = {"services": {"backend": {}, "worker": {}}}
+            state = migrated(snapshot())
+            operator.write_json(backup / "after.json", state)
+            operator.write_json(backup / "compose.json", config)
+            operator.write_json(
+                backup / "containers.json",
+                {
+                    "worker": {"Image": operator.WORKER_IMAGE},
+                    "backend": {"Image": operator.BACKEND_IMAGE},
+                },
+            )
+            tag, worker_image = "retained-worker", "sha256:" + "c" * 64
+            operator.write_json(
+                root / operator.OVERRIDE, operator.build_override(operator.BACKEND_IMAGE, tag)
+            )
+            operation = {
+                "before": operator.BASE,
+                "target": operator.PUBLICATION_BASE,
+                "payload": copy.deepcopy(operator.PAYLOAD),
+                "backup": str(backup),
+                "phase": "prepared",
+                "worker_tag": tag,
+                "worker_image": worker_image,
+            }
+            actions = []
+            infos = {
+                "ccvm-worker": {
+                    "Image": worker_image,
+                    "Config": {"Env": ["CCVM_NETWORK_ALLOWED_CIDRS=" + operator.CIDR]},
+                    "State": {"Running": True, "Paused": True},
+                },
+                "ccvm-backend": {
+                    "Image": operator.BACKEND_IMAGE,
+                    "Config": {"Env": ["CCVM_NETWORK_ALLOWED_CIDRS=" + operator.CIDR]},
+                    "State": {"Running": False, "Paused": False},
+                },
+                "ccvm-postgres": {},
+            }
+            if bad == "image":
+                infos["ccvm-worker"]["Image"] = "different"
+            elif bad == "data":
+                state["tables"]["jobs"]["sha256"] = "changed"
+            elif bad == "scope":
+                operation["payload"]["target"] = "198.51.100.0/24"
+            elif bad == "config":
+                operator.write_json(backup / "compose.json", {"different": True})
+            elif bad == "missing-build":
+                (built / "index.html").unlink()
+            if already_running:
+                infos["ccvm-worker"]["State"]["Paused"] = False
+                infos["ccvm-backend"]["State"]["Running"] = True
+
+            def resume():
+                actions.append("resume")
+                infos["ccvm-worker"]["State"]["Paused"] = False
+
+            def docker(*args):
+                actions.append(args[0])
+                if args[0] == "start":
+                    infos["ccvm-backend"]["State"]["Running"] = True
+                return ""
+
+            runtime = SimpleNamespace(
+                prepare_maintenance=lambda backup: actions.append("helper"),
+                state=lambda: copy.deepcopy(state),
+                resume=resume,
+                docker=docker,
+                opener=SimpleNamespace(open=lambda *a, **k: io.BytesIO(b"cached build")),
+            )
+
+            def publish(*args):
+                actions.append("publish")
+                if bad == "publish":
+                    raise RuntimeError("static publish failed")
+
+            def inspect(runtime, name):
+                return copy.deepcopy(infos.get(name, {}))
+
+            module = SimpleNamespace(git=lambda *args: actions.append("advance-ops"))
+            marker = directory / operator.JOURNAL
+            target = "d" * 40
+            with (
+                patch.object(operator, "compose", return_value=json.dumps(config)),
+                patch.object(operator, "inspect", inspect),
+                patch.object(operator, "validate_service"),
+                patch.object(operator, "verify_api"),
+                patch.object(operator, "publish_frontend", publish),
+                patch.object(
+                    operator, "start_once", side_effect=lambda *a: actions.append("submit")
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+
+                def call():
+                    return operator.resume_publication(
+                        module,
+                        runtime,
+                        root,
+                        target,
+                        (operator.PUBLICATION_BASE, []),
+                        marker,
+                        operation,
+                    )
+
+                if bad:
+                    with self.assertRaises(RuntimeError):
+                        call()
+                else:
+                    call()
+            if bad and bad != "publish":
+                self.assertEqual(actions, ["helper"] if bad == "data" else [])
+                self.assertFalse(marker.exists())
+            elif bad == "publish":
+                self.assertTrue(infos["ccvm-backend"]["State"]["Running"])
+                self.assertFalse(infos["ccvm-worker"]["State"]["Paused"])
+                self.assertNotIn("submit", actions)
+                self.assertEqual(json.loads(marker.read_text())["phase"], "publication-resume")
+            else:
+                self.assertEqual(json.loads(marker.read_text())["phase"], "activated")
+                expected = ["helper", "advance-ops", "resume"]
+                if not already_running:
+                    expected += ["start"]
+                expected += ["publish", "submit"]
+                self.assertEqual(actions, expected)
 
 
 class NetworkDeploymentSequence(unittest.TestCase):

@@ -49,6 +49,7 @@ def assert_network_deployment(command, image, network, root):
     base.write_text(json.dumps(config))
     before_config = base.read_bytes()
     runtime = SimpleNamespace(docker=lambda *args: command("docker", *args))
+    helper_image = project + "-root-helper:latest"
 
     def compose(*args, override=False):
         flags = [
@@ -99,7 +100,13 @@ def assert_network_deployment(command, image, network, root):
         assert keep["Id"] == old["keep"]["Id"]
         # Use the production publishing function through a real helper, against
         # the directory that the untouched container already mounted read-only.
-        operator.BACKEND_IMAGE = pinned
+        # Neptun's python image has an empty WorkingDir, which runs Python in /.
+        # Reproduce that import environment instead of the worker image's /app.
+        helper_context = directory / "helper-image"
+        helper_context.mkdir()
+        (helper_context / "Dockerfile").write_text(f"FROM {image}\nWORKDIR /\n")
+        command("docker", "build", "--tag", helper_image, str(helper_context))
+        operator.BACKEND_IMAGE = helper_image
         inode = release.stat().st_ino
         operator.publish_frontend(runtime, directory, build)
         assert release.stat().st_ino == inode
@@ -110,12 +117,14 @@ def assert_network_deployment(command, image, network, root):
         assert base.read_bytes() == before_config
         print(
             "Network deployment: real Compose replaced only backend/worker, kept private settings "
-            "and the third container, and published through the existing read-only bind",
+            "and the third container, and published through the existing read-only bind "
+            "using a helper image with root WorkingDir",
             flush=True,
         )
     finally:
         # Remove only this unique disposable project; never address a production project.
         compose("down", "--timeout", "3", override=(directory / operator.OVERRIDE).exists())
+        command("docker", "image", "rm", helper_image, check=False)
         # The root helper creates static files with nginx-readable modes.
         command(
             "docker",

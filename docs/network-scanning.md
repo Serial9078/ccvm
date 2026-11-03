@@ -166,3 +166,17 @@ sudo docker compose -f docker-compose.yml -f docker-compose.network.yml ps
 CI additionally rehearses actual Compose recreation on an isolated network,
 checks an unrelated container stays unchanged, and verifies publication through
 a directory already bind-mounted read-only. No production scan runs in CI.
+
+The 1.0.1 publisher mounts its helper under a CCVM-specific filename and starts
+Python in isolated mode from `/tmp`. This avoids shadowing Python's standard
+`operator` module when the base image has an empty/root working directory; CI
+also exercises a helper image whose working directory is `/`.
+
+For the recorded 1.0.0 publication failure, `--resume-publication --apply`
+accepts only the original deployment journal and an operator-only correction.
+It verifies the retained build, private Compose configuration, old/current image
+identities, customer, schema and database fingerprints. It reuses the migrated
+database, extended worker and built frontend; no image rebuild or migration is
+performed. After verification it restores the coherent services, publishes the
+cached frontend, and submits the first scan through the existing idempotent
+journal. A static publishing retry does not stop the verified services again.
