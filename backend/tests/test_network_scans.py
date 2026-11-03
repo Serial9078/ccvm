@@ -1,6 +1,9 @@
 import copy
 import ipaddress
+import json
+import os
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +25,12 @@ SSH = (
     '<script id="ssh2-enum-algos" output="kex algorithms"><table key="kex_algorithms">'
     "<elem>diffie-hellman-group1-sha1</elem></table></script>"
 )
+SMB = (
+    '<script id="smb-protocols" output="SMB"><table key="dialects">'
+    "<elem>NT LM 0.12 (SMBv1) [dangerous, but default]</elem>"
+    "<elem>3.1.1</elem></table></script>"
+)
+SIGNING = '<script id="smb2-security-mode" output="Message signing enabled but not required"/>'
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +115,137 @@ def scanner(monkeypatch, tmp_path, outputs, **execution):
 
     monkeypatch.setattr(nmap, "run", run)
     return launches
+
+
+def smb_xml(ports="139,445", scripts=(), *, primary_http=False):
+    root = ET.fromstring(xml(ports=ports))
+    for port in root.findall("./host/ports/port"):
+        name = "netbios-ssn" if port.get("portid") == "139" else "microsoft-ds"
+        if primary_http and port.get("portid") == "445":
+            name = "http"
+        port.find("service").set("name", name)
+    if scripts:
+        hostscript = ET.SubElement(root.find("host"), "hostscript")
+        for source in scripts:
+            hostscript.append(ET.fromstring(source))
+    return ET.tostring(root, encoding="unicode")
+
+
+@pytest.mark.parametrize(
+    ("ports", "scripts", "status", "primary_http"),
+    [
+        ("139,445", [SMB, SIGNING], "finished", False),
+        ("139", [SMB, SIGNING], "finished", False),
+        ("139,445", [], "failed", False),
+        ("139", [], "failed", False),
+        ("139,445", [SMB], "failed", False),
+        ("139,445", [], "failed", True),
+    ],
+)
+def test_smb_host_scripts_are_expected_once_on_nmaps_selected_transport(
+    client, customer, db, monkeypatch, tmp_path, ports, scripts, status, primary_http
+):
+    run = queue(client, customer, ports=ports)
+    scanner(
+        monkeypatch, tmp_path, [smb_xml(ports), smb_xml(ports, scripts, primary_http=primary_http)]
+    )
+    process_job(db, claim_next_job(db))
+    process_job(db, claim_next_job(db))
+    job = db.get(Job, run["jobs"][1]["id"])
+    assert job.status == status
+    row = db.query(NetworkObservation).one()
+    if ports == "139,445":
+        reference = row.services[0]["checks"][0]
+        assert reference["status"] == "host-level" and reference["via_port"] == 445
+        assert "139: checks unavailable" not in job.message
+    if status == "finished":
+        assert db.query(Finding).count() == 2
+        selected = 445 if "445" in ports else 139
+        assert all(
+            finding.matched_at.endswith(":" + str(selected)) for finding in db.query(Finding)
+        )
+        assert "Unavailable: 0" in job.message
+    else:
+        assert "checks unavailable" in job.message
+
+
+def legacy_smb_failure(db, job):
+    row = db.query(NetworkObservation).one()
+    services = copy.deepcopy(row.services)
+    services[0]["checks"] = [
+        {
+            "check": "smb-protocols",
+            "status": "unavailable",
+            "output": "No enumeration result returned",
+        }
+    ]
+    row.services = services
+    job.status = "failed"
+    job.message = (
+        "Network audit failed. Created: 2. Updated: 0. Checks completed: 2. "
+        "Unavailable: 1. Services without an applicable audit: 0. "
+        f"{row.ip_address}:139: checks unavailable: smb-protocols"
+    )
+    db.commit()
+
+
+@pytest.mark.parametrize("changed", [None, "missing-signing", "nonzero", "other-error"])
+def test_saved_smb_evidence_correction_preserves_findings_and_never_launches_scanners(
+    client, customer, db, monkeypatch, tmp_path, changed
+):
+    run = queue(client, customer, ports="139,445")
+    output = smb_xml(scripts=[SMB, SIGNING])
+    launches = scanner(monkeypatch, tmp_path, [smb_xml(), output])
+    process_job(db, claim_next_job(db))
+    process_job(db, claim_next_job(db))
+    job = db.get(Job, run["jobs"][1]["id"])
+    legacy_smb_failure(db, job)
+    scan = db.get(NetworkScan, run["id"])
+    evidence = Path(os.environ["CCVM_NETWORK_LOG_DIR"]) / f"scan-{scan.id}-job-{job.id}-retained"
+    evidence.mkdir(parents=True)
+    args = nmap.command(
+        evidence,
+        ["192.0.2.1"],
+        profile=scan.profile,
+        ports=scan.ports,
+        rate=scan.rate,
+        timeout_seconds=scan.timeout_seconds,
+        audit=True,
+    )
+    (evidence / "command.json").write_text(json.dumps(args))
+    (evidence / "execution.json").write_text(
+        json.dumps(
+            {
+                "returncode": 1 if changed == "nonzero" else 0,
+                "cancelled": False,
+                "timedout": False,
+            }
+        )
+    )
+    (evidence / "results.xml").write_text(
+        smb_xml(scripts=[SMB]) if changed == "missing-signing" else output
+    )
+    if changed == "other-error":
+        job.message += "; Nmap exit code 1"
+        db.commit()
+    before = [(row.id, row.status, row.raw_json, row.matched_at) for row in db.query(Finding)]
+    if changed:
+        with pytest.raises(ValueError):
+            report = network.saved_audit_report(db, job)
+            network.correct_saved_audit(db, job, report)
+        db.rollback()
+        assert job.status == "failed"
+    else:
+        report = network.saved_audit_report(db, job)
+        result = network.correct_saved_audit(db, job, report)
+        db.commit()
+        assert job.status == "finished" and result["unavailable"] == 0 and result["shared"] == 1
+        assert network.correct_saved_audit(db, job, report)["already_corrected"]
+        assert scan.findings_created == 2 and scan.findings_updated == 0
+    assert [
+        (row.id, row.status, row.raw_json, row.matched_at) for row in db.query(Finding)
+    ] == before
+    assert len(launches) == 2
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -978,10 +979,123 @@ def assert_network_postgresql_behavior(connection):
             assert db.get(Asset, finding.asset_id).customer_id == customer.id
             port = db.query(Port).filter_by(source="nmap-network").one()
             assert port.version == "V" * 3000 and port.cpe == ["cpe:/a:openbsd:openssh:8.2"]
+            assert_saved_smb_correction(connection, db, customer)
         transaction.rollback()
     print(
         "PostgreSQL network scans: JSON scope, full service evidence "
         "and idempotent findings passed",
+        flush=True,
+    )
+
+
+def assert_saved_smb_correction(connection, db, customer):
+    """Execute the actual correction transaction against PostgreSQL without probes."""
+    import copy
+
+    from app.api.v1.network_scans import start_scan
+    from app.models.asset import Asset
+    from app.models.finding import Finding
+    from app.models.network_scan import NetworkObservation, NetworkScan
+    from app.plugins import network
+    from app.schemas.network_scan import NetworkScanCreate
+    from app.services import nmap
+
+    spec = importlib.util.spec_from_file_location(
+        "saved_smb_correction_ci", BACKEND.parent / "scripts/correct-network-audit.py"
+    )
+    operator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(operator)
+    with pytest.MonkeyPatch.context() as patch, tempfile.TemporaryDirectory() as folder:
+        patch.setenv("CCVM_NETWORK_ALLOWED_CIDRS", "192.0.2.0/24")
+        patch.setenv("CCVM_NETWORK_LOG_DIR", folder)
+        result = start_scan(
+            NetworkScanCreate(
+                customer_id=customer.id,
+                target="192.0.2.4/30",
+                exclusions=["192.0.2.6"],
+                profile="custom",
+                ports="139,445",
+            ),
+            db,
+        )
+        scan = db.get(NetworkScan, result["id"])
+        xml = """<nmaprun scanner="nmap" version="CI"><scaninfo protocol="tcp" services="139,445"/>
+          <host><address addr="192.0.2.5" addrtype="ipv4"/><ports>
+          <port protocol="tcp" portid="139"><state state="open"/>
+          <service name="netbios-ssn" method="probed" conf="10"/></port>
+          <port protocol="tcp" portid="445"><state state="open"/>
+          <service name="microsoft-ds" method="probed" conf="10"/></port></ports>
+          <hostscript><script id="smb-protocols" output="SMB"><table key="dialects">
+          <elem>NT LM 0.12 (SMBv1) [dangerous, but default]</elem>
+          <elem>3.1.1</elem></table></script>
+          <script id="smb2-security-mode" output="Message signing enabled but not required"/>
+          </hostscript></host><runstats><finished exit="success"/></runstats></nmaprun>"""
+        evidence = Path(folder) / f"scan-{scan.id}-job-{scan.audit_job_id}-retained"
+        evidence.mkdir()
+        (evidence / "results.xml").write_text(xml)
+        args = nmap.command(
+            evidence,
+            scan.targets,
+            profile=scan.profile,
+            ports=scan.ports,
+            rate=scan.rate,
+            timeout_seconds=scan.timeout_seconds,
+            audit=True,
+        )
+        (evidence / "command.json").write_text(json.dumps(args))
+        (evidence / "execution.json").write_text(
+            json.dumps({"returncode": 0, "cancelled": False, "timedout": False})
+        )
+        report = nmap.parse(evidence / "results.xml", scan.targets, expected_ports={139, 445})
+        network.import_discovery(db, scan, db.get(Asset, scan.asset_id), report)
+        db.commit()
+        assert network.import_audit(db, scan, scan.audit_job, report) == (2, 0)
+        scan.discovery_job.status, scan.discovery_job.progress = "finished", 100
+        row = db.query(NetworkObservation).filter_by(scan_id=scan.id).one()
+        services = copy.deepcopy(row.services)
+        services[0]["checks"] = [
+            {"check": "smb-protocols", "status": "unavailable", "output": "missing"}
+        ]
+        row.services = services
+        scan.audit_job.status, scan.audit_job.progress = "failed", 100
+        scan.audit_job.message = (
+            "Network audit failed. Created: 2. Updated: 0. Checks completed: 2. "
+            "Unavailable: 1. Services without an applicable audit: 0. "
+            "192.0.2.5:139: checks unavailable: smb-protocols"
+        )
+        db.commit()
+        preserved = [(f.id, f.raw_json, f.status) for f in db.query(Finding).order_by(Finding.id)]
+        for repeated in (False, True):
+            selected = {
+                "scan": dict(
+                    db.execute(sa.text("SELECT * FROM network_scans WHERE id=:id"), {"id": scan.id})
+                    .mappings()
+                    .one()
+                ),
+                "jobs": [
+                    dict(r)
+                    for r in db.execute(
+                        sa.text("SELECT * FROM jobs WHERE id IN (:first,:second) ORDER BY id"),
+                        {"first": scan.discovery_job_id, "second": scan.audit_job_id},
+                    ).mappings()
+                ],
+            }
+            selected = json.loads(json.dumps(selected, default=str))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exec(
+                    compile(operator.REPAIR_CODE, "<saved-smb-correction-transaction>", "exec"),
+                    {"EXPECTED": selected, "engine": connection, "sa": sa, "json": json},
+                )
+            assert json.loads(output.getvalue())["already_corrected"] is repeated
+            db.refresh(scan.audit_job)
+            assert scan.audit_job.status == "finished" and scan.findings_created == 2
+            assert [
+                (f.id, f.raw_json, f.status) for f in db.query(Finding).order_by(Finding.id)
+            ] == preserved
+    print(
+        "PostgreSQL SMB correction: retained evidence, exact transaction guards, original findings "
+        "and repeat invocation preserved; no probes launched",
         flush=True,
     )
 
