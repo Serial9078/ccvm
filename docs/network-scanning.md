@@ -125,3 +125,44 @@ Primary references: [Nmap service detection](https://nmap.org/book/man-version-d
 [SSH algorithms](https://nmap.org/nsedoc/scripts/ssh2-enum-algos.html),
 [TLS enumeration](https://nmap.org/nsedoc/scripts/ssl-enum-ciphers.html),
 [SMB signing](https://nmap.org/nsedoc/scripts/smb2-security-mode.html).
+
+## First Neptun activation
+
+`scripts/deploy-network-scans.py` requires the confirmed source, immutable
+worker/backend image IDs, customer ID/UUID/name and CIDR as local arguments.
+Operational customer identities, network ranges and image IDs are never embedded
+in the repository; test fixtures use reserved documentation addresses.
+It requires an exact reviewed merge SHA on the deployment branch. Without
+`--apply` it reads preconditions only. With `--apply` it builds the Nmap worker
+extension and frontend before downtime, verifies byte-identical legacy scanner
+binaries, saves private configuration/container metadata, and inspects a
+PostgreSQL custom-format backup before migration. An idle worker is paused for
+the migration; the old row fingerprints exclude only the five additive port
+columns, whose empty/default values are checked separately.
+
+It refuses drift between the active containers and the Compose source, and
+adds only `docker-compose.network.yml`, leaving existing private files intact.
+Only backend/worker are recreated; their existing mounts, environment, networks
+and ports must remain the same except for the explicit image/policy changes.
+The existing nginx directory bind remains mounted: new hashed assets are copied
+first and index.html is replaced atomically. Previous client assets are retained.
+The API and frontend proxy must expose the exact selected policy before a scan
+can be submitted.
+
+The first scan covers the selected bounded IPv4 scope, the top 100 TCP ports, 100 portscan probes
+per second and an eight-hour budget per stage. A private intent journal is
+written before submission; a lost response is reconciled against the existing
+run rather than blindly submitting it again. A repeated successful invocation
+reports the same run even after it has completed. An interrupted activation
+after source mutation leaves the backend stopped and worker paused for inspection;
+it does not silently downgrade evidence or continue with an unknown runtime.
+
+Future manual Compose operations must include the persistent override:
+
+```bash
+sudo docker compose -f docker-compose.yml -f docker-compose.network.yml ps
+```
+
+CI additionally rehearses actual Compose recreation on an isolated network,
+checks an unrelated container stays unchanged, and verifies publication through
+a directory already bind-mounted read-only. No production scan runs in CI.

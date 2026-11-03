@@ -69,6 +69,9 @@ def assert_network_runtime(command, base_image, root):
     )
     command("docker", "network", "create", "--internal", network)
     try:
+        from integration.network_deployment import assert_network_deployment
+
+        assert_network_deployment(command, image, network, root)
         for name in (server, canary):
             command(
                 "docker",
@@ -106,7 +109,7 @@ def assert_network_runtime(command, base_image, root):
             "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
             canary,
         )
-        scope = ipaddress.ip_network(address + "/29", strict=False)
+        scope = ipaddress.ip_network(address + "/24", strict=False)
         assert ipaddress.ip_address(excluded) in scope
         exclusions = [str(value) for value in scope.hosts() if str(value) != address]
         source = r"""
