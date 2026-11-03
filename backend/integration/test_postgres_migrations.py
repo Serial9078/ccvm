@@ -1207,16 +1207,30 @@ def test_empty_postgresql_database_migrates_to_head():
         # ports, and create empty network tables without inventing scan work.
         existing_rows["network_scans"] = []
         existing_rows["network_observations"] = []
+        existing_rows["audit_credentials"] = []
+        existing_rows["host_audits"] = []
         for row in existing_rows["ports"]:
             row.update(state="open", product=None, version=None, tunnel=None, cpe=None)
         deployment_operator, deployment_before = network_deployment_snapshot()
-        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-urls")
+        # The retained production operator is pinned to its original schema.
+        # Verify that deployment at its real revision before testing the new
+        # additive migration against populated network history.
+        alembic_command(url, "upgrade", "f93b70a4e628", log_name="upgrade-existing-urls")
         _, deployment_after = network_deployment_snapshot()
         deployment_operator.assert_preserved(deployment_before, deployment_after)
         print(
             "Network deployment fingerprints: existing ports and all prior rows preserved",
             flush=True,
         )
+        from integration.host_audit_postgres import remove_network_fixture, seed_network_history
+
+        without_network_fixture = existing_rows
+        network_fixture = seed_network_history(engine)
+        with engine.connect() as connection:
+            existing_rows = all_data_rows(connection)
+        existing_rows["audit_credentials"] = []
+        existing_rows["host_audits"] = []
+        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-network-history")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
@@ -1224,11 +1238,17 @@ def test_empty_postgresql_database_migrates_to_head():
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
+        remove_network_fixture(engine, network_fixture)
+        with engine.connect() as connection:
+            assert all_data_rows(connection) == without_network_fixture
             assert_finding_url_persistence(connection)
             assert_header_resume_transaction(connection)
             assert_long_url_persistence(connection)
             assert_postgresql_behavior(connection)
             assert_network_postgresql_behavior(connection)
+            from integration.host_audit_postgres import assert_native_inventory
+
+            assert_native_inventory(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
         from integration.operator_docker import assert_paused_worker_maintenance
 
@@ -1240,6 +1260,11 @@ def test_empty_postgresql_database_migrates_to_head():
         assert_finding_downgrade_refuses_truncation(engine, url)
         assert_downgrade_preserves_long_urls(engine, url)
         assert_network_downgrade_preserves_evidence(engine, url)
+        from integration.host_audit_postgres import assert_downgrade_retains_inventory
+
+        assert_downgrade_retains_inventory(
+            engine, url, alembic_command, all_data_rows, assert_schema_matches_models
+        )
     finally:
         try:
             with engine.connect() as connection:

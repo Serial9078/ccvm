@@ -9,7 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
-    "test:network-ui": "node tests/network-ui.mjs"
+    "test:network-ui": "node tests/network-ui.mjs",
+    "test:host-audit-ui": "node tests/host-audit-ui.mjs"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

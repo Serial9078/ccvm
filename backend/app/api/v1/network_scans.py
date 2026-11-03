@@ -16,6 +16,7 @@ from app.schemas.network_scan import (
     NetworkScanOut,
     ScopePreview,
 )
+from app.services.network_rules import coverage_for
 from app.services.network_scope import (
     MAX_TARGETS,
     allowed_networks,
@@ -63,7 +64,19 @@ def serialize(scan, *, detail=False):
     }
     result.update(address_count=len(scan.targets), status=status, jobs=jobs)
     if detail:
-        result["observations"] = scan.observations
+        result["observations"] = [
+            {
+                "id": observation.id,
+                "host_id": observation.host_id,
+                "asset_id": observation.asset_id,
+                "ip_address": observation.ip_address,
+                "services": [
+                    {**service, "audit_coverage": coverage_for(service, scan.audit_job.status)}
+                    for service in observation.services
+                ],
+            }
+            for observation in scan.observations
+        ]
     return result
 
 

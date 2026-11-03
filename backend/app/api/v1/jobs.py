@@ -81,6 +81,10 @@ def create_job(
     db: Session = Depends(get_db),
 ):
     plugin = payload.plugin.strip().lower()
+    if plugin == "hostinventory":
+        raise HTTPException(
+            status_code=400, detail="Create authenticated inventory via /host-audits"
+        )
     if plugin in {"networkdiscovery", "networkaudit"}:
         raise HTTPException(
             status_code=400, detail="Create scoped network scans via /network-scans"

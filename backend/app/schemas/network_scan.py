@@ -51,6 +51,7 @@ class NetworkScanOut(BaseModel):
 
 
 class ServiceOut(BaseModel):
+    audit_coverage: str | None = None
     port: int
     protocol: str
     state: str

@@ -10,6 +10,7 @@ import { Dashboard } from "./features/dashboard/page";
 import { Domains } from "./features/domains/page";
 import { Findings } from "./features/findings/page";
 import { Hosts } from "./features/hosts/page";
+import { HostAudits } from "./features/host-audits/page";
 import { Jobs } from "./features/jobs/page";
 import { Networks } from "./features/networks/page";
 import { Pipelines } from "./features/pipelines/page";
@@ -52,6 +53,7 @@ export default function App() {
         />
 
         <Route path="/networks" element={<Networks />} />
+        <Route path="/host-audits" element={<HostAudits />} />
 
         <Route
           path="/pipelines"
