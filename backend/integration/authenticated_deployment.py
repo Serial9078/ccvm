@@ -272,6 +272,9 @@ print('Unrelated HTTPS application retained')
 
 def diagnostics(source):
     journal = source / ".git/ccvm-authenticated-deployment.json"
+    preflight = source / ".git/ccvm-authenticated-preflight.log"
+    if preflight.is_file():
+        print(preflight.read_text(errors="replace")[-12000:], flush=True)
     if not journal.is_file():
         return
     state = json.loads(journal.read_text())
@@ -394,7 +397,10 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             assert bad.returncode != 0
             assert not (source / ".git/ccvm-authenticated-deployment.json").exists()
             assert ids == {n: inspect(n)["Id"] for n in ids}
-            assert execute(source, target, pins).returncode == 0
+            checked = execute(source, target, pins)
+            if checked.returncode:
+                diagnostics(source)
+            assert checked.returncode == 0
             original_stat = edge_file.stat()
             applied = execute(source, target, pins, apply=True)
             if applied.returncode:

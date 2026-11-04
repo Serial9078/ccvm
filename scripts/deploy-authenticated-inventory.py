@@ -152,7 +152,8 @@ def run(args, *, data=None, timeout=180, diagnostic=None):
         # Docker/Compose/parser errors may echo env values or configuration.
         # Keep full diagnostics in the private backup, never in terminal output.
         raise RuntimeError(
-            f"{Path(args[0]).name} exited {result.returncode}; inspect private diagnostics"
+            f"{Path(args[0]).name} exited {result.returncode}; "
+            + (f"inspect {diagnostic}" if diagnostic else "command output withheld")
         )
     return result.stdout
 
@@ -1337,6 +1338,7 @@ def main():
     args.hostname, args.clients = ingress.selection(args.hostname, args.client_cidrs.split(","))
     runtime = Runtime(root, args.target, ingress)
     directory = Path(git(root, "rev-parse", "--absolute-git-dir"))
+    runtime.diagnostic = directory / "ccvm-authenticated-preflight.log"
     descriptor = os.open(
         directory / "ccvm-authenticated.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
     )
