@@ -24,9 +24,9 @@ CLIENTS = "192.0.2.0/24,198.51.100.0/24"
 TOKEN_NAMES = ("CCVM_AUDIT_OPERATOR_TOKEN", "CCVM_AUDIT_VAULT_KEY")
 
 
-def run(*args, cwd=None, data=None, timeout=600, success=True):
+def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
     result = subprocess.run(
-        args, cwd=cwd, input=data, capture_output=True, timeout=timeout, check=False
+        args, cwd=cwd, input=data, capture_output=not stream, timeout=timeout, check=False
     )
     if success and result.returncode:
         raise AssertionError(
@@ -78,9 +78,8 @@ def execute(source, target, pins, *, apply=False):
         data=(REPOSITORY / "scripts/deploy-authenticated-inventory.py").read_bytes(),
         success=False,
         timeout=900,
+        stream=True,
     )
-    print(result.stdout.decode(), flush=True)
-    print(result.stderr.decode(), flush=True)
     return result
 
 

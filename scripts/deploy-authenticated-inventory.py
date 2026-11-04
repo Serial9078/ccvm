@@ -686,6 +686,7 @@ def build_artifacts(runtime, operation):
     images = {"frontend": operation["originals"]["frontend"]["Image"]}
     for name in ("backend", "worker"):
         base = operation["originals"][name]["Image"]
+        print(f"Building {name} dependencies on the confirmed image...", flush=True)
         base_tag = f"ccvm-audit-base-{name}:" + base.split(":")[1][:12]
         tag = f"ccvm-audit-{name}:" + runtime.target[:12]
         runtime.docker("tag", base, base_tag)
@@ -737,6 +738,7 @@ def build_artifacts(runtime, operation):
         raise RuntimeError("A confirmed scanner binary changed")
     operation["scanner_hashes"] = json.loads(upgraded)
     frontend = backup / "release/frontend"
+    print("Building the reviewed frontend...", flush=True)
     runtime.docker(
         "run",
         "--rm",
@@ -776,6 +778,7 @@ def database_environment(operation):
 
 
 def backup_database(runtime, operation):
+    print("Saving and checking the private PostgreSQL backup...", flush=True)
     destination = Path(operation["attempt_dir"]) / "database.dump"
     with destination.open("xb") as output:
         result = subprocess.run(
@@ -1050,6 +1053,7 @@ def close_application(runtime):
 
 
 def quiesce(runtime, operation, marker):
+    print("Closing API submissions and quiescing the idle worker...", flush=True)
     worker = runtime.inspect("ccvm-worker")
     if worker["State"]["Running"] and not worker["State"]["Paused"]:
         runtime.docker("pause", worker["Id"])
@@ -1058,10 +1062,18 @@ def quiesce(runtime, operation, marker):
     backend = runtime.inspect("ccvm-backend")
     if backend["State"]["Running"]:
         runtime.docker("stop", "--time", "20", backend["Id"])
-    before = runtime.state(operation)
-    validate_state(before, OLD_REVISION)
-    if before["transactions"]:
-        raise RuntimeError("Open database transactions retained")
+    for attempt in range(5):
+        before = runtime.state(operation)
+        validate_state(before, OLD_REVISION)
+        if not before["transactions"]:
+            break
+        # A pause can catch an idle worker between its SELECT and session close.
+        # With the API closed and no queued work, let that transaction finish.
+        if attempt == 4:
+            raise RuntimeError("Open database transactions retained")
+        runtime.docker("unpause", worker["Id"])
+        time.sleep(0.3)
+        runtime.docker("pause", worker["Id"])
     close_application(runtime)
     stopped = runtime.state(operation)
     validate_state(stopped, OLD_REVISION)
@@ -1220,6 +1232,7 @@ def activate(runtime, args, legacy, marker, operation):
             if state["tables"] != operation["before"]["tables"] or state["transactions"]:
                 raise RuntimeError("Quiesced database changed; migration refused")
             write_phase(marker, operation, "migrating")
+            print("Applying the additive inventory migration...", flush=True)
             runtime.helper(
                 operation,
                 "from alembic import command\nfrom alembic.config import Config\n"
@@ -1238,6 +1251,7 @@ def activate(runtime, args, legacy, marker, operation):
             git(runtime.root, "merge", "--ff-only", runtime.target)
         write_phase(marker, operation, "source")
     if operation["phase"] == "source":
+        print("Publishing reviewed source, frontend and private runtime settings...", flush=True)
         close_application(runtime)
         override = runtime.ingress.render_override(
             operation["images"],
@@ -1264,6 +1278,7 @@ def activate(runtime, args, legacy, marker, operation):
         legacy.publish_frontend(runtime, runtime.root, Path(operation["built_frontend"]))
         write_phase(marker, operation, "published")
     if operation["phase"] == "published":
+        print("Starting the prepared application containers...", flush=True)
         runtime.compose(
             "up",
             "-d",
@@ -1279,6 +1294,7 @@ def activate(runtime, args, legacy, marker, operation):
         )
         write_phase(marker, operation, "services")
     if operation["phase"] in {"services", "edge"}:
+        print("Verifying application, TLS, client allowlist and operator access...", flush=True)
         # A prior failure closed these same new containers. Reconcile, never
         # submit a scan or touch database rows during recovery.
         runtime.compose(

@@ -175,6 +175,35 @@ class PrivateState(unittest.TestCase):
 
 
 class MigrationBoundaries(unittest.TestCase):
+    def test_null_inherits_image_command_but_empty_list_and_runtime_drift_do_not(self):
+        legacy = load("legacy_validate_fixture", "deploy-network-scans.py")
+        image = {"Config": {"Cmd": ["nginx"], "Entrypoint": ["/docker-entrypoint.sh"]}}
+        spec = {
+            "image": "fixture:nginx",
+            "command": None,
+            "entrypoint": None,
+            "networks": {"default": {}},
+        }
+        config = {"services": {"frontend": spec}, "networks": {"default": {"name": "fixture"}}}
+        container = {
+            "Config": {"Image": "fixture:nginx", **image["Config"]},
+            "HostConfig": {
+                "Privileged": False,
+                "ReadonlyRootfs": False,
+                "RestartPolicy": {"Name": "no"},
+            },
+            "Mounts": [],
+            "NetworkSettings": {"Networks": {"fixture": {}}},
+        }
+        op.validate_service(legacy, config, "frontend", container, image)
+        spec["command"] = []
+        with self.assertRaisesRegex(RuntimeError, "command"):
+            op.validate_service(legacy, config, "frontend", container, image)
+        spec["command"] = None
+        container["Config"]["Cmd"] = ["unexpected"]
+        with self.assertRaisesRegex(RuntimeError, "command"):
+            op.validate_service(legacy, config, "frontend", container, image)
+
     def test_exact_existing_row_preservation(self):
         before = {
             "identity": {"database": "fixture"},
@@ -213,6 +242,48 @@ class MigrationBoundaries(unittest.TestCase):
         restore.assert_called_once_with(runtime, operation)
         phase.assert_called_once_with(Path("unused"), operation, "built")
         runtime.helper.assert_not_called()
+
+    def test_pause_during_idle_transaction_retries_before_backup(self):
+        runtime = Mock()
+        runtime.inspect.side_effect = [
+            {"Id": "worker", "State": {"Running": True, "Paused": False}},
+            {"Id": "backend", "State": {"Running": True}},
+        ]
+        stable = {"revision": op.OLD_REVISION, "active": [], "transactions": 0, "tables": {}}
+        runtime.state.side_effect = [{**stable, "transactions": 1}, stable, stable]
+        with tempfile.TemporaryDirectory() as directory:
+            operation = {"backup": directory, "phase": "built"}
+            with (
+                patch.object(op, "close_application") as close,
+                patch.object(op, "backup_database") as backup,
+                patch.object(op.time, "sleep") as sleep,
+            ):
+                op.quiesce(runtime, operation, Path(directory) / "journal.json")
+            close.assert_called_once_with(runtime)
+            backup.assert_called_once_with(runtime, operation)
+            sleep.assert_called_once_with(0.3)
+            self.assertIn(unittest.mock.call("unpause", "worker"), runtime.docker.call_args_list)
+            self.assertEqual(operation["phase"], "quiesced")
+
+    def test_queue_race_keeps_job_and_never_stops_worker_or_backs_up(self):
+        runtime = Mock()
+        runtime.inspect.side_effect = [
+            {"Id": "worker", "State": {"Running": True, "Paused": False}},
+            {"Id": "backend", "State": {"Running": True}},
+        ]
+        runtime.state.return_value = {
+            "revision": op.OLD_REVISION,
+            "active": [{"id": 7}],
+            "transactions": 0,
+        }
+        with (
+            patch.object(op, "close_application") as close,
+            patch.object(op, "backup_database") as backup,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Active jobs"):
+                op.quiesce(runtime, {}, Path("unused"))
+            close.assert_not_called()
+            backup.assert_not_called()
 
     def test_post_migration_failure_retains_concurrent_edge_edit(self):
         runtime = Mock()
