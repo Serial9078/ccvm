@@ -518,6 +518,17 @@ def worker_identity(runtime, worker):
         raise RuntimeError("A scanner or an additional Python process is active")
 
 
+def validate_service(legacy, config, name, container, image):
+    # Compose null inherits the image value; [] explicitly clears it. Retain
+    # that distinction while reusing the historical deployment's drift checks.
+    spec = dict(config["services"][name])
+    for key in ("command", "entrypoint"):
+        if spec.get(key) is None:
+            spec.pop(key, None)
+    normalized = {**config, "services": {**config["services"], name: spec}}
+    legacy.validate_service(normalized, name, container, image)
+
+
 def preflight(runtime, args, legacy):
     version = runtime.docker("compose", "version", "--short")
     numbers = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
@@ -569,7 +580,7 @@ def preflight(runtime, args, legacy):
     if "audit-gateway" in config["services"]:
         raise RuntimeError("An existing audit gateway service is retained")
     for name in ("backend", "worker", "frontend"):
-        legacy.validate_service(config, name, infos[name], runtime.inspect(infos[name]["Image"]))
+        validate_service(legacy, config, name, infos[name], runtime.inspect(infos[name]["Image"]))
     names = set(infos["worker"]["NetworkSettings"]["Networks"]) & set(
         infos["postgres"]["NetworkSettings"]["Networks"]
     )
@@ -890,7 +901,7 @@ def verify_runtime(runtime, operation, legacy):
                 **container,
                 "Mounts": [m for m in container["Mounts"] if m["Type"] != "tmpfs"],
             }
-        legacy.validate_service(resolved, name, container, runtime.inspect(image))
+        validate_service(legacy, resolved, name, container, runtime.inspect(image))
     for name in ("backend", "worker"):
         values = env_map(runtime.inspect("ccvm-" + name))
         expected = read_env(Path(operation["private"]) / "vault.env")["CCVM_AUDIT_VAULT_KEY"]

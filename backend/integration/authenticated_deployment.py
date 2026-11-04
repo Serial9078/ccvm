@@ -400,6 +400,25 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             checked = execute(source, target, pins)
             if checked.returncode:
                 diagnostics(source)
+                front = inspect("ccvm-frontend")["Config"]
+                image = inspect(nginx)["Config"]
+                spec = json.loads(compose(source, "config", "--format", "json"))["services"][
+                    "frontend"
+                ]
+                print(
+                    json.dumps(
+                        {
+                            "fixture_command_contract": {
+                                "container": {k: front.get(k) for k in ("Cmd", "Entrypoint")},
+                                "image": {k: image.get(k) for k in ("Cmd", "Entrypoint")},
+                                "compose": {
+                                    k: spec.get(k, "inherited") for k in ("command", "entrypoint")
+                                },
+                            }
+                        }
+                    ),
+                    flush=True,
+                )
             assert checked.returncode == 0
             original_stat = edge_file.stat()
             applied = execute(source, target, pins, apply=True)
