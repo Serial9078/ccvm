@@ -1,0 +1,8 @@
+# Extend a confirmed local image; do not replace installed scanner binaries.
+ARG CCVM_RUNTIME_BASE
+FROM ${CCVM_RUNTIME_BASE}
+USER root
+COPY requirements.txt /tmp/ccvm-authenticated-requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/ccvm-authenticated-requirements.txt \
+    && python -m pip check \
+    && python -c "import cryptography, paramiko, winrm; from cryptography.hazmat.primitives.ciphers.aead import AESGCM; AESGCM.generate_key(256)"
