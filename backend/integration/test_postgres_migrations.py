@@ -1285,6 +1285,11 @@ def test_empty_postgresql_database_migrates_to_head():
         assert_downgrade_retains_inventory(
             engine, url, alembic_command, all_data_rows, assert_schema_matches_models
         )
+        _, encrypted_first = authenticated_deployment_snapshot()
+        _, encrypted_second = authenticated_deployment_snapshot()
+        assert encrypted_first["tables"]["audit_credentials"]["count"] > 0
+        assert encrypted_first["tables"] == encrypted_second["tables"]
+        print("Deployment bytea fingerprints stay stable across independent reads", flush=True)
     finally:
         try:
             with engine.connect() as connection:

@@ -509,8 +509,9 @@ def worker_identity(runtime, worker):
     )
     if len(actual) != 3 or actual[1:] != ["-m", "app.worker.main"]:
         raise RuntimeError("Worker PID 1 differs from its configured module")
-    lines = runtime.docker("top", worker["Id"], "-eo", "comm").splitlines()[1:]
-    names = [line.strip() for line in lines]
+    # Docker needs a PID column even when only command names are being checked.
+    lines = runtime.docker("top", worker["Id"], "-eo", "pid,comm").splitlines()[1:]
+    names = [line.split()[-1] for line in lines]
     if sum(bool(re.fullmatch(r"python(?:3(?:\.\d+)?)?", n)) for n in names) != 1 or set(
         names
     ) & set(TOOLS):
@@ -607,9 +608,11 @@ def preflight(runtime, args, legacy):
     port = runtime.ingress.free_tls_port(edge_source)
     if not port:
         raise RuntimeError("No unused internal TLS listener in the reviewed range")
-    identities = runtime.docker("top", infos["edge"]["Id"], "-eo", "uid,gid,comm").splitlines()[1:]
+    identities = runtime.docker("top", infos["edge"]["Id"], "-eo", "pid,uid,gid,comm").splitlines()[
+        1:
+    ]
     pairs = {
-        tuple(map(int, line.split()[:2])) for line in identities if line.split()[-1] == "haproxy"
+        tuple(map(int, line.split()[1:3])) for line in identities if line.split()[-1] == "haproxy"
     }
     nonroot = {pair for pair in pairs if pair[0] != 0}
     if len(nonroot) > 1 or not pairs:
