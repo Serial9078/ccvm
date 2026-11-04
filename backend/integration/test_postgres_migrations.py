@@ -1150,6 +1150,19 @@ def network_deployment_snapshot():
     return module, json.loads(output.getvalue())
 
 
+def authenticated_deployment_snapshot():
+    spec = importlib.util.spec_from_file_location(
+        "authenticated_deployment_operator",
+        BACKEND.parent / "scripts/deploy-authenticated-inventory.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(module.STATE_CODE, "<authenticated-deployment-snapshot>", "exec"), {})
+    return module, json.loads(output.getvalue())
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -1226,11 +1239,18 @@ def test_empty_postgresql_database_migrates_to_head():
 
         without_network_fixture = existing_rows
         network_fixture = seed_network_history(engine)
+        auth_operator, auth_before = authenticated_deployment_snapshot()
         with engine.connect() as connection:
             existing_rows = all_data_rows(connection)
         existing_rows["audit_credentials"] = []
         existing_rows["host_audits"] = []
         alembic_command(url, "upgrade", "head", log_name="upgrade-existing-network-history")
+        _, auth_after = authenticated_deployment_snapshot()
+        auth_operator.assert_preserved(auth_before, auth_after)
+        print(
+            "Authenticated deployment fingerprints preserve all completed network evidence",
+            flush=True,
+        )
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
@@ -1265,6 +1285,11 @@ def test_empty_postgresql_database_migrates_to_head():
         assert_downgrade_retains_inventory(
             engine, url, alembic_command, all_data_rows, assert_schema_matches_models
         )
+        _, encrypted_first = authenticated_deployment_snapshot()
+        _, encrypted_second = authenticated_deployment_snapshot()
+        assert encrypted_first["tables"]["audit_credentials"]["count"] > 0
+        assert encrypted_first["tables"] == encrypted_second["tables"]
+        print("Deployment bytea fingerprints stay stable across independent reads", flush=True)
     finally:
         try:
             with engine.connect() as connection:

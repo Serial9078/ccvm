@@ -130,6 +130,49 @@ expansion without guessing from their port numbers.
 
 ## Verification
 
+### Existing Docker/HAProxy deployment
+
+`scripts/deploy-authenticated-inventory.py` provides the reviewed rollout for the
+retained legacy base. Run it from the deployment checkout using the full reviewed
+merge SHA, host name, HTTPS DNS name, browser/VPN CIDRs, existing certificate
+basename and four independently confirmed immutable image IDs. Operational
+values remain local. Its default is a read-only service preflight; `--apply`
+activates it and `--resume` reconciles its own private retained journal.
+
+The operator requires Compose 2.24.4 or newer, the existing network override, an
+idle worker and a master-worker HAProxy SNI router without chroot. It builds on
+the exact deployed Python/scanner images, checks all seven scanner executable
+hashes, builds the frontend and validates the proposed HAProxy configuration
+before maintenance. It then stops API submissions and the idle worker, takes a
+private PostgreSQL custom dump and proves that migration preserves every old
+row. An interruption before migration restores the original application
+containers. After migration it retains the additive schema, closes application
+writers on failure and resumes from the journal; it never downgrades data.
+
+The additional private Compose overlay binds the legacy API/UI ports to
+localhost. HAProxy keeps its existing container and unrelated routes. Only the
+selected SNI hostname reaches an internal TLS frontend, where the original
+client address is checked against the browser/VPN allowlist. A protected Unix
+socket carries PROXY protocol to a dedicated nginx gateway; this gateway has no
+published TCP port. Both ingress layers overwrite forwarded headers. Uvicorn
+trusts only the gateway's reserved application-network address. The scanner
+allowlist is preserved independently of the browser/VPN networks.
+
+Verification exercises real TLS certificate validation, the public SNI path,
+allowed/denied client addresses, forged forwarded headers and missing/wrong/valid
+operator tokens. A verified repeat only verifies; it does not stop work,
+regenerate keys or enqueue jobs. The operator prints private recovery and token
+**file paths**, never token/key values. Read the token locally for the UI and
+back up the vault key separately. Configure internal DNS for the chosen name to
+reach this edge; deployment probes do not prove client DNS or VPN routing.
+
+CI deploys this same operator into a disposable Docker stack with PostgreSQL 16,
+HAProxy 3.1, nginx and a private test CA. It verifies the preserved unrelated TLS
+application, real socket permissions, loopback port replacement, a retained
+private env-file, post-migration recovery and idempotency. Nmap is real in this
+fixture; the other scanner executables are inert hash-preservation fixtures.
+Existing scanner integration jobs continue to exercise their actual runtimes.
+
 Backend tests cover access boundaries, customer/CIDR scoping, ciphertext/AAD
 tampering, secret redaction, frozen requests, revocation, partial evidence,
 cancellation and process deadlines. A native loopback SSH fixture exercises a

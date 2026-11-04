@@ -128,6 +128,21 @@ jobs:
       - name: Check screenshot service JavaScript syntax
         run: node --check ../screenshot-service/server.js
 
+  authenticated-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Deploy and resume authenticated inventory through native HAProxy and nginx
+        run: python backend/integration/authenticated_deployment.py
+
   windows-inventory:
     runs-on: windows-latest
     timeout-minutes: 5
