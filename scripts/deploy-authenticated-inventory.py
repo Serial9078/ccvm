@@ -891,8 +891,11 @@ def verify_runtime(runtime, operation, legacy):
             container["Image"] != image
             or not container["State"]["Running"]
             or container["State"]["Paused"]
+            or container["State"].get("Restarting", False)
         ):
-            raise RuntimeError("Replacement application container did not become healthy")
+            raise RuntimeError(
+                f"{name}: replacement container is not healthy; inspect startup logs"
+            )
         if name == "audit-gateway":
             if set(container["HostConfig"].get("Tmpfs", {})) != {
                 "/var/cache/nginx",

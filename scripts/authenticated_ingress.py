@@ -284,7 +284,10 @@ def render_override(
                     "target": "/usr/share/nginx/html",
                     "read_only": True,
                 },
-                {"type": "bind", "source": socket_dir, "target": "/run/ccvm"},
+                # Match the literal parent of the PID tmpfs. Older Docker/runc
+                # mounts /var/run (a symlink to /run) after /run/ccvm otherwise,
+                # hiding the socket bind. nginx can still listen on /run/ccvm.
+                {"type": "bind", "source": socket_dir, "target": "/var/run/ccvm"},
             ],
         },
     }
