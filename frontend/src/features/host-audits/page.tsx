@@ -22,7 +22,7 @@ import {
 } from "@mui/material";
 import { useCustomers } from "../customers/hooks";
 import { auditRequest, canUseAuditApi } from "./api";
-import type { Credential, HostAudit, InventorySection } from "./api";
+import type { Credential, HostAudit, InventorySection, WinrmTransport } from "./api";
 
 const emptyCredential = {
   name: "",
@@ -33,6 +33,12 @@ const emptyCredential = {
   key: "",
   passphrase: "",
 };
+function winrmLabel(transport: WinrmTransport | undefined) {
+  return transport === "http_ntlm"
+    ? "HTTP / NTLM · message encryption required"
+    : "HTTPS / NTLM · certificate validation required";
+}
+
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : "Host audit request failed.";
 }
@@ -117,6 +123,7 @@ function AuditPanel({
   const [credentialId, setCredentialId] = useState("");
   const [target, setTarget] = useState("");
   const [port, setPort] = useState("");
+  const [winrmTransport, setWinrmTransport] = useState<WinrmTransport>("https");
   const [fingerprint, setFingerprint] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -182,6 +189,7 @@ function AuditPanel({
             : { password: form.password }),
         });
         setCredentialId(String(result.id));
+        setWinrmTransport("https");
         setPort("");
         setFingerprint("");
         setCreateOpen(false);
@@ -198,6 +206,7 @@ function AuditPanel({
         credential_id: Number(credentialId),
         target,
         ...(port ? { port: Number(port) } : {}),
+        ...(selected?.kind === "winrm" ? { winrm_transport: winrmTransport } : {}),
         ...(selected?.kind.startsWith("ssh_") ? { ssh_fingerprint: fingerprint } : {}),
         mode,
       });
@@ -225,6 +234,7 @@ function AuditPanel({
             value={credentialId}
             onChange={(e) => {
               setCredentialId(e.target.value);
+              setWinrmTransport("https");
               setPort("");
               setFingerprint("");
             }}
@@ -243,13 +253,32 @@ function AuditPanel({
             onChange={(e) => setTarget(e.target.value)}
             helperText="One address inside the customer credential scope"
           />
+          {selected?.kind === "winrm" && (
+            <TextField
+              select
+              label="WinRM connection"
+              value={winrmTransport}
+              onChange={(e) => {
+                setWinrmTransport(e.target.value as WinrmTransport);
+                setPort("");
+              }}
+              helperText="Changing the connection resets the optional port"
+            >
+              <MenuItem value="https">HTTPS / NTLM · verified certificate</MenuItem>
+              <MenuItem value="http_ntlm">HTTP / NTLM · encrypted messages</MenuItem>
+            </TextField>
+          )}
           <TextField
             label="Port (optional)"
             type="number"
             value={port}
             onChange={(e) => setPort(e.target.value)}
             helperText={
-              selected?.kind === "winrm" ? "Default 5986 · HTTPS / NTLM" : "Default 22 · SSH"
+              selected?.kind === "winrm"
+                ? winrmTransport === "http_ntlm"
+                  ? "Default 5985 · HTTP / NTLM"
+                  : "Default 5986 · HTTPS / NTLM"
+                : "Default 22 · SSH"
             }
           />
           {selected?.kind.startsWith("ssh_") && (
@@ -267,9 +296,10 @@ function AuditPanel({
           </Typography>
         )}
         {selected?.kind === "winrm" && (
-          <Alert severity="info" sx={{ mt: 2 }}>
-            WinRM requires a trusted certificate with the target IP in its subject alternative
-            names. Certificate checks cannot be disabled.
+          <Alert severity={winrmTransport === "http_ntlm" ? "warning" : "info"} sx={{ mt: 2 }}>
+            {winrmTransport === "http_ntlm"
+              ? "Messages are encrypted; server identity is not verified by a certificate."
+              : "HTTPS requires a trusted certificate with the target IP in its subject alternative names. Certificate checks cannot be disabled."}
           </Alert>
         )}
         <Stack direction="row" spacing={2} useFlexGap sx={{ mt: 2, flexWrap: "wrap" }}>
@@ -319,6 +349,12 @@ function AuditPanel({
                 {run.mode === "connection" ? "Connection test" : "Host inventory"} ·{" "}
                 {new Date(run.created_at).toLocaleString()}
               </Typography>
+              {credentials.find((credential) => credential.id === run.credential_id)?.kind ===
+                "winrm" && (
+                <Typography variant="body2" color="text.secondary">
+                  {winrmLabel(run.winrm_transport)}
+                </Typography>
+              )}
             </Box>
             <Chip
               label={run.job.status.toUpperCase()}
@@ -399,7 +435,7 @@ function AuditPanel({
             >
               <MenuItem value="ssh_password">Linux · SSH password</MenuItem>
               <MenuItem value="ssh_key">Linux · SSH private key</MenuItem>
-              <MenuItem value="winrm">Windows · WinRM over HTTPS</MenuItem>
+              <MenuItem value="winrm">Windows · WinRM / NTLM</MenuItem>
             </TextField>
             <TextField
               label="Username"
@@ -523,6 +559,18 @@ function AuditPanel({
       <Dialog open={detail !== null} onClose={() => setDetail(null)} maxWidth="lg" fullWidth>
         <DialogTitle>Host evidence · {detail?.target}</DialogTitle>
         <DialogContent>
+          {detail &&
+            credentials.find((credential) => credential.id === detail.credential_id)?.kind ===
+              "winrm" && (
+              <Alert
+                severity={detail.winrm_transport === "http_ntlm" ? "warning" : "info"}
+                sx={{ mb: 2 }}
+              >
+                {winrmLabel(detail.winrm_transport)}
+                {detail.winrm_transport === "http_ntlm" &&
+                  ". Server identity was not verified by a certificate."}
+              </Alert>
+            )}
           {detail?.inventory ? (
             <>
               <Typography variant="h6">{detail.inventory.os.name}</Typography>
@@ -606,7 +654,7 @@ export function HostAudits() {
       <Box>
         <Typography variant="h4">Authenticated inventory</Typography>
         <Typography color="text.secondary">
-          Read operating-system and software evidence through verified SSH or WinRM connections.
+          Read operating-system and software evidence through SSH or encrypted WinRM connections.
         </Typography>
       </Box>
       {session ? (

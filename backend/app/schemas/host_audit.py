@@ -57,6 +57,7 @@ class HostAuditCreate(BaseModel):
     target: str = Field(min_length=1, max_length=64)
     port: int | None = Field(default=None, ge=1, le=65535)
     ssh_fingerprint: str | None = Field(default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
+    winrm_transport: Literal["https", "http_ntlm"] = "https"
     mode: Literal["connection", "inventory"] = "inventory"
 
 
@@ -69,6 +70,7 @@ class HostAuditOut(BaseModel):
     credential_id: int
     target: str
     port: int
+    winrm_transport: Literal["https", "http_ntlm"]
     mode: str
     cancel_requested: bool
     created_at: datetime

@@ -27,6 +27,10 @@ def frozen_audit(db, job):
         raise ValueError("Invalid frozen host audit parameters")
     if credential.kind not in {"ssh_password", "ssh_key", "winrm"}:
         raise ValueError("Unsupported credential kind")
+    if audit.winrm_transport not in {"https", "http_ntlm"} or (
+        credential.kind != "winrm" and audit.winrm_transport != "https"
+    ):
+        raise ValueError("Invalid frozen WinRM transport")
     verify_credential_target(credential, audit.target, audit.customer_id)
     if not hmac.compare_digest(audit_hash(audit, credential), audit.scope_sha256):
         raise ValueError("Frozen host audit parameters or credential changed")
@@ -51,6 +55,7 @@ def run_hostinventory(db, job):
             "mode": audit.mode,
             "ssh_fingerprint": audit.ssh_fingerprint,
             "kind": credential.kind,
+            "winrm_transport": audit.winrm_transport,
             "username": credential.username,
             "secrets": secrets,
             "ca_bundle": os.environ.get("CCVM_WINRM_CA_BUNDLE") or None,

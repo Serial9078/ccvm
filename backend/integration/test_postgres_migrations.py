@@ -1244,13 +1244,24 @@ def test_empty_postgresql_database_migrates_to_head():
             existing_rows = all_data_rows(connection)
         existing_rows["audit_credentials"] = []
         existing_rows["host_audits"] = []
-        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-network-history")
+        alembic_command(url, "upgrade", "a4c1d8e7f209", log_name="upgrade-existing-network-history")
         _, auth_after = authenticated_deployment_snapshot()
         auth_operator.assert_preserved(auth_before, auth_after)
         print(
             "Authenticated deployment fingerprints preserve all completed network evidence",
             flush=True,
         )
+        from integration.host_audit_postgres import (
+            assert_legacy_inventory_history,
+            seed_legacy_inventory_history,
+        )
+
+        legacy_inventory = seed_legacy_inventory_history(engine)
+        with engine.connect() as connection:
+            existing_rows = all_data_rows(connection)
+        for row in existing_rows["host_audits"]:
+            row["winrm_transport"] = "https"
+        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-inventory-history")
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
@@ -1258,6 +1269,7 @@ def test_empty_postgresql_database_migrates_to_head():
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
+        assert_legacy_inventory_history(engine, legacy_inventory)
         remove_network_fixture(engine, network_fixture)
         with engine.connect() as connection:
             assert all_data_rows(connection) == without_network_fixture
@@ -1280,9 +1292,15 @@ def test_empty_postgresql_database_migrates_to_head():
         assert_finding_downgrade_refuses_truncation(engine, url)
         assert_downgrade_preserves_long_urls(engine, url)
         assert_network_downgrade_preserves_evidence(engine, url)
-        from integration.host_audit_postgres import assert_downgrade_retains_inventory
+        from integration.host_audit_postgres import (
+            assert_downgrade_retains_http_transport,
+            assert_downgrade_retains_inventory,
+        )
 
         assert_downgrade_retains_inventory(
+            engine, url, alembic_command, all_data_rows, assert_schema_matches_models
+        )
+        assert_downgrade_retains_http_transport(
             engine, url, alembic_command, all_data_rows, assert_schema_matches_models
         )
         _, encrypted_first = authenticated_deployment_snapshot()

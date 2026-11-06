@@ -112,6 +112,11 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
         decrypt(credential)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    if credential.kind != "winrm" and payload.winrm_transport != "https":
+        raise HTTPException(
+            status_code=422,
+            detail="A WinRM transport can only be selected for Windows credentials",
+        )
     if credential.kind.startswith("ssh_") and not payload.ssh_fingerprint:
         raise HTTPException(
             status_code=422,
@@ -120,7 +125,7 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
     if credential.kind == "winrm" and payload.ssh_fingerprint:
         raise HTTPException(
             status_code=422,
-            detail="WinRM uses TLS certificate validation, not SSH fingerprints",
+            detail="WinRM does not use SSH fingerprints",
         )
     active = (
         db.query(HostAudit.id)
@@ -172,8 +177,14 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
         asset_id=asset.id,
         job_id=job.id,
         target=target,
-        port=payload.port or (5986 if credential.kind == "winrm" else 22),
+        port=payload.port
+        or (
+            (5985 if payload.winrm_transport == "http_ntlm" else 5986)
+            if credential.kind == "winrm"
+            else 22
+        ),
         ssh_fingerprint=payload.ssh_fingerprint,
+        winrm_transport=payload.winrm_transport,
         mode=payload.mode,
         cancel_requested=False,
     )

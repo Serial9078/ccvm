@@ -19,9 +19,11 @@ from pathlib import Path
 
 import paramiko
 import requests
+from winrm.exceptions import InvalidCredentialsError
 from winrm.protocol import Protocol
 
 MAX_OUTPUT = 8 * 1024 * 1024
+NTLM_ENCRYPTED_TYPE = 'protocol="application/HTTP-SPNEGO-session-encrypted"'
 
 
 class TransportFailure(Exception):
@@ -92,7 +94,7 @@ def ssh_collect(payload):
         client.close()
 
 
-def restricted_session(session, endpoint, ca_bundle):
+def restricted_session(session, endpoint, ca_bundle, require_encryption=False):
     """Block proxy/netrc environment credentials and all redirect destinations."""
     session.trust_env = False
     session.proxies = {}
@@ -102,12 +104,22 @@ def restricted_session(session, endpoint, ca_bundle):
     def send(request, **kwargs):
         if request.url != endpoint:
             raise TransportFailure("redirect_rejected")
+        # pywinrm starts NTLM with an empty POST. Every subsequent WSMan
+        # message over HTTP must be wrapped, including server responses.
+        # Its normal response parser otherwise also accepts plaintext SOAP.
+        encrypted_message = require_encryption and bool(request.body)
+        if encrypted_message and NTLM_ENCRYPTED_TYPE not in request.headers.get("Content-Type", ""):
+            raise TransportFailure("message_encryption_required")
         kwargs.update(allow_redirects=False, verify=ca_bundle or True, proxies={})
         response = original_send(request, **kwargs)
         if response.is_redirect or response.is_permanent_redirect:
             raise TransportFailure("redirect_rejected")
         if len(response.content) > MAX_OUTPUT:
             raise TransportFailure("output_limit")
+        if encrypted_message and NTLM_ENCRYPTED_TYPE not in response.headers.get(
+            "Content-Type", ""
+        ):
+            raise TransportFailure("message_encryption_required")
         return response
 
     session.send = send
@@ -115,21 +127,27 @@ def restricted_session(session, endpoint, ca_bundle):
 
 
 def winrm_protocol(payload):
+    winrm_transport = payload.get("winrm_transport", "https")
+    if winrm_transport not in {"https", "http_ntlm"}:
+        raise TransportFailure("invalid_request")
     target = str(ipaddress.ip_address(payload["target"]))
     if ":" in target:
         target = f"[{target}]"
-    endpoint = f"https://{target}:{payload['port']}/wsman"
+    http_ntlm = winrm_transport == "http_ntlm"
+    scheme = "http" if http_ntlm else "https"
+    endpoint = f"{scheme}://{target}:{payload['port']}/wsman"
     # Session's convenience URL parser rewrites bracketed IPv6 URLs in pywinrm
-    # 0.5.0. Protocol accepts the exact verified literal-IP HTTPS endpoint.
+    # 0.5.0. Protocol preserves the selected literal-IP endpoint and scheme.
     protocol = Protocol(
         endpoint=endpoint,
         username=payload["username"],
         password=payload["secrets"]["password"],
         transport="ntlm",
         server_cert_validation="validate",
-        ca_trust_path=payload.get("ca_bundle"),
+        ca_trust_path=None if http_ntlm else payload.get("ca_bundle"),
         proxy=None,
         send_cbt=True,
+        message_encryption="always" if http_ntlm else "auto",
         operation_timeout_sec=15,
         read_timeout_sec=20,
     )
@@ -138,14 +156,44 @@ def winrm_protocol(payload):
     return protocol, endpoint
 
 
+def winrm_session(transport, endpoint, ca_bundle):
+    """Restrict even the first HTTP NTLM handshake before it reaches the wire."""
+    http_ntlm = endpoint.startswith("http://")
+    hardened = None
+    if http_ntlm:
+        # build_session() invokes setup_encryption(), which authenticates with
+        # an empty POST before returning. Harden its session at that boundary;
+        # wrapping only the returned session would be too late.
+        setup_encryption = transport.setup_encryption
+
+        def secured_setup(session):
+            nonlocal hardened
+            hardened = restricted_session(session, endpoint, None, require_encryption=True)
+            return setup_encryption(hardened)
+
+        transport.setup_encryption = secured_setup
+    try:
+        session = transport.build_session()
+        if session is hardened:
+            return session
+        return restricted_session(
+            session, endpoint, None if http_ntlm else ca_bundle, require_encryption=http_ntlm
+        )
+    except Exception:
+        session = getattr(transport, "session", None)
+        if session is not None:
+            session.close()
+        raise
+
+
 def winrm_collect(payload):
-    protocol, endpoint = winrm_protocol(payload)
-    transport = protocol.transport
-    http = restricted_session(transport.build_session(), endpoint, payload.get("ca_bundle"))
     source = Path(__file__).with_name("windows_inventory.ps1").read_text()
     mode = payload["mode"]
     if mode not in {"connection", "inventory"}:
         raise TransportFailure("invalid_request")
+    protocol, endpoint = winrm_protocol(payload)
+    transport = protocol.transport
+    http = winrm_session(transport, endpoint, payload.get("ca_bundle"))
     shell, command = None, None
     try:
         shell = protocol.open_shell(noprofile=True, codepage=65001, idle_timeout="PT60S")
@@ -197,7 +245,7 @@ def main():
         sys.stdout.buffer.write(output)
     except TransportFailure as error:
         print(json.dumps({"error": str(error)}))
-    except paramiko.AuthenticationException:
+    except (paramiko.AuthenticationException, InvalidCredentialsError):
         print('{"error":"authentication_failed"}')
     except requests.exceptions.SSLError:
         print('{"error":"tls_verification_failed"}')

@@ -16,6 +16,7 @@ ERRORS = {
     ),
     "authentication_failed": "The target rejected authentication",
     "tls_verification_failed": "WinRM TLS certificate validation failed",
+    "message_encryption_required": "WinRM requires encrypted NTLM messages and responses",
     "invalid_private_key": "SSH private key or passphrase could not be read",
     "remote_command_failed": (
         "The fixed inventory command failed; verify Python 3 / PowerShell and account permissions"

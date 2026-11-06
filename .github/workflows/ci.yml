@@ -30,6 +30,8 @@ jobs:
         run: python -m pytest -q
       - name: Verify real SSH handshake, pinning, authentication and read-only inventory on loopback
         run: python integration/check_host_inventory.py
+      - name: Verify real NTLM handshake and mandatory encrypted WSMan messages on loopback
+        run: python integration/check_winrm_http.py
       - name: Verify Neptun reconciliation safeguards
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python -m unittest discover -s ../scripts/tests -v
@@ -142,6 +144,21 @@ jobs:
           python-version: "3.12"
       - name: Deploy and resume authenticated inventory through native HAProxy and nginx
         run: python backend/integration/authenticated_deployment.py
+
+  host-inventory-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Update a populated old inventory release without changing the TLS gateway or keys
+        run: python backend/integration/authenticated_deployment.py --host-inventory-update
 
   gateway-mount-legacy:
     runs-on: ubuntu-latest
