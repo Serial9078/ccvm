@@ -69,7 +69,9 @@ class RepairTests(unittest.TestCase):
         original.validate_state = operator.validate_state
         runtime = Mock(root=root, prefix=["docker"])
         runtime.state.return_value = after
-        runtime.docker.return_value = "/run"
+        runtime.docker.side_effect = lambda *a, **kw: (
+            "ccvm-audit-gateway" if a[0] == "ps" else "/run"
+        )
         runtime.inspect.side_effect = lambda name: {
             "ccvm-backend": {"Image": "backend", "State": {"Running": False}},
             "ccvm-worker": {"Image": "worker", "State": {"Running": False}},
@@ -81,6 +83,19 @@ class RepairTests(unittest.TestCase):
             "nginx": {"Config": {}},
         }[name]
         args = SimpleNamespace(host="fixture", target="a" * 40, apply=True)
+        original.verify_resolved.return_value = {
+            "services": {
+                "audit-gateway": {
+                    "volumes": [
+                        {
+                            "type": "bind",
+                            "source": operation["socket_dir"],
+                            "target": "/var/run/ccvm",
+                        }
+                    ]
+                }
+            }
+        }
         return SimpleNamespace(
             root=root,
             op=operation,
@@ -193,6 +208,70 @@ class RepairTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "remains unhealthy"):
                 repair.wait_gateway(runtime, operation)
             host_check.assert_not_called()
+
+    def test_recorded_intent_accepts_exact_old_live_mount_before_recreation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.fixture(directory)
+            gateway = f.runtime.inspect("ccvm-audit-gateway")
+
+            def validate(legacy, config, *args):
+                target = config["services"]["audit-gateway"]["volumes"][0]["target"]
+                if target != "/run/ccvm":
+                    raise RuntimeError("mount differs")
+
+            f.original.validate_service.side_effect = validate
+            repair.validate_gateway(
+                f.original,
+                f.runtime,
+                Mock(),
+                f.original.verify_resolved.return_value,
+                gateway,
+                f.op,
+                True,
+            )
+            self.assertEqual(f.original.validate_service.call_count, 2)
+            with self.assertRaisesRegex(RuntimeError, "differs from"):
+                repair.validate_gateway(
+                    f.original,
+                    f.runtime,
+                    Mock(),
+                    f.original.verify_resolved.return_value,
+                    gateway,
+                    f.op,
+                    False,
+                )
+
+    def test_interrupted_recreation_with_gateway_absent_can_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.fixture(directory)
+            with patch.object(
+                repair, "wait_gateway", side_effect=RuntimeError("fixture interrupted")
+            ):
+                with self.assertRaises(RuntimeError):
+                    self.invoke(f)
+            f.runtime.docker.side_effect = lambda *a, **kw: "" if a[0] == "ps" else "/run"
+            with patch.object(repair, "wait_gateway"):
+                self.invoke(f)
+            self.assertEqual(f.original.activate.call_count, 1)
+
+    def test_repair_journal_write_failure_after_verified_keeps_services_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.fixture(directory)
+
+            def activated(*args):
+                f.op["phase"] = "verified"
+
+            def write(path, value):
+                if path == f.repair_marker and value.get("phase") == "verified":
+                    raise OSError("fixture disk full")
+                operator.write_json(path, value)
+
+            f.original.activate.side_effect = activated
+            f.original.write_json = Mock(side_effect=write)
+            with patch.object(repair, "wait_gateway"):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    self.invoke(f)
+            f.original.recover_failure.assert_not_called()
 
 
 if __name__ == "__main__":

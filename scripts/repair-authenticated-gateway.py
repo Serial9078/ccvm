@@ -6,6 +6,7 @@ deployment journal and its exact reviewed verifier finish the retained rollout.
 """
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -67,6 +68,37 @@ def database_unchanged(original, runtime, operation):
         or current["transactions"]
     ):
         raise RuntimeError("Retained database evidence changed; no repair performed")
+
+
+def validate_gateway(original, runtime, legacy, resolved, gateway, operation, recorded):
+    if gateway["Image"] != operation["images"]["frontend"]:
+        raise RuntimeError("Prepared gateway image changed")
+    if set(gateway["HostConfig"].get("Tmpfs", {})) != {"/var/cache/nginx", "/var/run", "/tmp"}:
+        raise RuntimeError("Prepared gateway temporary mounts changed")
+    clean = {**gateway, "Mounts": [m for m in gateway["Mounts"] if m["Type"] != "tmpfs"]}
+    candidates = [resolved]
+    if recorded:
+        previous = copy.deepcopy(resolved)
+        mounts = [
+            m
+            for m in previous["services"]["audit-gateway"]["volumes"]
+            if m.get("type") == "bind" and m.get("source") == operation["socket_dir"]
+        ]
+        if len(mounts) != 1 or mounts[0]["target"] not in {"/run/ccvm", "/var/run/ccvm"}:
+            raise RuntimeError("Unexpected resolved socket mount")
+        mounts[0]["target"] = (
+            "/run/ccvm" if mounts[0]["target"] == "/var/run/ccvm" else "/var/run/ccvm"
+        )
+        candidates.append(previous)
+    for candidate in candidates:
+        try:
+            original.validate_service(
+                legacy, candidate, "audit-gateway", clean, runtime.inspect(gateway["Image"])
+            )
+            return
+        except RuntimeError:
+            pass
+    raise RuntimeError("Live gateway differs from the recorded original/corrected configuration")
 
 
 def wait_gateway(runtime, operation):
@@ -162,15 +194,12 @@ def repair(original, ingress, runtime, legacy, args, marker, operation, repair_m
         container = runtime.inspect("ccvm-" + name)
         if container["State"]["Running"] or container["Image"] != operation["images"][name]:
             raise RuntimeError("Expected the stopped, prepared application containers")
-    gateway = runtime.inspect("ccvm-audit-gateway")
-    if gateway["Image"] != operation["images"]["frontend"]:
-        raise RuntimeError("Prepared gateway image changed")
-    if set(gateway["HostConfig"].get("Tmpfs", {})) != {"/var/cache/nginx", "/var/run", "/tmp"}:
-        raise RuntimeError("Prepared gateway temporary mounts changed")
-    clean = {**gateway, "Mounts": [m for m in gateway["Mounts"] if m["Type"] != "tmpfs"]}
-    original.validate_service(
-        legacy, resolved, "audit-gateway", clean, runtime.inspect(gateway["Image"])
-    )
+    names = runtime.docker("ps", "-a", "--format", "{{.Names}}").splitlines()
+    if "ccvm-audit-gateway" in names:
+        gateway = runtime.inspect("ccvm-audit-gateway")
+        validate_gateway(original, runtime, legacy, resolved, gateway, operation, bool(record))
+    elif not record:
+        raise RuntimeError("Original diagnosed gateway is missing")
     if not record:
         import subprocess
 
@@ -198,7 +227,8 @@ def repair(original, ingress, runtime, legacy, args, marker, operation, repair_m
             "--read-only",
             "--entrypoint",
             "readlink",
-            gateway["Image"],
+            operation["images"]["frontend"],
+            "-f",
             "/var/run",
         )
         != "/run"
@@ -242,7 +272,8 @@ def repair(original, ingress, runtime, legacy, args, marker, operation, repair_m
         record["phase"] = "verified"
         original.write_json(repair_marker, record)
     except BaseException:
-        original.recover_failure(runtime, operation, marker)
+        if operation["phase"] != "verified":
+            original.recover_failure(runtime, operation, marker)
         raise
 
 

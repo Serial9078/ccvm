@@ -28,7 +28,11 @@ def main():
         raise RuntimeError("Nested Docker regression is restricted to GitHub Actions")
     identity = "ccvm-mount-ci-" + uuid.uuid4().hex[:12]
     volume = identity + "-data"
-    with tempfile.TemporaryDirectory(prefix=identity + "-") as temporary:
+    # The DinD wrapper mounts its own /tmp; keep the shared fixture outside it.
+    runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+    if not runner_temp.is_dir() or runner_temp.is_relative_to(Path("/tmp")):
+        raise RuntimeError("Expected the runner's shared temporary directory outside /tmp")
+    with tempfile.TemporaryDirectory(prefix=identity + "-", dir=runner_temp) as temporary:
         root = Path(temporary)
         directory = root / "socket"
         directory.mkdir()
@@ -104,6 +108,7 @@ def main():
                 time.sleep(1)
             else:
                 raise AssertionError("Disposable Docker 24 daemon did not start")
+            docker("exec", identity, "test", "-f", str(config))
             inner("pull", NGINX, timeout=180)
             alias = inner(
                 "run",
