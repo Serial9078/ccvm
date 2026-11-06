@@ -1,6 +1,7 @@
 import base64
 import copy
 import hashlib
+import json
 import subprocess
 from types import SimpleNamespace
 
@@ -181,15 +182,22 @@ def test_vault_encrypts_and_authenticates_metadata(secured, customer, db):
     "target",
     ["192.0.2.16", "198.51.100.1", "example.test", "192.0.2.1/32", "fe80::1%eth0"],
 )
-def test_customer_and_credential_scope_before_queue(secured, customer, db, target):
-    cred = credential(secured, customer)
+@pytest.mark.parametrize(
+    "kind,winrm_transport",
+    [("ssh_password", "https"), ("winrm", "https"), ("winrm", "http_ntlm")],
+)
+def test_customer_and_credential_scope_before_queue(
+    secured, customer, db, target, kind, winrm_transport
+):
+    cred = credential(secured, customer, kind=kind)
     response = secured.post(
         "/api/v1/host-audits",
         json={
             "customer_id": customer["id"],
             "credential_id": cred["id"],
             "target": target,
-            "ssh_fingerprint": FINGERPRINT,
+            "winrm_transport": winrm_transport,
+            **({"ssh_fingerprint": FINGERPRINT} if kind.startswith("ssh_") else {}),
         },
     )
     assert response.status_code == 422
@@ -222,7 +230,7 @@ def test_cross_customer_key_change_fingerprint_and_duplicate_guards(
     )
 
 
-def test_winrm_only_accepts_tls_identity_and_defaults_to_5986(secured, customer):
+def test_winrm_defaults_to_https_and_rejects_ssh_fingerprints(secured, customer):
     cred = credential(secured, customer, kind="winrm")
     payload = {
         "customer_id": customer["id"],
@@ -238,6 +246,222 @@ def test_winrm_only_accepts_tls_identity_and_defaults_to_5986(secured, customer)
     response = secured.post("/api/v1/host-audits", json=payload)
     assert response.status_code == 201
     assert response.json()["port"] == 5986
+    assert response.json()["winrm_transport"] == "https"
+
+
+@pytest.mark.parametrize("winrm_transport,port", [("https", 5985), ("http_ntlm", 5986)])
+def test_winrm_transport_is_explicit_and_not_inferred_from_port(
+    secured, customer, winrm_transport, port
+):
+    cred = credential(secured, customer, kind="winrm")
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": cred["id"],
+            "target": "192.0.2.1",
+            "port": port,
+            "winrm_transport": winrm_transport,
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["winrm_transport"] == winrm_transport
+    assert response.json()["port"] == port
+
+
+@pytest.mark.parametrize("winrm_transport", ["http", "basic", "auto", "", None])
+def test_unrecognized_winrm_transport_does_not_queue_work(secured, customer, db, winrm_transport):
+    cred = credential(secured, customer, kind="winrm")
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": cred["id"],
+            "target": "192.0.2.1",
+            "winrm_transport": winrm_transport,
+        },
+    )
+    assert response.status_code == 422
+    assert db.query(HostAudit).count() == db.query(Job).count() == 0
+
+
+def test_http_winrm_transport_cannot_be_selected_for_ssh(secured, customer, db):
+    cred = credential(secured, customer)
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": cred["id"],
+            "target": "192.0.2.1",
+            "ssh_fingerprint": FINGERPRINT,
+            "winrm_transport": "http_ntlm",
+        },
+    )
+    assert response.status_code == 422
+    assert "Windows credentials" in response.text
+    assert db.query(HostAudit).count() == db.query(Job).count() == 0
+
+
+def test_http_winrm_opt_in_defaults_to_5985_and_is_retained_in_evidence(
+    secured, customer, db, monkeypatch
+):
+    cred = credential(secured, customer, kind="winrm")
+    payload = {
+        "customer_id": customer["id"],
+        "credential_id": cred["id"],
+        "target": "192.0.2.1",
+        "mode": "connection",
+        "winrm_transport": "http_ntlm",
+    }
+    assert (
+        secured.post(
+            "/api/v1/host-audits", json={**payload, "ssh_fingerprint": FINGERPRINT}
+        ).status_code
+        == 422
+    )
+    response = secured.post("/api/v1/host-audits", json=payload)
+    assert response.status_code == 201
+    run = response.json()
+    assert run["port"] == 5985 and run["winrm_transport"] == "http_ntlm"
+    seen = []
+
+    def collect(options, cancelled):
+        assert not cancelled()
+        seen.append(options)
+        return inventory("Windows", mode="connection")
+
+    monkeypatch.setattr(host_inventory, "collect", collect)
+    process_job(db, claim_next_job(db))
+    assert seen[0]["winrm_transport"] == "http_ntlm"
+    assert seen[0]["port"] == 5985
+    assert seen[0]["kind"] == "winrm"
+    assert seen[0]["secrets"] == {"password": PASSWORD}
+    detail = secured.get(f"/api/v1/host-audits/{run['id']}").json()
+    assert detail["job"]["status"] == "finished"
+    assert detail["winrm_transport"] == "http_ntlm"
+    assert detail["inventory"]["os"]["family"] == "Windows"
+    assert (
+        secured.get(f"/api/v1/host-audits?customer_id={customer['id']}").json()[0][
+            "winrm_transport"
+        ]
+        == "http_ntlm"
+    )
+    # Transport belongs to this run, not to the shared Windows credential.
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={key: value for key, value in payload.items() if key != "winrm_transport"},
+    )
+    assert response.status_code == 201
+    assert response.json()["winrm_transport"] == "https" and response.json()["port"] == 5986
+
+
+@pytest.mark.parametrize(
+    "original,changed", [("https", "http_ntlm"), ("http_ntlm", "https"), ("https", "auto")]
+)
+def test_worker_rejects_changed_transport_before_authentication(
+    secured, customer, db, monkeypatch, original, changed
+):
+    cred = credential(secured, customer, kind="winrm")
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": cred["id"],
+            "target": "192.0.2.1",
+            "winrm_transport": original,
+        },
+    )
+    audit = db.get(HostAudit, response.json()["id"])
+    audit.winrm_transport = changed
+    db.commit()
+    monkeypatch.setattr(
+        host_inventory, "collect", lambda *a, **kw: pytest.fail("must not authenticate")
+    )
+    process_job(db, claim_next_job(db))
+    assert audit.job.status == "failed"
+
+
+def test_worker_independently_rejects_http_for_ssh_even_with_recalculated_hash(
+    secured, customer, db, monkeypatch
+):
+    run = queued(secured, customer)
+    audit = db.get(HostAudit, run["id"])
+    audit.winrm_transport = "http_ntlm"
+    audit.scope_sha256 = audit_vault.audit_hash(audit, audit.credential)
+    db.commit()
+    monkeypatch.setattr(
+        host_inventory, "collect", lambda *a, **kw: pytest.fail("must not authenticate")
+    )
+    process_job(db, claim_next_job(db))
+    assert audit.job.status == "failed" and "WinRM transport" in audit.job.message
+
+
+def test_http_transport_change_during_collection_cancels_without_publishing_evidence(
+    secured, customer, db, monkeypatch
+):
+    cred = credential(secured, customer, kind="winrm")
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": cred["id"],
+            "target": "192.0.2.1",
+            "winrm_transport": "http_ntlm",
+        },
+    )
+    audit = db.get(HostAudit, response.json()["id"])
+
+    def collect(payload, cancelled):
+        assert payload["winrm_transport"] == "http_ntlm"
+        audit.winrm_transport = "https"
+        db.commit()
+        assert cancelled()
+        raise host_inventory.CollectionCancelled("Frozen transport changed")
+
+    monkeypatch.setattr(host_inventory, "collect", collect)
+    process_job(db, claim_next_job(db))
+    assert audit.job.status == "cancelled"
+    assert audit.inventory is None
+
+
+@pytest.mark.parametrize("kind", ["ssh_password", "winrm"])
+def test_legacy_https_and_ssh_frozen_hashes_remain_valid(secured, customer, db, kind):
+    credential_row = credential(secured, customer, kind=kind)
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": credential_row["id"],
+            "target": "192.0.2.1",
+            **({"ssh_fingerprint": FINGERPRINT} if kind.startswith("ssh_") else {}),
+        },
+    )
+    assert response.status_code == 201
+    audit = db.get(HostAudit, response.json()["id"])
+    cred = audit.credential
+    # Original deployed v1 serialization, independent of the added DB field.
+    original_hash = hashlib.sha256(
+        json.dumps(
+            [
+                "ccvm-host-inventory-v1",
+                audit.customer_id,
+                audit.asset_id,
+                audit.job_id,
+                cred.uuid,
+                hashlib.sha256(audit_vault.identity(cred)).hexdigest(),
+                hashlib.sha256(cred.ciphertext).hexdigest(),
+                audit.target,
+                audit.port,
+                audit.ssh_fingerprint,
+                audit.mode,
+            ],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    assert audit.winrm_transport == "https"
+    assert audit.scope_sha256 == audit_vault.audit_hash(audit, cred) == original_hash
+    audit.winrm_transport = "http_ntlm"
+    assert audit_vault.audit_hash(audit, cred) != original_hash
 
 
 @pytest.mark.parametrize("mode", ["inventory", "connection"])

@@ -26,6 +26,8 @@ export interface Inventory {
   packages: InventorySection;
   hotfixes: InventorySection;
 }
+export type WinrmTransport = "https" | "http_ntlm";
+
 export interface HostAudit {
   id: number;
   customer_id: number;
@@ -33,6 +35,7 @@ export interface HostAudit {
   target: string;
   port: number;
   mode: "connection" | "inventory";
+  winrm_transport?: WinrmTransport;
   cancel_requested: boolean;
   created_at: string;
   completed_at: string | null;

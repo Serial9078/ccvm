@@ -35,6 +35,9 @@ class HostAudit(Base):
     target: Mapped[str] = mapped_column(String(64))
     port: Mapped[int] = mapped_column(Integer)
     ssh_fingerprint: Mapped[str | None] = mapped_column(String(60))
+    winrm_transport: Mapped[str] = mapped_column(
+        String(20), default="https", server_default="https"
+    )
     mode: Mapped[str] = mapped_column(String(20))
     scope_sha256: Mapped[str] = mapped_column(String(64))
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")

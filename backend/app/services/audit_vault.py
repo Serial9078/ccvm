@@ -135,21 +135,28 @@ def decrypt(credential):
 
 
 def audit_hash(audit, credential):
+    values = [
+        "ccvm-host-inventory-v1",
+        audit.customer_id,
+        audit.asset_id,
+        audit.job_id,
+        credential.uuid,
+        hashlib.sha256(identity(credential)).hexdigest(),
+        hashlib.sha256(credential.ciphertext or b"").hexdigest(),
+        audit.target,
+        audit.port,
+        audit.ssh_fingerprint,
+        audit.mode,
+    ]
+    # The additive migration backfills existing runs to HTTPS. Preserve their
+    # original frozen hashes, including queued SSH/HTTPS work; bind an explicit
+    # opt-in to HTTP so changing either direction invalidates a frozen run.
+    transport = getattr(audit, "winrm_transport", "https")
+    if transport != "https":
+        values.extend(["winrm_transport", transport])
     return hashlib.sha256(
         json.dumps(
-            [
-                "ccvm-host-inventory-v1",
-                audit.customer_id,
-                audit.asset_id,
-                audit.job_id,
-                credential.uuid,
-                hashlib.sha256(identity(credential)).hexdigest(),
-                hashlib.sha256(credential.ciphertext or b"").hexdigest(),
-                audit.target,
-                audit.port,
-                audit.ssh_fingerprint,
-                audit.mode,
-            ],
+            values,
             separators=(",", ":"),
         ).encode()
     ).hexdigest()

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -22,6 +23,7 @@ REPOSITORY = BACKEND.parent
 HOSTNAME = "ccvm.example.test"
 CLIENTS = "192.0.2.0/24,198.51.100.0/24"
 TOKEN_NAMES = ("CCVM_AUDIT_OPERATOR_TOKEN", "CCVM_AUDIT_VAULT_KEY")
+PRE_TRANSPORT_RELEASE = "cb3b1486b3077fe1fac96925a7971235c07de7f0"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -39,7 +41,11 @@ def docker(*args, **kwargs):
     return run("docker", *args, **kwargs).stdout.decode().strip()
 
 
-def load_operator():
+def load_operator(source=None):
+    if source is not None:
+        module = types.ModuleType("authenticated_deployment")
+        exec(compile(source, "<reviewed-deployment>", "exec"), module.__dict__)
+        return module
     spec = importlib.util.spec_from_file_location(
         "authenticated_deployment", REPOSITORY / "scripts/deploy-authenticated-inventory.py"
     )
@@ -52,7 +58,7 @@ def inspect(name):
     return json.loads(docker("inspect", "--format", "{{json .}}", name))
 
 
-def execute(source, target, pins, *, apply=False):
+def execute(source, target, pins, *, apply=False, operator_source=None):
     argv = [
         sys.executable,
         "-",
@@ -75,7 +81,8 @@ def execute(source, target, pins, *, apply=False):
     result = run(
         *argv,
         cwd=source,
-        data=(REPOSITORY / "scripts/deploy-authenticated-inventory.py").read_bytes(),
+        data=operator_source
+        or (REPOSITORY / "scripts/deploy-authenticated-inventory.py").read_bytes(),
         success=False,
         timeout=900,
         stream=True,
@@ -289,15 +296,130 @@ def diagnostics(source):
         print(content, flush=True)
 
 
+def verify_inventory_update(source, target, operation):
+    """Exercise the actual reviewed updater against a populated old schema."""
+    seed = """from datetime import UTC, datetime
+from app.database.session import SessionLocal
+from app.models.customer import Customer
+from app.api.v1.host_audits import create_credential, start_audit
+from app.schemas.host_audit import CredentialCreate, HostAuditCreate
+with SessionLocal() as db:
+    customer=Customer(name='Synthetic retained inventory customer')
+    db.add(customer);db.commit()
+    credential=create_credential(CredentialCreate(customer_id=customer.id,
+        name='Synthetic retained account',kind='winrm',username='fixture',
+        allowed_cidrs=['192.0.2.0/24'],password='synthetic-update-fixture'),db)
+    audit=start_audit(HostAuditCreate(customer_id=customer.id,credential_id=credential.id,
+        target='192.0.2.11',mode='connection'),db)
+    audit.inventory={'schema_version':1,
+        'os':{'family':'Windows','name':'Synthetic retained evidence'}}
+    audit.job.status='finished';audit.job.progress=100
+    audit.job.message='Retained synthetic connection evidence'
+    audit.completed_at=datetime.now(UTC);db.commit()
+print('Seeded encrypted credential and completed HTTPS inventory before update')
+"""
+    print(docker("exec", "ccvm-worker", "python", "-c", seed), flush=True)
+    private = Path(operation["private"])
+    retained_files = [
+        source / "docker-compose.yml",
+        source / "docker-compose.network.yml",
+        source / "docker-compose.authenticated.yml",
+        source / "frontend/default.conf",
+        source / ".git/ccvm-authenticated-deployment.json",
+        *(private / name for name in ("vault.env", "operator.env", "gateway.conf")),
+    ]
+    retained = {path: path.read_bytes() for path in retained_files}
+    stable = {
+        name: inspect(name)["Id"]
+        for name in ("ccvm-postgres", "haproxy-edge", "ccvm-audit-gateway")
+    }
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = (REPOSITORY / "scripts/update-host-inventory.py").read_bytes()
+
+    def update(*flags):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            data=script,
+            cwd=source,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if result.returncode:
+            marker = source / ".git/ccvm-host-inventory-update.json"
+            if marker.is_file():
+                log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+                if log.is_file():
+                    print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert result.returncode == 0
+
+    update()
+    assert not (source / ".git/ccvm-host-inventory-update.json").exists()
+    update("--apply")
+    assert stable == {name: inspect(name)["Id"] for name in stable}
+    assert retained == {path: path.read_bytes() for path in retained}
+    verify = """from app.database.session import SessionLocal
+from app.models.host_audit import AuditCredential, HostAudit
+from app.services.audit_vault import decrypt, audit_hash
+with SessionLocal() as db:
+    audit=db.query(HostAudit).one();credential=db.get(AuditCredential,audit.credential_id)
+    assert audit.winrm_transport=='https'
+    assert audit.scope_sha256==audit_hash(audit,credential)
+    assert decrypt(credential)=={'password':'synthetic-update-fixture'}
+    assert audit.inventory['os']['name']=='Synthetic retained evidence'
+    assert audit.job.status=='finished' and audit.job.progress==100
+print('Retained HTTPS request hash, encrypted credential and inventory evidence verified')
+"""
+    print(docker("exec", "ccvm-worker", "python", "-c", verify), flush=True)
+    ids = {name: inspect("ccvm-" + name)["Id"] for name in ("backend", "worker", "frontend")}
+    marker = source / ".git/ccvm-host-inventory-update.json"
+    saved_update = json.loads(marker.read_text())
+    saved_update["phase"] = "services"
+    load_operator().write_json(marker, saved_update)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    assert ids == {name: inspect("ccvm-" + name)["Id"] for name in ids}
+    update("--apply", "--resume")
+    assert ids == {name: inspect("ccvm-" + name)["Id"] for name in ids}
+    assert retained == {path: path.read_bytes() for path in retained}
+    old_application(operation["images"]["backend"])
+    print(
+        "VERIFIED: old populated inventory schema update, retained credentials/evidence, "
+        "unchanged TLS gateway/keys/scanners, stopped-service resume and idempotent verification",
+        flush=True,
+    )
+
+
 def main():
+    if sys.argv[1:] not in ([], ["--host-inventory-update"]):
+        raise RuntimeError("Unknown disposable deployment fixture mode")
+    update_mode = bool(sys.argv[1:])
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
         raise RuntimeError("Disposable deployment integration is restricted to GitHub Actions")
     if docker("ps", "-a", "--format", "{{.Names}}").splitlines():
         raise RuntimeError("This integration requires its own empty Docker runner")
-    target = run("git", "rev-parse", "HEAD", cwd=REPOSITORY).stdout.decode().strip()
-    operator = load_operator()
+    reviewed_target = run("git", "rev-parse", "HEAD", cwd=REPOSITORY).stdout.decode().strip()
+    target = PRE_TRANSPORT_RELEASE if update_mode else reviewed_target
+    operator_source = (
+        run(
+            "git", "show", target + ":scripts/deploy-authenticated-inventory.py", cwd=REPOSITORY
+        ).stdout
+        if update_mode
+        else None
+    )
+    operator = load_operator(operator_source)
+
+    def deploy(source, target, pins, *, apply=False):
+        return execute(source, target, pins, apply=apply, operator_source=operator_source)
+
     with tempfile.TemporaryDirectory(prefix="ccvm-auth-deploy-") as temporary:
         directory = Path(temporary)
         source = directory / "checkout"
@@ -392,11 +514,11 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                     "haproxy-edge",
                 )
             }
-            bad = execute(source, target, {**pins, "worker": "sha256:" + "0" * 64}, apply=True)
+            bad = deploy(source, target, {**pins, "worker": "sha256:" + "0" * 64}, apply=True)
             assert bad.returncode != 0
             assert not (source / ".git/ccvm-authenticated-deployment.json").exists()
             assert ids == {n: inspect(n)["Id"] for n in ids}
-            checked = execute(source, target, pins)
+            checked = deploy(source, target, pins)
             if checked.returncode:
                 diagnostics(source)
                 front = inspect("ccvm-frontend")["Config"]
@@ -420,7 +542,7 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                 )
             assert checked.returncode == 0
             original_stat = edge_file.stat()
-            applied = execute(source, target, pins, apply=True)
+            applied = deploy(source, target, pins, apply=True)
             if applied.returncode:
                 diagnostics(source)
             assert applied.returncode == 0
@@ -462,13 +584,13 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             operation["phase"] = "services"
             operator.write_json(journal, operation)
             docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
-            resumed = execute(source, target, pins, apply=True)
+            resumed = deploy(source, target, pins, apply=True)
             if resumed.returncode:
                 diagnostics(source)
             assert resumed.returncode == 0
             assert secrets_before == {n: (private / n).read_bytes() for n in secrets_before}
             before_ids = {n: inspect(n)["Id"] for n in ids if n != "haproxy-edge"}
-            assert execute(source, target, pins, apply=True).returncode == 0
+            assert deploy(source, target, pins, apply=True).returncode == 0
             assert before_ids == {n: inspect(n)["Id"] for n in before_ids}
             assert edge_file.read_text().count("frontend ccvm_audit_https") == 1
             old_application(base)
@@ -477,6 +599,8 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                 "loopback ports, retained services, immutable scanners, resume and idempotency",
                 flush=True,
             )
+            if update_mode:
+                verify_inventory_update(source, reviewed_target, json.loads(journal.read_text()))
         finally:
             with contextlib.suppress(Exception):
                 compose(

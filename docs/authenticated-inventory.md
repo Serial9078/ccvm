@@ -11,7 +11,23 @@ Tenable feature parity. The existing TCP discovery/audit pipeline is unchanged.
 | Transport | Identity verification | Collected evidence | Requirements and limits |
 | --- | --- | --- | --- |
 | SSH password or encrypted private key | Explicit, independently approved `SHA256:` host-key fingerprint, checked before authentication | Linux OS release, kernel, architecture, hostname; installed dpkg or RPM package names, versions and architectures | Python 3 on target; no SSH agent, key search, sudo or installation. Other package managers are unavailable. |
-| WinRM NTLM over HTTPS | CA and IP subject alternative name validation; TLS checks cannot be disabled; channel binding enabled | Windows OS version and build/UBR; machine-wide 32/64-bit uninstall-registry entries; `Get-HotFix` | Default port 5986; target certificate must cover the literal IP. Dedicated account needs remote execution plus read access to these sources. No Basic/HTTP, CredSSP or delegated credentials. |
+| WinRM NTLM over HTTPS (default) | CA and IP subject alternative name validation; TLS checks cannot be disabled; channel binding enabled | Windows OS version and build/UBR; machine-wide 32/64-bit uninstall-registry entries; `Get-HotFix` | Default port 5986; target certificate must cover the literal IP. Dedicated account needs remote execution plus read access to these sources. |
+| WinRM NTLM over HTTP (explicit selection) | NTLM authenticates the account and encrypts WSMan messages; server identity is not verified by a certificate | The same fixed Windows collectors | Default port 5985. Message encryption is mandatory, including encrypted responses. No automatic fallback from HTTPS, Basic, CredSSP, delegated credentials or unencrypted inventory messages. |
+
+Choose the WinRM transport for each run. Changing a port alone does not change
+the protocol. The selected transport is stored in the run history and bound to
+the frozen request checked by the worker. Existing runs retain HTTPS as their
+default; existing SSH and HTTPS request hashes remain valid. HTTP requires no
+certificate or CA bundle. It also does not require enabling `AllowUnencrypted`
+on Windows. Select it only when the target and network are appropriate for NTLM
+without TLS server authentication. The browser-facing CCVM UI and credential
+API still require HTTPS for both target transports.
+
+Before any NTLM handshake, the client restricts the session to the selected
+literal-IP endpoint, disables redirects and ignores environment proxies and
+netrc credentials. HTTP requires `message_encryption="always"`; a peer returning
+an unencrypted inventory response is rejected. The initial empty HTTP
+authentication probe contains no inventory command or evidence.
 
 `Get-HotFix` is not a complete Windows update inventory. The uninstall registry
 does not cover every application, per-user installations or every package type.
@@ -85,8 +101,9 @@ production hosts. A reviewed deployment must:
    image and preserve scanner binary hashes; rebuilding floating scanner stages
    is not an equivalent deployment. Keep the existing network override and all
    its mounts and scope settings.
-3. Apply the additive migration to `a4c1d8e7f209` in maintenance mode. It creates
-   empty credential/inventory tables and does not queue scans or change existing
+3. Apply the additive migrations through `b7e2c9d1a630` in maintenance mode. They
+   create credential/inventory tables and add the per-run transport with an HTTPS
+   default. They do not queue scans or change existing
    observations/findings. Downgrade refuses to discard any credential/history.
 4. Serve the UI and API through a trusted HTTPS origin. Configure Uvicorn to trust
    forwarded protocol headers only from the actual trusted reverse proxy, block
@@ -172,6 +189,36 @@ application, real socket permissions, loopback port replacement, a retained
 private env-file, post-migration recovery and idempotency. Nmap is real in this
 fixture; the other scanner executables are inert hash-preservation fixtures.
 Existing scanner integration jobs continue to exercise their actual runtimes.
+
+### Updating an existing authenticated inventory deployment
+
+`scripts/update-host-inventory.py --target <reviewed-merge-sha> --host <deployment-host>`
+checks an already verified deployment without changing it. With `--apply`, it
+builds the reviewed UI, closes submissions and stops the idle worker, checks a
+private PostgreSQL backup, migrates from `a4c1d8e7f209` to `b7e2c9d1a630`, and
+publishes the reviewed source and UI. It starts the existing application
+containers with their retained images, source binds and settings. It does not
+submit scans or use a stored target credential.
+
+The updater preserves all existing rows, encrypted credentials, frozen HTTPS
+request hashes, inventory evidence, keys, gateway and HAProxy configuration.
+It records a separate private update journal; `--apply --resume` continues an
+interrupted update. A verified repeat checks the installation without restarting
+work. The original ingress route marker continues to identify the ingress
+deployment; the update journal and Git HEAD identify the application update.
+
+After updating, unlock authenticated inventory, select an existing WinRM
+credential and choose **HTTP / NTLM · encrypted messages**. Leave the optional
+port empty to use 5985. Test the connection before collecting the inventory.
+The existing HTTPS option remains the default for new selections.
+
+CI runs this updater against a real disposable Docker/PostgreSQL deployment of
+the preceding inventory release. It seeds an encrypted account and completed
+HTTPS evidence before migration, then checks their preservation, service resume,
+unchanged ingress and idempotency. A separate loopback fixture uses a real NTLM
+handshake and encrypted WSMan exchanges through the isolated production client;
+its returned Windows evidence is synthetic. Native Windows collector coverage
+runs separately on the Windows runner.
 
 ### Retained gateway mount repair
 
