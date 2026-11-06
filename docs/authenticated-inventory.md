@@ -173,6 +173,30 @@ private env-file, post-migration recovery and idempotency. Nmap is real in this
 fixture; the other scanner executables are inert hash-preservation fixtures.
 Existing scanner integration jobs continue to exercise their actual runtimes.
 
+### Retained gateway mount repair
+
+On older Docker runtimes, mounting `/run/ccvm` alongside a tmpfs on the alias
+`/var/run` can hide the nested socket directory. nginx then repeatedly exits
+with `bind() ... gateway.sock failed (2: No such file or directory)`. A restarting
+container can have an empty IP even though its static IPAM reservation is correct.
+Fresh deployments now bind the shared directory at `/var/run/ccvm`, matching the
+literal parent mount; the nginx image's verified `/var/run -> /run` alias keeps
+the listener unchanged. A native disposable Docker 24 check exercises this layout.
+
+`scripts/repair-authenticated-gateway.py --target <reviewed-repair-merge-sha>
+--host <deployment-host> --apply` repairs only the retained, already migrated
+deployment identified in that script. Execute the reviewed script directly from
+its Git object while the application checkout remains at its recorded release.
+It checks the saved database fingerprints, idle writers, image identities,
+private keys/configuration, exact original overlay and diagnosed startup error.
+It writes a separate private repair intent and backup, changes only the gateway
+bind destination, recreates that gateway and proves a stable reserved IP plus a
+real socket on the shared host directory. The original deployment verifier then
+resumes TLS/ACL/operator checks. It reuses all prepared artifacts and the original
+deployment journal. A verified repeat preserves active work; interrupted repair
+accepts only its own original or corrected overlay. The application release SHA
+and original journal target remain unchanged.
+
 Backend tests cover access boundaries, customer/CIDR scoping, ciphertext/AAD
 tampering, secret redaction, frozen requests, revocation, partial evidence,
 cancellation and process deadlines. A native loopback SSH fixture exercises a

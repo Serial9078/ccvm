@@ -143,6 +143,19 @@ jobs:
       - name: Deploy and resume authenticated inventory through native HAProxy and nginx
         run: python backend/integration/authenticated_deployment.py
 
+  gateway-mount-legacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify protected gateway socket mounts against disposable Docker 24
+        run: python backend/integration/check_gateway_mounts.py
+
   windows-inventory:
     runs-on: windows-latest
     timeout-minutes: 5
