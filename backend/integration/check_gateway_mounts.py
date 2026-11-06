@@ -81,9 +81,12 @@ def main():
         try:
             docker("volume", "create", volume)
             # Nested dockerd has its own data/socket and exposes no TCP ports or host socket.
+            # Bypass the old image wrapper's cgroup/iptables bootstrap on newer
+            # runner kernels. This mount test sets no cgroup resource limits.
             docker(
                 "run",
                 "-d",
+                "--init",
                 "--privileged",
                 "--name",
                 identity,
@@ -93,8 +96,11 @@ def main():
                 f"type=bind,src={root},dst={root}",
                 "--env",
                 "DOCKER_TLS_CERTDIR=",
-                DIND,
+                "--env",
+                "container=docker",
+                "--entrypoint",
                 "dockerd",
+                DIND,
                 "--host=unix:///var/run/docker.sock",
                 "--storage-driver=vfs",
                 "--iptables=false",
