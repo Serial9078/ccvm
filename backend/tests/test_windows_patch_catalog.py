@@ -210,6 +210,41 @@ def test_selected_window_release_metadata_is_still_strict_before_any_document_fe
     assert len(session.calls) == 1
 
 
+def test_historical_index_identity_variants_do_not_expand_selected_document_urls(monkeypatch):
+    data = index()
+    data["value"].extend(
+        [
+            {
+                "ID": "2017-May-B",
+                "InitialReleaseDate": "2017-05-08T07:00:00Z",
+                "CurrentReleaseDate": "2017-05-08T07:00:00Z",
+                "CvrfUrl": f"{catalog.API}/cvrf/2017-May-B",
+            },
+            {
+                "ID": "2018-FEB",
+                "InitialReleaseDate": "2018-02-13T08:00:00Z",
+                "CurrentReleaseDate": "2026-08-07T00:59:42Z",
+                "CvrfUrl": f"{catalog.API}/cvrf/2018-FEB",
+            },
+        ]
+    )
+    session = fixture_session(monkeypatch, update_index=data)
+    result = catalog.fetch_catalog(now=NOW)
+    assert result["statistics"]["excluded_outside_window_index_variants"] == 2
+    assert len(session.calls) == 4
+    assert [item["id"] for item in result["documents"]] == ["2026-Sep", "2026-Oct", "2026-Nov"]
+
+
+@pytest.mark.parametrize("identifier", ["2026-Nov-extra", "2026-NOV"])
+def test_selected_window_noncanonical_identity_is_not_silently_skipped(monkeypatch, identifier):
+    data = index()
+    data["value"][0]["ID"] = identifier
+    session = fixture_session(monkeypatch, update_index=data)
+    with pytest.raises(catalog.CatalogError):
+        catalog.fetch_catalog(now=NOW)
+    assert len(session.calls) == 1
+
+
 @pytest.mark.parametrize("value", [0, 13, True, "3", None])
 def test_invalid_month_windows_are_rejected_before_network(monkeypatch, value):
     monkeypatch.setattr(catalog.requests, "Session", lambda: pytest.fail("Session created"))

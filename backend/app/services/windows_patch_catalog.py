@@ -80,6 +80,19 @@ def _document_month(identifier):
         raise CatalogError("Invalid Microsoft CVRF document identity") from None
 
 
+def _index_month(identifier):
+    # Historical index identities include 2017-May-B and 2018-FEB. Derive
+    # only their calendar prefix here; selected document identities stay exact.
+    match = re.match(r"(\d{4})-([A-Za-z]{3})(?:-|$)", _text(identifier, 80))
+    months = {month.casefold(): number for number, month in enumerate(MONTHS, 1)}
+    if not match or match[2].casefold() not in months:
+        raise CatalogError("Unrecognized Microsoft update index identity")
+    try:
+        return date(int(match[1]), months[match[2].casefold()], 1)
+    except ValueError:
+        raise CatalogError("Invalid Microsoft update index calendar identity") from None
+
+
 def _month_ids(start, end):
     result = []
     index = start.year * 12 + start.month - 1
@@ -468,6 +481,7 @@ def fetch_catalog(*, months=3, now=None, progress=None):
             "excluded_non_os_build",
             "excluded_missing_fixed_build",
             "excluded_unsupported_product",
+            "excluded_outside_window_index_variants",
         ),
         0,
     )
@@ -484,7 +498,7 @@ def fetch_catalog(*, months=3, now=None, progress=None):
             if not isinstance(item, dict):
                 raise CatalogError("Invalid Microsoft update index record")
             identifier = item.get("ID")
-            document_month = _document_month(identifier)
+            document_month = _index_month(identifier)
             if identifier in seen:
                 raise CatalogError("Duplicate Microsoft update index identity")
             seen.add(identifier)
@@ -492,7 +506,11 @@ def fetch_catalog(*, months=3, now=None, progress=None):
             # revision timestamp can be the 1601 sentinel. Their metadata is
             # outside this catalog's evidence window and is never fetched.
             if not start <= document_month <= now.date():
+                canonical = f"{document_month.year:04d}-{MONTHS[document_month.month - 1]}"
+                if identifier != canonical:
+                    statistics["excluded_outside_window_index_variants"] += 1
                 continue
+            _document_month(identifier)
             initial = _timestamp(item.get("InitialReleaseDate"), source=True)
             current = _timestamp(item.get("CurrentReleaseDate"), source=True)
             if current < initial or initial.date() < start:

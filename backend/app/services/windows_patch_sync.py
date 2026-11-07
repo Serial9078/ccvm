@@ -72,7 +72,9 @@ def main(argv=None):
 
     try:
         with SessionLocal() as db:
-            catalog = synchronize_catalog(db, months=args.months, progress=print)
+            catalog = synchronize_catalog(
+                db, months=args.months, progress=lambda message: print(message, flush=True)
+            )
             print(
                 f"VERIFIED: MSRC catalog {catalog.id}; "
                 f"documents={len(catalog.payload['documents'])}; "
