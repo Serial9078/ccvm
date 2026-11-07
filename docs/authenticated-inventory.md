@@ -435,3 +435,71 @@ Primary references:
 - [cryptography AES-GCM API](https://cryptography.io/en/stable/hazmat/primitives/aead/)
 - [Microsoft Get-HotFix coverage](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-hotfix?view=powershell-5.1)
 - [Microsoft MSI consistency-check behavior](https://learn.microsoft.com/en-us/troubleshoot/windows-server/admin-development/windows-installer-reconfigured-all-applications)
+
+### CloudCollab design and Windows client update offers
+
+The UI uses the supplied original CloudCollab logo unchanged, black/white
+surfaces and restrained Matrix green navigation/focus accents. Red, amber and
+green indicators retain their separate operational meanings.
+
+Windows Clients now has an explicit **Windows-Updates abfragen** action. After
+selecting one WinRM credential and one address inside its customer scope, the
+operator confirms a fresh online Windows Update Agent query. This full inventory
+mode is named `windows_updates`; ordinary inventory and connection tests do not
+trigger it. The fixed collector first records OS, packages and hotfixes, then
+runs a second, separately bounded command in the same encrypted WinRM session.
+Both encoded launchers must fit the command budget before authentication.
+
+The query contacts the device's configured Windows Update or WSUS source and
+may retrieve metadata or update its scan cache. It does not install or download
+update binaries, reboot, accept a license, register a source, or change policy or
+service settings. The synchronous search caller has a 60-second local job limit
+inside the existing overall inventory deadline; Windows Update service work
+already started internally may continue after the caller ends. A failed or
+incomplete update query retains the normal inventory and cannot produce an
+all-clear state. HTTP/NTLM still requires encrypted messages; HTTPS validation
+and SSH pinning remain unchanged.
+
+Local client assessment requires Windows `ProductType=1`, a complete successful
+online query from this explicit mode and evidence less than 24 hours old. It
+uses no downloaded OS catalog and does not change the Windows Server MSRC
+baseline engine. Security and quality offers, feature upgrades, definitions,
+optional offers and reboot state are shown separately. Official classification
+IDs determine the category; a title or severity alone does not establish it.
+No visible offers means only that the configured source offered no updates in
+that query. WSUS approvals, deferrals, safeguards, lifecycle and ESU entitlement
+are not established; hidden updates, drivers, superseded updates and global CVE
+coverage are outside this report. Update titles and host evidence remain behind
+the operator guard and are not written to public legacy findings or jobs.
+
+**Erkannte Geräte** shows only positively observed open TCP services from saved
+network observations, bound to the selected customer. Scan time is approximate,
+not a precise per-host last-seen timestamp. Service banners do not establish a
+confirmed OS. **Inventur vorbereiten** fills only the address and clears the
+credential choice; it never authenticates or starts a batch. The platform matrix
+separates discovery, inventory, configuration checks, OS baseline, software rules
+and update-source offers. Unsupported stages remain visible, including current
+VMware inventory/patch gaps and Linux patch-assessment gaps.
+
+`scripts/update-windows-clients.py --target <reviewed-merge-sha>
+--host <deployment-host>` validates the verified inventory-overview publication
+and its entire retained journal chain. Preflight is read-only. `--apply` checks a
+private PostgreSQL backup, keeps schema `d6a4b8e2f901`, verifies all existing table
+fingerprints and publishes reviewed source/frontend on the retained images and
+container IDs. No migration, catalog synchronization, target authentication or
+scan runs during deployment. Its private journal is
+`.git/ccvm-windows-clients-deployment.json`; interrupted runs use
+`--apply --resume`. Existing inventory and assessment history, credentials,
+scanner policy, HTTPS ingress and prior journal bytes remain preserved.
+
+CI covers native Windows offline COM and deterministic online cases, a real
+sealed NTLM loopback with both fixed commands in one session, client assessment
+and customer-isolation tests, browser action/unknown-state checks, and the full
+Docker retained-publication chain. A login against a real managed Windows client
+and its configured update source remains an operator validation after deployment.
+
+Primary Windows Update references:
+
+- [IUpdateSearcher::Search](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nf-wuapi-iupdatesearcher-search)
+- [WUA operation result codes](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/ne-wuapi-operationresultcode)
+- [Using WUA from a remote computer](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/using-wua-from-a-remote-computer)

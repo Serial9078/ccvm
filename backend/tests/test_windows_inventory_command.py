@@ -25,11 +25,12 @@ def unpack(arguments):
     return gzip.decompress(base64.b64decode(compressed[0], validate=True)), bootstrap
 
 
-@pytest.mark.parametrize("mode", ["connection", "inventory"])
+@pytest.mark.parametrize("mode", ["connection", "inventory", "windows_updates"])
 def test_fixed_collector_survives_compression_byte_for_byte_with_launch_headroom(mode):
     executable, arguments = command.build_command(mode)
     source, bootstrap = unpack(arguments)
-    assert source == f"$ccvmMode = '{mode}'\n".encode() + SOURCE.read_bytes()
+    path = SOURCE.with_name("windows_update_inventory.ps1") if mode == "windows_updates" else SOURCE
+    assert source == f"$ccvmMode = '{mode}'\n".encode() + path.read_bytes()
     assert executable == "powershell"
     assert len(" ".join([executable, *arguments])) < command.MAX_COMMAND_CHARACTERS < 8191
     assert "ScriptBlock]::Create($r.ReadToEnd())" in bootstrap
@@ -43,6 +44,14 @@ def test_regression_uncompressed_current_collector_exceeds_cmd_launch_budget():
     encoded = base64.b64encode(source.decode("utf-8").encode("utf-16-le")).decode()
     assert len(" ".join([command.EXECUTABLE, *command.OPTIONS, encoded])) > 8191
     assert len(" ".join([command.EXECUTABLE, *command.build_command("inventory")[1]])) < 8000
+
+
+def test_update_collector_windows_crlf_checkout_still_fits_and_roundtrips_exactly():
+    source = SOURCE.with_name("windows_update_inventory.ps1").read_bytes()
+    source = source.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    executable, arguments = command._fixed_command(source, "windows_updates")
+    assert len(" ".join([executable, *arguments])) < 8000
+    assert unpack(arguments)[0] == b"$ccvmMode = 'windows_updates'\n" + source
 
 
 @pytest.mark.parametrize("mode", ["connection", "inventory"])

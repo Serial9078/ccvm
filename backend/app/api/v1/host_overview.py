@@ -26,6 +26,18 @@ from app.services.software_assessment import ENGINE_VERSION as SOFTWARE_ENGINE
 from app.services.software_catalog import numeric_version
 from app.services.windows_patch_assessment import ENGINE_VERSION as WINDOWS_ENGINE
 from app.services.windows_patch_sync import canonical_bytes
+from app.services.windows_update_assessment import (
+    ENGINE_VERSION as CLIENT_ENGINE,
+)
+from app.services.windows_update_assessment import (
+    MAX_AGE as CLIENT_MAX_AGE,
+)
+from app.services.windows_update_assessment import (
+    PROVIDER as CLIENT_PROVIDER,
+)
+from app.services.windows_update_assessment import (
+    SOURCE as CLIENT_SOURCE,
+)
 
 router = APIRouter(
     prefix="/host-audits",
@@ -126,7 +138,7 @@ def _inventories(db, customer_id, asset_ids):
         .filter(
             HostAudit.customer_id == customer_id,
             HostAudit.asset_id.in_(asset_ids),
-            HostAudit.mode == "inventory",
+            HostAudit.mode.in_(("inventory", "windows_updates")),
             HostAudit.completed_at.is_not(None),
             HostAudit.inventory.is_not(None),
             HostAudit.job.has(status="finished") | HostAudit.job.has(status="failed"),
@@ -197,7 +209,12 @@ def _inventory(audit):
     }
     if not os_data.get("family"):
         return None
-    result = {"id": audit.id, "completed_at": audit.completed_at, "os": os_data}
+    result = {
+        "id": audit.id,
+        "mode": audit.mode,
+        "completed_at": audit.completed_at,
+        "os": os_data,
+    }
     for label, prefix in (("packages", "package"), ("hotfixes", "hotfix")):
         section = data.get(label, {})
         items = section.get("items") if isinstance(section, dict) else None
@@ -205,6 +222,26 @@ def _inventory(audit):
         result[prefix + "_status"] = (
             _text(section.get("status"), 40) if isinstance(section, dict) else "unavailable"
         ) or "unavailable"
+    updates = data.get("windows_updates")
+    result["windows_updates"] = (
+        {
+            "has_evidence": True,
+            "queried_at": _text(updates.get("queried_at"), 60) or None,
+            "status": _text(updates.get("status"), 40),
+            "result_code": (
+                updates.get("result_code") if type(updates.get("result_code")) is int else None
+            ),
+            "total": _number(updates.get("total")),
+            "reboot_required": (
+                updates.get("reboot_required")
+                if type(updates.get("reboot_required")) is bool
+                else None
+            ),
+            "truncated": updates.get("truncated") is not False,
+        }
+        if isinstance(updates, dict)
+        else None
+    )
     return result
 
 
@@ -387,6 +424,99 @@ def _software_result(result):
     return output
 
 
+def _windows_update_result(result):
+    report = result.get("windows_updates")
+    output = {
+        "provider": CLIENT_PROVIDER,
+        "source": CLIENT_SOURCE,
+        "reason": _text(result.get("reason"), 1000),
+        "valid_until": _text(result.get("valid_until"), 60) or None,
+        "limitations": (
+            [
+                _text(value, 1000)
+                for value in result.get("limitations", [])[:10]
+                if isinstance(value, str)
+            ]
+            if isinstance(result.get("limitations"), list)
+            else []
+        ),
+        "windows_updates": None,
+    }
+    if not isinstance(report, dict):
+        return output
+    summary = report.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    items = report.get("items")
+    items = items if isinstance(items, list) else []
+    projected = {
+        "source": CLIENT_PROVIDER,
+        "mode": _text(report.get("mode"), 30),
+        "server_selection": _text(report.get("server_selection"), 30),
+        "queried_at": _text(report.get("queried_at"), 60) or None,
+        "status": _text(report.get("status"), 40),
+        "result_code": (
+            report.get("result_code") if type(report.get("result_code")) is int else None
+        ),
+        "total": _number(report.get("total")),
+        "reboot_required": (
+            report.get("reboot_required") if type(report.get("reboot_required")) is bool else None
+        ),
+        "hidden_updates": "not_assessed",
+        "drivers": "not_assessed",
+        "superseded": "excluded",
+        "items_truncated": bool(report.get("items_truncated") or len(items) > 20),
+        "summary": {
+            key: _number(summary.get(key))
+            for key in (
+                "offers",
+                "security",
+                "quality",
+                "feature",
+                "definition",
+                "other",
+                "optional",
+                "optional_unknown",
+                "actionable",
+            )
+        },
+        "items": [],
+    }
+    for item in items[:20]:
+        if not isinstance(item, dict):
+            continue
+        projected["items"].append(
+            {
+                "update_id": _text(item.get("update_id"), 40),
+                "revision": _number(item.get("revision")),
+                "title": _text(item.get("title"), 1000),
+                "kbs": (
+                    [_text(kb, 40) for kb in item.get("kbs", [])[:32]]
+                    if isinstance(item.get("kbs"), list)
+                    else []
+                ),
+                "classification": _text(item.get("classification"), 40),
+                "is_optional": (
+                    item.get("is_optional") if type(item.get("is_optional")) is bool else None
+                ),
+                "is_mandatory": (
+                    item.get("is_mandatory") if type(item.get("is_mandatory")) is bool else None
+                ),
+                "actionable": item.get("actionable") is True,
+                "categories": (
+                    [
+                        {key: _text(category.get(key), 500) for key in ("id", "name", "type")}
+                        for category in item.get("categories", [])[:8]
+                        if isinstance(category, dict)
+                    ]
+                    if isinstance(item.get("categories"), list)
+                    else []
+                ),
+            }
+        )
+    output["windows_updates"] = projected
+    return output
+
+
 def _assessment(row, audit, catalog, engine, now, *, software=False):
     if row is None:
         return None
@@ -403,15 +533,21 @@ def _assessment(row, audit, catalog, engine, now, *, software=False):
     valid_until = _timestamp(result.get("valid_until"))
     evaluated = _utc(row.evaluated_at)
     collected = _utc(audit.completed_at)
+    wua = not software and row.engine_version == CLIENT_ENGINE
+    maximum_age = CLIENT_MAX_AGE if wua else MAX_AGE
     projection = (
         _software_result(result)
         if software
-        else {
-            key: _text(result.get(key), 1000) or None
-            for key in ("reason", "valid_until", "installed_build", "baseline_build")
-        }
+        else (
+            _windows_update_result(result)
+            if wua
+            else {
+                key: _text(result.get(key), 1000) or None
+                for key in ("reason", "valid_until", "installed_build", "baseline_build")
+            }
+        )
     )
-    if not software:
+    if not software and not wua:
         kbs = result.get("baseline_kbs")
         projection["baseline_kbs"] = (
             [_text(kb, 40) for kb in kbs[:32]] if isinstance(kbs, list) else []
@@ -433,15 +569,34 @@ def _assessment(row, audit, catalog, engine, now, *, software=False):
             valid_until is None
             or valid_until <= now
             or evaluated > now
-            or evaluated + MAX_AGE <= now
+            or evaluated + maximum_age <= now
             or collected > now
-            or collected + MAX_AGE <= now
+            or collected + maximum_age <= now
         ),
+        "provider": (
+            CLIENT_PROVIDER if wua else ("vendor-software-catalog" if software else "msrc-cvrf")
+        ),
+        "source": (
+            CLIENT_SOURCE if wua else ("vendor-software-catalog" if software else "msrc-cvrf")
+        ),
+        "catalog_applicable": not wua,
         "current_catalog": bool(
-            catalog and not catalog["expired"] and row.catalog_id == catalog["id"]
+            not wua and catalog and not catalog["expired"] and row.catalog_id == catalog["id"]
         ),
         "evidence_matches": digest is not None and row.evidence_sha256 == digest,
-        "engine_current": row.engine_version == engine and result.get("engine_version") == engine,
+        "engine_current": (
+            row.engine_version == engine
+            and result.get("engine_version") == engine
+            and (
+                not wua
+                or (
+                    result.get("provider") == CLIENT_PROVIDER
+                    and result.get("source") == CLIENT_SOURCE
+                    and result.get("catalog_applicable") is False
+                    and row.catalog_id is None
+                )
+            )
+        ),
         "result": projection,
     }
 
@@ -489,7 +644,7 @@ def overview(
         elif latest_run.job.status == "failed":
             host_issues.append(
                 "latest_collection_failed"
-                if latest_run.mode == "inventory"
+                if latest_run.mode in {"inventory", "windows_updates"}
                 else "latest_connection_failed"
             )
         platform = _platform(inventory["os"]) if inventory else "unclassified"
@@ -502,7 +657,13 @@ def overview(
             if any(inventory[name] != "complete" for name in ("package_status", "hotfix_status")):
                 host_issues.append("inventory_partial")
         patch = (
-            _assessment(windows_rows.get(retained.id), retained, windows, WINDOWS_ENGINE, now)
+            _assessment(
+                windows_rows.get(retained.id),
+                retained,
+                windows,
+                CLIENT_ENGINE if platform == "windows_client" else WINDOWS_ENGINE,
+                now,
+            )
             if inventory
             else None
         )
@@ -524,7 +685,14 @@ def overview(
             if apps is None:
                 host_issues.append("software_assessment_missing")
             if platform == "windows_client":
-                host_issues.append("windows_client_patch_coverage_unavailable")
+                if patch is None or patch.get("provider") != CLIENT_PROVIDER:
+                    host_issues.append("windows_client_update_query_required")
+                elif patch["status"] in {
+                    "update_query_required",
+                    "update_query_incomplete",
+                    "stale_evidence",
+                }:
+                    host_issues.append(patch["status"])
         elif platform in {"linux", "vmware"}:
             host_issues.append("patch_assessment_unsupported")
         elif inventory:

@@ -16,7 +16,9 @@ import os
 import resource
 import signal
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 
 import paramiko
 import requests
@@ -54,6 +56,9 @@ def private_key(value, passphrase):
 
 
 def ssh_collect(payload):
+    mode = payload["mode"]
+    if mode not in {"connection", "inventory"}:
+        raise TransportFailure("invalid_request")
     secrets = payload["secrets"]
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(PinnedHostKey(payload["ssh_fingerprint"]))
@@ -76,9 +81,6 @@ def ssh_collect(payload):
             channel_timeout=10,
         )
         # The only variable is a validated enum, not a target-supplied command.
-        mode = payload["mode"]
-        if mode not in {"connection", "inventory"}:
-            raise TransportFailure("invalid_request")
         source = Path(__file__).with_name("linux_inventory.py").read_bytes()
         stdin, stdout, stderr = client.exec_command(f"python3 -I - {mode}", timeout=70)
         stdin.write(source)
@@ -238,36 +240,90 @@ def windows_inventory_command(mode):
 
 
 def winrm_collect(payload):
-    # Validate and bound the complete launch before opening a remote session.
-    executable, arguments = windows_inventory_command(payload["mode"])
+    started = monotonic()
+    # Validate and bound BOTH separate launches before authentication. Ordinary
+    # inventory/connection paths remain exactly one fixed command.
+    updates = payload["mode"] == "windows_updates"
+    inventory_mode = "inventory" if updates else payload["mode"]
+    inventory_command = windows_inventory_command(inventory_mode)
+    update_command = windows_inventory_command("windows_updates") if updates else None
     protocol, endpoint = winrm_protocol(payload)
     transport = protocol.transport
     http = winrm_session(transport, endpoint, payload.get("ca_bundle"))
-    shell, command = None, None
+    shell = None
+    data = None
+
+    def run_fixed(fixed):
+        command = None
+        try:
+            executable, arguments = fixed
+            command = protocol.run_command(shell, executable, arguments, skip_cmd_shell=True)
+            stdout, stderr, status = protocol.get_command_output(shell, command)
+            if status != 0:
+                raise TransportFailure(remote_command_failure(stderr, stdout))
+            if len(stdout) > MAX_OUTPUT:
+                raise TransportFailure("output_limit")
+            return json.loads(stdout.decode("utf-8-sig"))
+        finally:
+            if command:
+                try:
+                    protocol.cleanup_command(shell, command)
+                except Exception:
+                    if not updates:
+                        raise
+
     try:
         shell = protocol.open_shell(noprofile=True, codepage=65001, idle_timeout="PT60S")
-        command = protocol.run_command(
-            shell,
-            executable,
-            arguments,
-            skip_cmd_shell=True,
-        )
-        stdout, stderr, status = protocol.get_command_output(shell, command)
-        if status != 0:
-            raise TransportFailure(remote_command_failure(stderr, stdout))
-        if len(stdout) > MAX_OUTPUT:
-            raise TransportFailure("output_limit")
-        return json.loads(stdout.decode("utf-8-sig"))
+        data = run_fixed(inventory_command)
+        if updates:
+            if not isinstance(data, dict):
+                raise TransportFailure("invalid_request")
+            if monotonic() - started > 90:
+                # Keep room for the fixed 60s job plus WSMan cleanup inside the
+                # existing 180s global deadline; never extend it for this mode.
+                data["windows_updates"] = unavailable_windows_updates("timeout")
+            else:
+                try:
+                    data["windows_updates"] = run_fixed(update_command)
+                except Exception:
+                    # Base evidence survives a second-command/COM/format failure.
+                    # No remote stderr, account, URL, or exception crosses this boundary.
+                    data["windows_updates"] = unavailable_windows_updates("update_query_failed")
+        return data
     finally:
         try:
-            if shell and command:
-                protocol.cleanup_command(shell, command)
+            if shell:
+                try:
+                    protocol.close_shell(shell, close_session=False)
+                except Exception:
+                    if not (updates and data is not None):
+                        raise
         finally:
             try:
-                if shell:
-                    protocol.close_shell(shell, close_session=False)
-            finally:
                 http.close()
+            except Exception:
+                if not (updates and data is not None):
+                    raise
+
+
+def unavailable_windows_updates(error_code):
+    return {
+        "schema_version": 1,
+        "source": "windows-update-agent",
+        "mode": "online",
+        "server_selection": "default",
+        "queried_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "status": "unavailable",
+        "result_code": None,
+        "total": 0,
+        "items": [],
+        "truncated": False,
+        "hidden_updates": "not_assessed",
+        "drivers": "not_assessed",
+        "superseded": "excluded",
+        "reboot_required": None,
+        "error_code": error_code,
+    }
 
 
 def main():

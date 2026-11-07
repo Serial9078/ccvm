@@ -79,7 +79,7 @@ def create_assessment(
 
     audit = checked_audit(db, audit_id, lock=True)
     if (
-        audit.mode != "inventory"
+        audit.mode not in {"inventory", "windows_updates"}
         or not isinstance(audit.inventory, dict)
         or audit.completed_at is None
         or audit.job.status not in {"finished", "failed"}

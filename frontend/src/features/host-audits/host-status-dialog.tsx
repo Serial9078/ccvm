@@ -11,7 +11,7 @@ import {
   Typography,
 } from "@mui/material";
 import { HostIssueList, WindowsStatus, SoftwareStatus } from "./overview";
-import { current, date, softwareFix } from "./overview-state";
+import { current, date, freshWindowsUpdateQuery, softwareFix } from "./overview-state";
 import type { OverviewHost } from "./overview-state";
 
 export function HostStatusDialog({
@@ -24,6 +24,7 @@ export function HostStatusDialog({
   openWindows,
   openSoftware,
   collect,
+  queryWindows,
 }: {
   host: OverviewHost | null;
   busy: boolean;
@@ -34,6 +35,7 @@ export function HostStatusDialog({
   openWindows: (host: OverviewHost) => void;
   openSoftware: (host: OverviewHost) => void;
   collect: (host: OverviewHost) => void;
+  queryWindows: (host: OverviewHost) => void;
 }) {
   const windows = host && ["windows_server", "windows_client"].includes(host.platform);
   return (
@@ -60,15 +62,28 @@ export function HostStatusDialog({
             )}
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="h6" sx={{ mb: 1 }}>
-                {windows ? "Windows-Build" : "Systemupdates"}
+                {host.platform === "windows_client"
+                  ? "Windows-Updateangebote"
+                  : windows
+                    ? "Windows-Build"
+                    : "Systemupdates"}
               </Typography>
               <WindowsStatus host={host} />
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                {windows
-                  ? "Die OS-Build-Baseline bewertet weder andere Windows-Komponenten noch installierte Programme."
-                  : "Für diese Plattform ist noch keine authentifizierte Patchbewertung verfügbar."}
+                {host.platform === "windows_client"
+                  ? "Die konfigurierte Windows Update-/WSUS-Quelle bestimmt das Angebot. Keine Angebote bestätigen keine vollständige Patchfreigabe; optionale Updates sind separat zu entscheiden."
+                  : windows
+                    ? "Die OS-Build-Baseline bewertet weder andere Windows-Komponenten noch installierte Programme."
+                    : "Für diese Plattform ist noch keine authentifizierte Patchbewertung verfügbar."}
               </Typography>
             </Paper>
+            {host.platform === "windows_client" && !freshWindowsUpdateQuery(host) && (
+              <Alert severity="info">
+                Für eine aktuelle Bewertung zuerst „Windows-Updates abfragen“ starten. Eine normale
+                Inventur enthält keine Online-Updateabfrage. Die gespeicherte Abfrage gilt höchstens
+                24 Stunden.
+              </Alert>
+            )}
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="h6" sx={{ mb: 1 }}>
                 Installierte Software
@@ -118,8 +133,17 @@ export function HostStatusDialog({
               </Button>
               {windows && (
                 <>
+                  {host.platform === "windows_client" && (
+                    <Button variant="contained" disabled={busy} onClick={() => queryWindows(host)}>
+                      Windows-Updates abfragen
+                    </Button>
+                  )}
                   <Button
-                    disabled={busy || !host.inventory || host.platform !== "windows_server"}
+                    disabled={
+                      busy ||
+                      !host.inventory ||
+                      (host.platform === "windows_client" && !freshWindowsUpdateQuery(host))
+                    }
                     onClick={() => assessWindows(host)}
                   >
                     Windows jetzt bewerten

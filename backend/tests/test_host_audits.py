@@ -115,6 +115,60 @@ def inventory(family="Linux", mode="inventory"):
     }
 
 
+def test_windows_update_search_is_explicit_winrm_only(secured, customer, db):
+    ssh = credential(secured, customer)
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": ssh["id"],
+            "target": "192.0.2.1",
+            "ssh_fingerprint": FINGERPRINT,
+            "mode": "windows_updates",
+        },
+    )
+    assert response.status_code == 422 and "require WinRM" in response.text
+    assert db.query(Job).count() == 0
+
+
+def test_update_provider_failure_retains_inventory_in_protected_audit(
+    secured, customer, db, monkeypatch
+):
+    cred = credential(secured, customer, kind="winrm")
+    response = secured.post(
+        "/api/v1/host-audits",
+        json={
+            "customer_id": customer["id"],
+            "credential_id": cred["id"],
+            "target": "192.0.2.1",
+            "mode": "windows_updates",
+            "winrm_transport": "http_ntlm",
+        },
+    )
+    assert response.status_code == 201, response.text
+    run = response.json()
+    assert run["mode"] == "windows_updates" and run["port"] == 5985
+    assert "metadata" in run["job"]["message"]
+
+    def collect(payload, **_kwargs):
+        assert payload["mode"] == "windows_updates" and payload["kind"] == "winrm"
+        return {
+            **inventory("Windows"),
+            "windows_updates": host_audit_transport.unavailable_windows_updates(
+                "update_query_failed"
+            ),
+        }
+
+    monkeypatch.setattr(host_inventory, "collect", collect)
+    job = claim_next_job(db)
+    process_job(db, job)
+    detail = secured.get(f"/api/v1/host-audits/{run['id']}").json()
+    assert detail["job"]["status"] == "failed"
+    assert detail["inventory"]["packages"]["status"] == "complete"
+    assert detail["inventory"]["windows_updates"]["status"] == "unavailable"
+    assert "no updates installed" in detail["job"]["message"].lower()
+
+
 def test_tls_token_and_configuration_are_required(secured, customer, monkeypatch):
     path = f"/api/v1/host-audits/credentials?customer_id={customer['id']}"
     assert secured.get(path).status_code == 200

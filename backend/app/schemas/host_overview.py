@@ -27,6 +27,8 @@ class OverviewInventory(BaseModel):
     package_status: str
     hotfix_count: int
     hotfix_status: str
+    mode: str = "inventory"
+    windows_updates: dict | None = None
 
 
 class OverviewAssessment(BaseModel):
@@ -38,6 +40,9 @@ class OverviewAssessment(BaseModel):
     engine_current: bool
     evaluated_at: datetime
     result: dict
+    provider: str | None = None
+    source: str | None = None
+    catalog_applicable: bool = True
 
 
 class OverviewHost(BaseModel):

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   assessmentWarning,
   current,
+  freshWindowsUpdateQuery,
   hostState,
   matchesPlatform,
 } from "../src/features/host-audits/overview-state.ts";
@@ -151,4 +152,130 @@ test("platform routes filter saved classification exactly and leave unknown host
   }
   assert.equal(matchesPlatform({ platform: "windows_client" }, "windows-server"), false);
   assert.equal(matchesPlatform({ platform: "windows_server" }, "windows-client"), false);
+});
+
+function clientQueryHost(status = "updates_offered") {
+  const value = host();
+  value.platform = "windows_client";
+  const queriedAt = new Date(Date.now() - 1000).toISOString();
+  value.inventory = {
+    id: 20,
+    mode: "windows_updates",
+    completed_at: new Date().toISOString(),
+    os: { family: "Windows", product_type: "1", name: "Synthetic Windows client" },
+    windows_updates: {
+      has_evidence: true,
+      queried_at: queriedAt,
+      status: "complete",
+      result_code: 2,
+      truncated: false,
+      total: 2,
+    },
+  };
+  value.windows_assessment = {
+    ...assessment(status),
+    provider: "windows-update-agent",
+    source: "configured_windows_update_service",
+    catalog_applicable: false,
+    current_catalog: false,
+  };
+  value.windows_assessment.result.windows_updates = {
+    status: "complete",
+    queried_at: queriedAt,
+    summary: { offers: 2, actionable: status === "updates_offered" ? 2 : 0 },
+  };
+  return value;
+}
+
+test("only Windows Update Agent evidence bypasses an inapplicable MSRC catalog", () => {
+  const value = clientQueryHost();
+  assert.equal(current(value.windows_assessment), true);
+  assert.equal(assessmentWarning(value.windows_assessment), "");
+  for (const change of [
+    { provider: "msrc-cvrf" },
+    { provider: "vendor-software-catalog" },
+    { provider: "unknown" },
+    { catalog_applicable: true },
+  ]) {
+    assert.equal(current({ ...value.windows_assessment, ...change }), false);
+  }
+});
+
+test("no update offers is a neutral result, never a green OS baseline", () => {
+  const value = clientQueryHost("no_update_offers");
+  assert.equal(hostState(value).attention, false);
+  assert.equal(hostState(value).baseline, false);
+});
+
+test("feature, definition and optional offers are not required security patch counts", () => {
+  const value = clientQueryHost();
+  value.windows_assessment.result.windows_updates.summary = {
+    offers: 2,
+    feature: 1,
+    definition: 1,
+    optional: 1,
+    security: 0,
+    quality: 0,
+    actionable: 0,
+  };
+  assert.equal(hostState(value).attention, false);
+  value.windows_assessment.result.windows_updates.summary.actionable = 2;
+  assert.equal(hostState(value).attention, true);
+  assert.equal(hostState(value).baseline, false);
+});
+
+test("incomplete or old client queries never produce baseline success", () => {
+  for (const status of ["update_query_required", "update_query_incomplete", "stale_evidence"]) {
+    const value = clientQueryHost(status);
+    assert.equal(hostState(value).unknown, true);
+    assert.equal(hostState(value).baseline, false);
+  }
+});
+
+test("only a fresh explicit successful online query enables client offer assessment", () => {
+  assert.equal(freshWindowsUpdateQuery(clientQueryHost()), true);
+  for (const change of [
+    (value) => {
+      value.inventory.mode = "inventory";
+    },
+    (value) => {
+      value.inventory.windows_updates = null;
+    },
+    (value) => {
+      value.inventory.windows_updates.status = "partial";
+    },
+    (value) => {
+      value.inventory.windows_updates.status = "timeout";
+    },
+    (value) => {
+      value.inventory.windows_updates.status = "unavailable";
+    },
+    (value) => {
+      value.inventory.windows_updates.result_code = 3;
+    },
+    (value) => {
+      value.inventory.windows_updates.truncated = true;
+    },
+    (value) => {
+      value.inventory.windows_updates.has_evidence = false;
+    },
+    (value) => {
+      value.inventory.windows_updates.queried_at = new Date(
+        Date.now() - 25 * 3600000,
+      ).toISOString();
+    },
+    (value) => {
+      value.inventory.windows_updates.queried_at = new Date(Date.now() + 3600000).toISOString();
+    },
+  ]) {
+    const value = clientQueryHost();
+    change(value);
+    const retained = structuredClone(value.inventory.os);
+    assert.equal(freshWindowsUpdateQuery(value), false);
+    assert.deepEqual(
+      value.inventory.os,
+      retained,
+      "Failed update lookup keeps collected OS identity",
+    );
+  }
 });

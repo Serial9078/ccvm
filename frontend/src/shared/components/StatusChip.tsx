@@ -8,11 +8,11 @@ export default function StatusChip({ status }: Props) {
   const value = status.toLowerCase();
 
   const colors: Record<string, string> = {
-    open: "#ef4444",
-    fixed: "#22c55e",
-    accepted: "#8b5cf6",
-    progress: "#f59e0b",
-    "in progress": "#f59e0b",
+    open: "#991b1b",
+    fixed: "#166534",
+    accepted: "#404040",
+    progress: "#92400e",
+    "in progress": "#92400e",
   };
 
   return (
@@ -20,7 +20,7 @@ export default function StatusChip({ status }: Props) {
       label={status.toUpperCase()}
       size="small"
       sx={{
-        bgcolor: colors[value] ?? "#64748b",
+        bgcolor: colors[value] ?? "#404040",
         color: "#fff",
         fontWeight: 700,
       }}

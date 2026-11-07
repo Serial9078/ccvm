@@ -19,7 +19,7 @@ function colorForLabel(label: string) {
     return severityColor(key);
   }
 
-  return "#6366f1";
+  return "#d4d4d4";
 }
 
 export default function DonutChartCard({ title, data }: Props) {

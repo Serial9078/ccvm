@@ -187,7 +187,7 @@ def test_platform_uses_reported_identity_not_caption_or_credential(
     if platform in {"linux", "vmware"}:
         assert "patch_assessment_unsupported" in host["issues"]
     if platform == "windows_client":
-        assert "windows_client_patch_coverage_unavailable" in host["issues"]
+        assert "windows_client_update_query_required" in host["issues"]
 
 
 def test_failed_empty_inventory_is_unclassified(secured, customer, db):

@@ -1,6 +1,6 @@
 """Build the fixed read-only Windows collector launch without a long command line.
 
-Only the two validated collection modes vary. The gzip payload is the repository
+Only validated collection modes vary. The gzip payload is the repository
 collector itself, not caller-provided PowerShell. No target, account or credential
 value belongs in this module or its command arguments.
 """
@@ -22,7 +22,7 @@ class CommandLimitError(ValueError):
 
 
 def _fixed_command(source, mode):
-    if not isinstance(mode, str) or mode not in {"connection", "inventory"}:
+    if not isinstance(mode, str) or mode not in {"connection", "inventory", "windows_updates"}:
         raise ValueError("Unsupported Windows collection mode")
     if not isinstance(source, bytes) or not source or len(source) > MAX_SOURCE_BYTES:
         raise CommandLimitError("Fixed Windows collector source exceeds its size budget")
@@ -51,12 +51,17 @@ def _fixed_command(source, mode):
 
 def build_command(mode):
     """Read the sibling collector and return its fixed executable/argument list."""
-    return _fixed_command(Path(__file__).with_name("windows_inventory.ps1").read_bytes(), mode)
+    filename = (
+        "windows_update_inventory.ps1" if mode == "windows_updates" else "windows_inventory.ps1"
+    )
+    return _fixed_command(Path(__file__).with_name(filename).read_bytes(), mode)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("connection", "inventory"), required=True)
+    parser.add_argument(
+        "--mode", choices=("connection", "inventory", "windows_updates"), required=True
+    )
     args = parser.parse_args()
     executable, arguments = build_command(args.mode)
     print(json.dumps({"executable": executable, "arguments": arguments}))

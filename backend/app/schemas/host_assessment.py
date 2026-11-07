@@ -32,3 +32,6 @@ class HostAssessmentOut(BaseModel):
     result: dict
     evaluated_at: datetime
     expired: bool
+    provider: str | None = None
+    source: str | None = None
+    catalog_applicable: bool = True

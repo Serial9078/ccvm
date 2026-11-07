@@ -35,6 +35,7 @@ import {
 } from "@mui/material";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { customerNavigationSearch, navigationGroups } from "./navigation";
+import { cloudcollabBrand as brand } from "../theme/theme";
 
 const icons = {
   domain: <DomainIcon fontSize="small" />,
@@ -73,11 +74,20 @@ export function AppLayout() {
       end
       onClick={() => setNavigationOpen(false)}
       sx={{
-        borderRadius: 2,
+        borderRadius: 1.5,
+        borderLeft: "3px solid transparent",
+        color: "#d4d4d4",
         minHeight: 40,
         py: 0.5,
         mb: 0.25,
-        "&.active": { bgcolor: "rgba(56, 189, 248, 0.16)", color: "primary.main" },
+        "&:hover": { bgcolor: brand.raised, color: brand.white },
+        "&.active": {
+          bgcolor: brand.white,
+          color: brand.black,
+          borderLeftColor: brand.matrix,
+          "&:hover": { bgcolor: "#e5e5e5", color: brand.black },
+        },
+        "&.Mui-focusVisible": { outline: `2px solid ${brand.matrix}`, outlineOffset: 2 },
       }}
     >
       <ListItemIcon sx={{ color: "inherit", minWidth: 34 }}>{icon}</ListItemIcon>
@@ -111,13 +121,13 @@ export function AppLayout() {
       <Box
         component="header"
         sx={{
-          minHeight: 64,
+          minHeight: 80,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
           gap: 2,
           px: { xs: 1.5, md: 3 },
-          bgcolor: "background.paper",
+          bgcolor: brand.black,
           borderBottom: "1px solid",
           borderColor: "divider",
         }}
@@ -130,16 +140,43 @@ export function AppLayout() {
           >
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" sx={{ fontSize: { xs: "0.95rem", sm: "1.15rem" } }}>
-            CloudCollab Vulnerability Manager
-          </Typography>
+          <Box
+            component={NavLink}
+            to={{ pathname: "/dashboard", search: customerSearch }}
+            aria-label="CloudCollab CCVM – Dashboard"
+            sx={{
+              display: "flex", alignItems: "center", gap: { xs: 1, sm: 1.5 }, minWidth: 0,
+              color: brand.white, textDecoration: "none", borderRadius: 1,
+              "&:focus-visible": { outline: `2px solid ${brand.matrix}`, outlineOffset: 3 },
+            }}
+          >
+            <Box
+              component="img"
+              src="/assets/cloudcollab-logo.jpg"
+              alt="CloudCollab"
+              width={64}
+              height={64}
+              sx={{ width: { xs: 52, sm: 64 }, height: { xs: 52, sm: 64 }, objectFit: "contain" }}
+            />
+            <Box sx={{ pl: { xs: 1, sm: 1.5 }, borderLeft: "1px solid #444", minWidth: 0 }}>
+              <Typography sx={{ fontWeight: 800, fontSize: { xs: 17, sm: 19 }, letterSpacing: ".08em", lineHeight: 1.1 }}>
+                CCVM
+              </Typography>
+              <Typography variant="caption" sx={{ display: "block", color: brand.muted, mt: 0.35 }}>
+                Vulnerability Manager
+              </Typography>
+            </Box>
+          </Box>
         </Box>
         <Chip
           label="Web & Infrastruktur"
           color="primary"
           size="small"
           variant="outlined"
-          sx={{ display: { xs: "none", sm: "inline-flex" } }}
+          sx={{
+            display: { xs: "none", sm: "inline-flex" },
+            bgcolor: brand.surface, borderColor: "#444", color: brand.white,
+          }}
         />
       </Box>
       <Box sx={{ display: "flex", alignItems: "flex-start" }}>
@@ -151,6 +188,7 @@ export function AppLayout() {
             position: "sticky",
             top: 0,
             maxHeight: "100vh",
+            bgcolor: brand.canvas,
             overflowY: "auto",
             borderRight: "1px solid",
             borderColor: "divider",
