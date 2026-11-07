@@ -10,6 +10,7 @@ from app.models.network_scan import NetworkObservation, NetworkScan
 from app.models.plugin import Plugin
 from app.models.port import Port
 from app.models.scan import Scan
+from app.models.software_assessment import SoftwareAdvisoryCatalog, SoftwareAssessment
 from app.models.subdomain import Subdomain
 from app.models.technology import Technology
 from app.models.url import Url
@@ -27,6 +28,8 @@ __all__ = [
     "HostAudit",
     "HostAssessment",
     "WindowsPatchCatalog",
+    "SoftwareAdvisoryCatalog",
+    "SoftwareAssessment",
     "Job",
     "NetworkScan",
     "NetworkObservation",

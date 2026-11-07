@@ -39,6 +39,146 @@ try {
   let assessmentStatus = "build_gap";
   const assessments = [];
   let assessmentRequests = 0;
+  let softwareCatalog = {
+    id: 1,
+    source: "vendor-software-ranges",
+    sha256: "c".repeat(64),
+    retrieved_at: now,
+    created_at: now,
+    coverage_start: "2026-09-01",
+    coverage_end: "2026-11-07",
+    entry_count: 2,
+    coverage: [
+      {
+        product_key: "edge-windows",
+        discovered: 1,
+        parsed: 1,
+        unavailable_cves: [],
+        scope: "Recent Edge advisories",
+      },
+      {
+        product_key: "7zip-windows",
+        discovered: 1,
+        parsed: 1,
+        unavailable_cves: [],
+        scope: "One curated advisory",
+      },
+    ],
+    expired: false,
+  };
+  let softwareStatus = "version_matches_found";
+  const softwareAssessments = [];
+  let softwareRequests = 0;
+  function assessSoftware(run) {
+    const status = softwareCatalog ? softwareStatus : "catalog_unavailable";
+    const available = ["version_matches_found", "no_matches_in_checked_ranges"].includes(status);
+    const matched = status === "version_matches_found";
+    const result = {
+      schema_version: 1,
+      engine_version: "software-fixture-v1",
+      status,
+      reason: available
+        ? "Recorded versions were compared with scoped advisory ranges."
+        : "Synchronize the software advisory catalog before assessing installed programs.",
+      evaluated_at: now,
+      valid_until: available ? new Date(Date.now() + 7 * 86400000).toISOString() : null,
+      evidence_collected_at: now,
+      catalog_retrieved_at: softwareCatalog?.retrieved_at ?? null,
+      summary: {
+        inventory_entries: 30,
+        identified_entries: 1,
+        assessed_entries: available ? 1 : 0,
+        unassessed_entries: available ? 29 : 30,
+        product_versions: available ? 1 : 0,
+        matched_product_versions: matched ? 1 : 0,
+        cve_matches: matched ? 1 : 0,
+      },
+      coverage: {
+        scope: "windows_machine_registry_vendor_ranges",
+        status: available ? "limited" : "unavailable",
+        package_status: "complete",
+        catalog_start: softwareCatalog?.coverage_start ?? null,
+        catalog_end: softwareCatalog?.coverage_end ?? null,
+        vendor_catalog: softwareCatalog?.coverage ?? [],
+        exploitability: "not_verified",
+        per_user: "not_collected",
+      },
+      products: available
+        ? [
+            {
+              product_key: "edge-windows",
+              name: "Microsoft Edge",
+              version: "150.0.1000.1",
+              publisher: "Microsoft Corporation",
+              evidence_basis: "registry-uninstall",
+              evidence_count: 1,
+              status: matched ? "version_matches_affected_range" : "no_match_in_catalog",
+              reason: matched
+                ? "The recorded version falls in an explicit affected range."
+                : "No recorded version match in the checked catalog scope.",
+              checked_cves: 1,
+              catalog_scope: "Recent Edge advisories",
+              matches_total: matched ? 1 : 0,
+              matches_truncated: false,
+              matches: matched
+                ? [
+                    {
+                      cve: "CVE-2026-99998",
+                      title: "Synthetic software advisory",
+                      severity: "high",
+                      source_product: "Microsoft Edge for Windows",
+                      affected_ranges: [{ introduced: "1.0.0.0", fixed: "150.0.1000.2" }],
+                      source_urls: [
+                        "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-99998",
+                      ],
+                      document_ids: ["CVE-2026-99998"],
+                    },
+                  ]
+                : [],
+            },
+          ]
+        : [],
+      unassessed: available
+        ? [
+            {
+              name: "Fixture legacy app",
+              version: "2.0",
+              publisher: "Fixture publisher",
+              reason: "No supported product rule.",
+              evidence_count: 1,
+            },
+            {
+              name: "Fixture missing publisher",
+              version: "1.0",
+              publisher: "",
+              reason: "Collect a new inventory with publisher evidence.",
+              evidence_count: 28,
+            },
+          ]
+        : [],
+      products_total: available ? 1 : 0,
+      products_truncated: false,
+      unassessed_total: available ? 2 : 0,
+      unassessed_truncated: false,
+      limitations: [
+        "Synthetic software coverage is limited; no target authentication was performed.",
+      ],
+      sources: [],
+    };
+    return {
+      id: softwareAssessments.length + 1,
+      customer_id: 1,
+      asset_id: 1,
+      host_audit_id: run.id,
+      catalog_id: softwareCatalog?.id ?? null,
+      engine_version: result.engine_version,
+      evidence_sha256: "d".repeat(64),
+      status,
+      result,
+      evaluated_at: now,
+      expired: !available,
+    };
+  }
   function assess(run) {
     const status = catalog ? assessmentStatus : "catalog_unavailable";
     const available = status === "build_gap" || status === "meets_catalog_baseline";
@@ -152,6 +292,28 @@ try {
       if (path === "/api/v1/host-audits/patch-catalog") {
         assert.equal(request.method(), "GET");
         return respond(catalog);
+      }
+      if (path === "/api/v1/host-audits/software-catalog") {
+        assert.equal(request.method(), "GET");
+        return respond(softwareCatalog);
+      }
+      if (/\/api\/v1\/host-audits\/\d+\/assess-software$/.test(path)) {
+        assert.equal(request.method(), "POST");
+        assert.deepEqual(request.postDataJSON(), {});
+        softwareRequests++;
+        const run = runs.find((candidate) => candidate.id === Number(path.split("/").at(-2)));
+        assert.equal(run.mode, "inventory");
+        const result = assessSoftware(run);
+        softwareAssessments.unshift(result);
+        return respond(result);
+      }
+      if (/\/api\/v1\/host-audits\/\d+\/software-assessments$/.test(path)) {
+        assert.equal(request.method(), "GET");
+        return respond(
+          softwareAssessments.filter(
+            (item) => item.host_audit_id === Number(path.split("/").at(-2)),
+          ),
+        );
       }
       if (/\/api\/v1\/host-audits\/\d+\/assess$/.test(path)) {
         assert.equal(request.method(), "POST");
@@ -314,6 +476,10 @@ try {
   await page.getByRole("button", { name: "View evidence", exact: true }).first().waitFor();
   assert.equal(
     await page.getByRole("button", { name: "Assess Windows patches", exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await page.getByRole("button", { name: "Assess installed software", exact: true }).count(),
     0,
   );
   await page.getByRole("button", { name: "View evidence", exact: true }).first().click();
@@ -483,6 +649,81 @@ try {
     .waitFor();
   assert.equal(assessmentRequests, 3);
   await page.getByRole("button", { name: "Close assessment", exact: true }).click();
+  await page.getByRole("button", { name: "Assess installed software", exact: true }).click();
+  const softwareDialog = page.getByRole("dialog");
+  await softwareDialog.getByText("Affected version ranges matched", { exact: true }).waitFor();
+  await softwareDialog
+    .getByText("30 inventory entries · 1 assessed · 29 unassessed", { exact: true })
+    .waitFor();
+  await softwareDialog.getByText("CVE-2026-99998", { exact: true }).waitFor();
+  await softwareDialog.getByText("Fixed in 150.0.1000.2", { exact: false }).waitFor();
+  await softwareDialog.getByText("Fixture legacy app", { exact: true }).waitFor();
+  await softwareDialog
+    .getByText("Collect a new inventory with publisher evidence.", { exact: false })
+    .waitFor();
+  assert.equal(
+    await softwareDialog.getByRole("link", { name: "Source 1", exact: true }).getAttribute("href"),
+    "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-99998",
+  );
+  assert.equal(submissions.length, inventorySubmissions);
+  assert.equal(JSON.stringify(runs), retainedRuns);
+  await page.screenshot({
+    path: "test-artifacts/authenticated-software-assessment.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
+  softwareStatus = "no_matches_in_checked_ranges";
+  await page.getByRole("button", { name: "Assess installed software", exact: true }).click();
+  await softwareDialog
+    .getByText("No match in the checked advisory ranges", { exact: true })
+    .waitFor();
+  await softwareDialog.getByText("Unassessed software · 2", { exact: true }).waitFor();
+  assert.equal(await softwareDialog.locator(".MuiChip-colorSuccess").count(), 0);
+  await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
+  softwareCatalog = null;
+  await page.getByRole("button", { name: "Refresh software catalog status", exact: true }).click();
+  await page
+    .getByText(
+      "No software advisory catalog has been synchronized. Installed software assessments will report missing coverage.",
+      { exact: true },
+    )
+    .waitFor();
+  await page.getByRole("button", { name: "Assess installed software", exact: true }).click();
+  await softwareDialog
+    .getByText("Software advisory catalog unavailable", { exact: true })
+    .waitFor();
+  assert.equal(
+    await softwareDialog
+      .getByText(
+        "This saved software assessment has expired. Collect current inventory or synchronize the catalog, then assess again.",
+        { exact: true },
+      )
+      .count(),
+    0,
+  );
+  await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
+  const expiredSoftware = structuredClone(
+    softwareAssessments.find((item) => item.status === "no_matches_in_checked_ranges"),
+  );
+  expiredSoftware.id = 4;
+  expiredSoftware.expired = true;
+  expiredSoftware.result.valid_until = new Date(Date.now() - 86400000).toISOString();
+  softwareAssessments.unshift(expiredSoftware);
+  await page.getByRole("button", { name: "View software assessments", exact: true }).click();
+  await softwareDialog
+    .getByRole("combobox", { name: "Saved software assessment", exact: true })
+    .waitFor();
+  await softwareDialog
+    .getByText(
+      "This saved software assessment has expired. Collect current inventory or synchronize the catalog, then assess again.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(softwareRequests, 3);
+  assert.equal(submissions.length, inventorySubmissions);
+  assert.equal(JSON.stringify(runs), retainedRuns);
+  await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
   await connection.click();
   await page
     .getByRole("option", { name: "HTTPS / NTLM · verified certificate", exact: true })
@@ -521,7 +762,7 @@ try {
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
   assert.deepEqual(errors, []);
   console.log(
-    "Host audit UI passed: volatile secrets, SSH and encrypted WinRM, Windows baseline assessment from saved evidence, explicit identity/catalog coverage gaps, expired assessment history and lock",
+    "Host audit UI passed: volatile secrets, encrypted inventory, OS baselines and scoped software ranges from saved evidence, unassessed software, missing catalogs, expired histories and lock",
   );
 } finally {
   await browser.close();

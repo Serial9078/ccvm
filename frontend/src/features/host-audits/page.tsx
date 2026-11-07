@@ -27,9 +27,11 @@ import type {
   HostAssessment,
   HostAudit,
   InventorySection,
+  SoftwareAssessment,
   WinrmTransport,
 } from "./api";
 import { PatchAssessmentDialog, PatchCatalogPanel } from "./patch-assessments";
+import { SoftwareAssessmentDialog, SoftwareCatalogPanel } from "./software-assessments";
 
 const emptyCredential = {
   name: "",
@@ -138,6 +140,10 @@ function AuditPanel({
   const [assessmentView, setAssessmentView] = useState<{
     target: string;
     assessments: HostAssessment[];
+  } | null>(null);
+  const [softwareView, setSoftwareView] = useState<{
+    target: string;
+    assessments: SoftwareAssessment[];
   } | null>(null);
   const [revoke, setRevoke] = useState<Credential | null>(null);
   const closeCredential = () => {
@@ -339,11 +345,13 @@ function AuditPanel({
         </Stack>
       </Paper>
       <PatchCatalogPanel token={token} />
+      <SoftwareCatalogPanel token={token} />
       <Alert severity="info">
         Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows: OS build,
         machine-wide uninstall registry and Get-HotFix. Completed Windows inventories can be
-        assessed against Microsoft OS build baselines. Third-party software CVE matching, Linux
-        patch assessment and per-user software are not included.
+        assessed against Microsoft OS build baselines and the listed software advisory ranges.
+        Software coverage is limited to supported product rules. Linux patch assessment and per-user
+        software are not included.
       </Alert>
       {!runs.length && (
         <Typography color="text.secondary">No authenticated runs for this customer yet.</Typography>
@@ -415,6 +423,45 @@ function AuditPanel({
                 credentials.find((credential) => credential.id === run.credential_id)?.kind ===
                   "winrm" && (
                   <>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        action(async () => {
+                          const assessment = await auditRequest<SoftwareAssessment>(
+                            token,
+                            `/${run.id}/assess-software`,
+                            {},
+                          );
+                          const saved = await auditRequest<SoftwareAssessment[]>(
+                            token,
+                            `/${run.id}/software-assessments`,
+                          );
+                          setSoftwareView({
+                            target: run.target,
+                            assessments: [
+                              assessment,
+                              ...saved.filter((item) => item.id !== assessment.id),
+                            ],
+                          });
+                        })
+                      }
+                    >
+                      Assess installed software
+                    </Button>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        action(async () => {
+                          const saved = await auditRequest<SoftwareAssessment[]>(
+                            token,
+                            `/${run.id}/software-assessments`,
+                          );
+                          setSoftwareView({ target: run.target, assessments: saved });
+                        })
+                      }
+                    >
+                      View software assessments
+                    </Button>
                     <Button
                       disabled={busy}
                       onClick={() =>
@@ -595,6 +642,14 @@ function AuditPanel({
           close={() => setAssessmentView(null)}
         />
       )}
+      {softwareView && (
+        <SoftwareAssessmentDialog
+          key={`${softwareView.target}:${softwareView.assessments[0]?.id ?? "empty"}`}
+          target={softwareView.target}
+          assessments={softwareView.assessments}
+          close={() => setSoftwareView(null)}
+        />
+      )}
       <Dialog open={revoke !== null} onClose={() => !busy && setRevoke(null)}>
         <DialogTitle>Revoke {revoke?.name}?</DialogTitle>
         <DialogContent>
@@ -657,7 +712,11 @@ function AuditPanel({
               <Section
                 title="Packages"
                 section={detail.inventory.packages}
-                columns={["name", "version", "architecture"]}
+                columns={
+                  detail.inventory.os.family === "Windows"
+                    ? ["name", "version", "publisher", "architecture"]
+                    : ["name", "version", "architecture"]
+                }
               />
               <Section
                 title="Hotfixes"

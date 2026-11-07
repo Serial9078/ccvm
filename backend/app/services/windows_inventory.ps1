@@ -13,11 +13,12 @@ $hotfixes = @{status='not_requested'; source='Get-HotFix'; items=@()}
 if ($ccvmMode -eq 'inventory') {
     try {
         $paths = @(
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+            @{path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'; view='native'},
+            @{path='HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'; view='wow6432'}
         )
         $rows = @()
-        foreach ($path in $paths) {
+        foreach ($entry in $paths) {
+            $path = $entry.path
             # An absent 32-bit hive is normal. Access denied is not success.
             $parent = $path.Substring(0, $path.Length - 2)
             if (Test-Path -LiteralPath $parent -ErrorAction Stop) {
@@ -25,7 +26,11 @@ if ($ccvmMode -eq 'inventory') {
                     Where-Object { $_.DisplayName } |
                     Select-Object @{N='name';E={[string]$_.DisplayName}},
                                   @{N='version';E={[string]$_.DisplayVersion}},
-                                  @{N='architecture';E={'unknown'}})
+                                  @{N='architecture';E={'unknown'}},
+                                  @{N='publisher';E={[string]$_.Publisher}},
+                                  @{N='registry_key';E={[string]$_.PSChildName}},
+                                  @{N='registry_view';E={[string]$entry.view}},
+                                  @{N='install_scope';E={'machine'}})
             }
         }
         $software = @{status=$(if ($rows.Count -gt 10000) {'truncated'} else {'complete'});
