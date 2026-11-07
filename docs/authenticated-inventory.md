@@ -354,6 +354,44 @@ Primary software sources:
 - [CVE Program records](https://github.com/CVEProject/cvelistV5)
 - [7-Zip release history](https://www.7-zip.org/history.txt)
 
+### Structured inventory overview and Windows launcher update
+
+`scripts/update-inventory-overview.py --target <reviewed-merge-sha>
+--host <deployment-host>` publishes the structured host overview and the bounded
+Windows inventory launcher after validating the complete retained deployment
+chain. Its source base comes from the verified software-assessment journal,
+not the original ingress or either earlier inventory release.
+
+The updater keeps schema `d6a4b8e2f901` unchanged. It checks every existing table
+fingerprint, including populated software catalogs and saved OS/software
+assessments, and rejects added/dropped tables or changed rows. It takes a private
+PostgreSQL backup and publishes only the reviewed source and frontend using the
+retained container IDs and images. It does not run Alembic, synchronize public
+sources, decrypt a target credential, authenticate to a host or create a scan.
+
+Preflight is read-only by default. `--apply` records a separate private journal
+at `.git/ccvm-inventory-overview-deployment.json`; `--apply --resume` continues an
+interrupted publication. All prior update journals, prepared artifact hashes,
+private keys, scanner policy and ingress configuration remain bound to their
+original bytes. A verified repeat checks the installation while preserving new
+legitimate inventory or assessment activity.
+
+The fixed Windows collector is now carried by a short gzip/UTF-8 PowerShell
+bootstrap. The full encoded command is bounded below 8,000 characters before
+any target authentication; credentials never enter its arguments. The existing
+WinRS skip-shell option and mandatory encrypted HTTP/NTLM transport remain in
+place. Native Windows CI executes the actual production encoded launch through
+cmd.exe for both connection and inventory modes, in addition to checking the
+collector by file path. This tests a launch boundary previously covered only
+by a synthetic WSMan peer; the longer command alone does not prove the cause
+of a particular remote failure. Remote errors expose fixed categories only.
+
+The overview separates Domains, URLs, Network, Windows Server, Windows Clients,
+Linux and VMware. Patch indicators describe the available saved evidence and
+its supported rules, not a complete vulnerability assessment. Failed newer runs,
+expired assessments, unclassified hosts and unsupported platform coverage remain
+visible rather than being turned into a healthy state.
+
 ### Retained gateway mount repair
 
 On older Docker runtimes, mounting `/run/ccvm` alongside a tmpfs on the alias

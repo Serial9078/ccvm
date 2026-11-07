@@ -58,6 +58,58 @@ foreach ($mode in @('connection', 'inventory')) {
     Write-Output "Native Windows collector passed: $mode; packages=$($data.packages.items.Count); hotfix coverage=$($data.hotfixes.status)"
 }
 
+
+# Execute the exact production encoded command through cmd.exe as well as the
+# direct script path above. This catches the launch boundary which a mocked
+# WSMan peer cannot exercise, without enabling WinRM or creating an account.
+$builder = Join-Path $PSScriptRoot '..\app\services\windows_inventory_command.py'
+foreach ($mode in @('connection', 'inventory')) {
+    $manifestJson = & python -I $builder --mode $mode
+    if ($LASTEXITCODE -ne 0) { throw 'Fixed production command builder failed' }
+    $manifest = $manifestJson | ConvertFrom-Json
+    if ($manifest.executable -ne 'powershell' -or $manifest.arguments.Count -ne 5 -or
+        ($manifest.arguments[0..3] -join '|') -ne '-NoLogo|-NoProfile|-NonInteractive|-EncodedCommand') {
+        throw 'Unexpected production command executable or options'
+    }
+    $commandLine = $manifest.executable + ' ' + ($manifest.arguments -join ' ')
+    if ($commandLine.Length -ge 8000) { throw 'Production collector exceeds its launch budget' }
+    $stdoutPath = [IO.Path]::GetTempFileName()
+    $stderrPath = [IO.Path]::GetTempFileName()
+    try {
+        $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', $commandLine) `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        if ($process.ExitCode -ne 0) {
+            # Raw remote-style stderr must not enter logs; the exit code alone
+            # proves that the fixed launcher failed its native contract.
+            throw "Native production encoded collector failed with exit code $($process.ExitCode)"
+        }
+        $data = Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($data.schema_version -ne 1 -or $data.os.family -ne 'Windows' -or !$data.os.kernel -or
+            !$data.os.product_type -or !$data.os.edition_id -or !$data.os.native_architecture) {
+            throw 'Production encoded collector did not return Windows product/build identity'
+        }
+        if ($mode -eq 'connection') {
+            if ($data.packages.status -ne 'not_requested' -or $data.hotfixes.status -ne 'not_requested') {
+                throw 'Encoded connection command unexpectedly collected software'
+            }
+        } else {
+            if ($data.packages.status -ne 'complete' -or $data.packages.items.Count -eq 0) {
+                throw 'Encoded production command failed to collect the registry inventory'
+            }
+            foreach ($package in $data.packages.items) {
+                if ($package.publisher -isnot [string] -or !$package.registry_key -or
+                    $package.registry_view -notin @('native', 'wow6432') -or
+                    $package.install_scope -ne 'machine' -or $package.architecture -ne 'unknown') {
+                    throw 'Encoded production command lost software identity metadata'
+                }
+            }
+        }
+        Write-Output "Production encoded Windows launch passed through cmd.exe: $mode; command chars=$($commandLine.Length)"
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Exercise the real collector with synthetic registry responses. No registry
 # keys are created, altered or deleted, and no installed product is executed.
 foreach ($scenario in @('complete', 'truncated', 'registry-unavailable', 'hotfixes-unavailable')) {

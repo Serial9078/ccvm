@@ -7,6 +7,7 @@ parent enforces a wall-clock deadline and discards all raw transport errors.
 import base64
 import hashlib
 import hmac
+import importlib.util
 import io
 import ipaddress
 import json
@@ -186,29 +187,74 @@ def winrm_session(transport, endpoint, ca_bundle):
         raise
 
 
+def remote_command_failure(stderr, stdout=b""):
+    """Classify only fixed Windows failure categories; never expose remote text."""
+    # PowerShell CLIXML and cmd.exe messages can contain account names, paths or
+    # command text. Inspect bounded data locally and return allowlisted codes.
+    data = b" ".join(value[:32768] for value in (stderr, stdout) if isinstance(value, bytes))
+    text = data.decode("utf-8", errors="ignore").replace("\x00", "").casefold()
+    if any(
+        value in text
+        for value in (
+            "the command line is too long",
+            "die befehlszeile ist zu lang",
+            "die eingabezeile ist zu lang",
+        )
+    ):
+        return "remote_command_too_long"
+    if any(value in text for value in ("parsererror", "parseexception", "missingendcurlybrace")):
+        return "remote_powershell_parse_failed"
+    if any(
+        value in text
+        for value in (
+            "unauthorizedaccessexception",
+            "permissiondenied",
+            "access is denied",
+            "zugriff verweigert",
+        )
+    ):
+        return "remote_permission_denied"
+    if "commandnotfoundexception" in text or any(
+        value in text
+        for value in ("'powershell' is not recognized", "'powershell.exe' is not recognized")
+    ):
+        return "remote_command_unavailable"
+    return "remote_command_failed"
+
+
+def windows_inventory_command(mode):
+    # The isolated process runs Python -I from / and does not import the app.
+    # Load only this reviewed stdlib-only sibling, never an environment path.
+    path = Path(__file__).with_name("windows_inventory_command.py")
+    spec = importlib.util.spec_from_file_location("ccvm_fixed_windows_command", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.build_command(mode)
+    except module.CommandLimitError:
+        raise TransportFailure("collector_command_limit") from None
+    except ValueError:
+        raise TransportFailure("invalid_request") from None
+
+
 def winrm_collect(payload):
-    source = Path(__file__).with_name("windows_inventory.ps1").read_text()
-    mode = payload["mode"]
-    if mode not in {"connection", "inventory"}:
-        raise TransportFailure("invalid_request")
+    # Validate and bound the complete launch before opening a remote session.
+    executable, arguments = windows_inventory_command(payload["mode"])
     protocol, endpoint = winrm_protocol(payload)
     transport = protocol.transport
     http = winrm_session(transport, endpoint, payload.get("ca_bundle"))
     shell, command = None, None
     try:
         shell = protocol.open_shell(noprofile=True, codepage=65001, idle_timeout="PT60S")
-        encoded = base64.b64encode(
-            (f"$ccvmMode = '{mode}'\n" + source).encode("utf-16-le")
-        ).decode()
         command = protocol.run_command(
             shell,
-            "powershell",
-            ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            executable,
+            arguments,
             skip_cmd_shell=True,
         )
         stdout, stderr, status = protocol.get_command_output(shell, command)
         if status != 0:
-            raise TransportFailure("remote_command_failed")
+            raise TransportFailure(remote_command_failure(stderr, stdout))
         if len(stdout) > MAX_OUTPUT:
             raise TransportFailure("output_limit")
         return json.loads(stdout.decode("utf-8-sig"))

@@ -6,6 +6,7 @@ native Windows collector coverage is provided by check_windows_inventory.ps1.
 """
 
 import base64
+import gzip
 import json
 import os
 import re
@@ -101,9 +102,13 @@ def soap_reply(plaintext, actions):
         assert request.find("env:Body/rsp:CommandLine/rsp:Command", NS).text == "powershell"
         arguments = request.find("env:Body/rsp:CommandLine/rsp:Arguments", NS).text.split()
         assert arguments[:-1] == ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"]
-        command = base64.b64decode(arguments[-1], validate=True).decode("utf-16-le")
+        bootstrap = base64.b64decode(arguments[-1], validate=True).decode("utf-16-le")
+        compressed = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", bootstrap)
+        assert compressed is not None
+        command = gzip.decompress(base64.b64decode(compressed[1], validate=True)).decode("utf-8")
         source = (BACKEND / "app/services/windows_inventory.ps1").read_text()
         assert command == "$ccvmMode = 'connection'\n" + source
+        assert len(" ".join(["powershell", *arguments])) < 8000
         assert request.find(".//w:Option[@Name='WINRS_SKIP_CMD_SHELL']", NS).text == "TRUE"
         ET.SubElement(body, f"{{{NS['rsp']}}}CommandId").text = "fixture-command"
     elif action == "Receive":

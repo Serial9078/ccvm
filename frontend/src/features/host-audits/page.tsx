@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Alert,
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
   Button,
   Chip,
@@ -32,6 +36,10 @@ import type {
 } from "./api";
 import { PatchAssessmentDialog, PatchCatalogPanel } from "./patch-assessments";
 import { SoftwareAssessmentDialog, SoftwareCatalogPanel } from "./software-assessments";
+import { HostOverviewPanel } from "./overview";
+import { platformNames, matchesPlatform } from "./overview-state";
+import { HostStatusDialog } from "./host-status-dialog";
+import type { HostOverview, HostPlatformFilter, OverviewHost } from "./overview-state";
 
 const emptyCredential = {
   name: "",
@@ -119,13 +127,19 @@ function AuditPanel({
   token,
   customerId,
   lock,
+  platform,
 }: {
   token: string;
   customerId: number;
   lock: () => void;
+  platform: HostPlatformFilter;
 }) {
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [runs, setRuns] = useState<HostAudit[]>([]);
+  const [overview, setOverview] = useState<HostOverview | null>(null);
+  const [overviewLoaded, setOverviewLoaded] = useState(false);
+  const [overviewDetail, setOverviewDetail] = useState<OverviewHost | null>(null);
+  const [collectOpen, setCollectOpen] = useState(false);
   const [form, setForm] = useState(emptyCredential);
   const [createOpen, setCreateOpen] = useState(false);
   const fileGeneration = useRef(0);
@@ -151,9 +165,24 @@ function AuditPanel({
     setCreateOpen(false);
     setForm(emptyCredential);
   };
+  useEffect(() => {
+    setCollectOpen(false);
+    setOverviewDetail(null);
+    setDetail(null);
+    setAssessmentView(null);
+    setSoftwareView(null);
+    setCredentialId("");
+    setPort("");
+    setFingerprint("");
+    setWinrmTransport("https");
+    fileGeneration.current++;
+    setCreateOpen(false);
+    setForm(emptyCredential);
+    setRevoke(null);
+  }, [platform]);
   const selected = credentials.find((c) => c.id === Number(credentialId) && c.enabled);
   const refresh = async (signal?: AbortSignal) => {
-    const [creds, audits] = await Promise.all([
+    const [creds, audits, status] = await Promise.allSettled([
       auditRequest<Credential[]>(
         token,
         `/credentials?customer_id=${customerId}`,
@@ -161,9 +190,24 @@ function AuditPanel({
         signal,
       ),
       auditRequest<HostAudit[]>(token, `?customer_id=${customerId}`, undefined, signal),
+      auditRequest<HostOverview>(token, `/overview?customer_id=${customerId}`, undefined, signal),
     ]);
-    setCredentials(creds);
-    setRuns(audits);
+    if (creds.status === "fulfilled") setCredentials(creds.value);
+    if (audits.status === "fulfilled") setRuns(audits.value);
+    setOverviewLoaded(true);
+    if (status.status === "fulfilled") {
+      setOverview(status.value);
+      setOverviewDetail((prior) =>
+        prior
+          ? (status.value.hosts.find((host) => host.asset_id === prior.asset_id) ?? null)
+          : null,
+      );
+    } else {
+      setOverview(null);
+      setOverviewDetail(null);
+    }
+    for (const result of [creds, audits, status])
+      if (result.status === "rejected") throw result.reason;
   };
   useEffect(() => {
     const controller = new AbortController();
@@ -227,7 +271,39 @@ function AuditPanel({
         ...(selected?.kind.startsWith("ssh_") ? { ssh_fingerprint: fingerprint } : {}),
         mode,
       });
+      setCollectOpen(false);
     });
+  const assessWindows = (auditId: number) =>
+    action(async () => {
+      const assessment = await auditRequest<HostAssessment>(token, `/${auditId}/assess`, {});
+      const saved = await auditRequest<HostAssessment[]>(token, `/${auditId}/assessments`);
+      setAssessmentView({
+        target: overview?.hosts.find((host) => host.inventory?.id === auditId)?.target ?? "",
+        assessments: [assessment, ...saved.filter((item) => item.id !== assessment.id)],
+      });
+    });
+  const assessSoftware = (auditId: number) =>
+    action(async () => {
+      const assessment = await auditRequest<SoftwareAssessment>(
+        token,
+        `/${auditId}/assess-software`,
+        {},
+      );
+      const saved = await auditRequest<SoftwareAssessment[]>(
+        token,
+        `/${auditId}/software-assessments`,
+      );
+      setSoftwareView({
+        target: overview?.hosts.find((host) => host.inventory?.id === auditId)?.target ?? "",
+        assessments: [assessment, ...saved.filter((item) => item.id !== assessment.id)],
+      });
+    });
+  const visibleTargets = new Set(
+    (overview?.hosts ?? [])
+      .filter((host) => matchesPlatform(host, platform))
+      .map((host) => host.target),
+  );
+  const visibleRuns = runs.filter((run) => platform === "all" || visibleTargets.has(run.target));
   const valid = Boolean(
     selected &&
     target &&
@@ -238,275 +314,412 @@ function AuditPanel({
       <Stack direction="row" spacing={2} sx={{ alignItems: "center", flexWrap: "wrap" }}>
         <Chip color="success" variant="outlined" label="Operator access unlocked" />
         <Button onClick={lock}>Lock and clear session</Button>
+        <Box sx={{ flexGrow: 1 }} />
+        <Button
+          variant="contained"
+          disabled={platform === "vmware"}
+          onClick={() => setCollectOpen(true)}
+        >
+          Inventur starten
+        </Button>
+        <Button disabled={busy} onClick={() => void action(async () => {})}>
+          Status aktualisieren
+        </Button>
       </Stack>
       {error && !createOpen && !revoke && <Alert severity="error">{error}</Alert>}
-      <Paper sx={{ p: 3 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>
-          Read-only host inventory
-        </Typography>
-        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2 }}>
-          <TextField
-            select
-            label="Credential"
-            value={credentialId}
-            onChange={(e) => {
-              setCredentialId(e.target.value);
-              setWinrmTransport("https");
-              setPort("");
-              setFingerprint("");
-            }}
-          >
-            {credentials
-              .filter((c) => c.enabled)
-              .map((c) => (
-                <MenuItem key={c.id} value={String(c.id)}>
-                  {c.name} · {c.username} · {c.kind.replaceAll("_", " ")}
-                </MenuItem>
-              ))}
-          </TextField>
-          <TextField
-            label="Target IP"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-            helperText="One address inside the customer credential scope"
-          />
-          {selected?.kind === "winrm" && (
+      <HostOverviewPanel
+        overview={overview}
+        platform={platform}
+        loading={!overviewLoaded}
+        onDetail={setOverviewDetail}
+      />
+      <Dialog
+        open={collectOpen}
+        onClose={() => !busy && setCollectOpen(false)}
+        maxWidth="md"
+        fullWidth
+        data-testid="inventory-form-dialog"
+      >
+        <DialogTitle>Inventur starten</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Read-only host inventory
+          </Typography>
+          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2 }}>
             <TextField
               select
-              label="WinRM connection"
-              value={winrmTransport}
+              label="Credential"
+              value={credentialId}
               onChange={(e) => {
-                setWinrmTransport(e.target.value as WinrmTransport);
+                setCredentialId(e.target.value);
+                setWinrmTransport("https");
                 setPort("");
+                setFingerprint("");
               }}
-              helperText="Changing the connection resets the optional port"
             >
-              <MenuItem value="https">HTTPS / NTLM · verified certificate</MenuItem>
-              <MenuItem value="http_ntlm">HTTP / NTLM · encrypted messages</MenuItem>
+              {credentials
+                .filter(
+                  (c) =>
+                    c.enabled &&
+                    (platform === "linux"
+                      ? c.kind.startsWith("ssh_")
+                      : ["windows-server", "windows-client"].includes(platform)
+                        ? c.kind === "winrm"
+                        : true),
+                )
+                .map((c) => (
+                  <MenuItem key={c.id} value={String(c.id)}>
+                    {c.name} · {c.username} · {c.kind.replaceAll("_", " ")}
+                  </MenuItem>
+                ))}
             </TextField>
-          )}
-          <TextField
-            label="Port (optional)"
-            type="number"
-            value={port}
-            onChange={(e) => setPort(e.target.value)}
-            helperText={
-              selected?.kind === "winrm"
-                ? winrmTransport === "http_ntlm"
-                  ? "Default 5985 · HTTP / NTLM"
-                  : "Default 5986 · HTTPS / NTLM"
-                : "Default 22 · SSH"
-            }
-          />
-          {selected?.kind.startsWith("ssh_") && (
             <TextField
-              label="Approved SSH fingerprint"
-              value={fingerprint}
-              onChange={(e) => setFingerprint(e.target.value)}
-              helperText="SHA256 fingerprint verified through a trusted channel"
+              label="Target IP"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              helperText="One address inside the customer credential scope"
             />
-          )}
-        </Box>
-        {selected && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            Credential scope: {selected.allowed_cidrs.join(", ")}
-          </Typography>
-        )}
-        {selected?.kind === "winrm" && (
-          <Alert severity={winrmTransport === "http_ntlm" ? "warning" : "info"} sx={{ mt: 2 }}>
-            {winrmTransport === "http_ntlm"
-              ? "Messages are encrypted; server identity is not verified by a certificate."
-              : "HTTPS requires a trusted certificate with the target IP in its subject alternative names. Certificate checks cannot be disabled."}
-          </Alert>
-        )}
-        <Stack direction="row" spacing={2} useFlexGap sx={{ mt: 2, flexWrap: "wrap" }}>
-          <Button disabled={!valid || busy} onClick={() => queue("connection")}>
-            Test connection
-          </Button>
-          <Button variant="contained" disabled={!valid || busy} onClick={() => queue("inventory")}>
-            Collect inventory
-          </Button>
-          <Button
-            disabled={busy}
-            onClick={() => {
-              setForm(emptyCredential);
-              fileGeneration.current++;
-              setError("");
-              setCreateOpen(true);
-            }}
-          >
-            Add credential
-          </Button>
-          {selected && (
-            <Button color="warning" disabled={busy} onClick={() => setRevoke(selected)}>
-              Revoke credential
-            </Button>
-          )}
-        </Stack>
-      </Paper>
-      <PatchCatalogPanel token={token} />
-      <SoftwareCatalogPanel token={token} />
-      <Alert severity="info">
-        Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows: OS build,
-        machine-wide uninstall registry and Get-HotFix. Completed Windows inventories can be
-        assessed against Microsoft OS build baselines and the listed software advisory ranges.
-        Software coverage is limited to supported product rules. Linux patch assessment and per-user
-        software are not included.
-      </Alert>
-      {!runs.length && (
-        <Typography color="text.secondary">No authenticated runs for this customer yet.</Typography>
-      )}
-      {runs.map((run) => (
-        <Paper key={run.id} sx={{ p: 3 }}>
-          <Stack
-            direction="row"
-            sx={{ justifyContent: "space-between", alignItems: "center", gap: 2 }}
-          >
-            <Box>
-              <Typography variant="h6">
-                {run.target}:{run.port}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {run.mode === "connection" ? "Connection test" : "Host inventory"} ·{" "}
-                {new Date(run.created_at).toLocaleString()}
-              </Typography>
-              {credentials.find((credential) => credential.id === run.credential_id)?.kind ===
-                "winrm" && (
-                <Typography variant="body2" color="text.secondary">
-                  {winrmLabel(run.winrm_transport)}
-                </Typography>
-              )}
-            </Box>
-            <Chip
-              label={run.job.status.toUpperCase()}
-              color={
-                run.job.status === "finished"
-                  ? "success"
-                  : run.job.status === "failed"
-                    ? "error"
-                    : "default"
+            {selected?.kind === "winrm" && (
+              <TextField
+                select
+                label="WinRM connection"
+                value={winrmTransport}
+                onChange={(e) => {
+                  setWinrmTransport(e.target.value as WinrmTransport);
+                  setPort("");
+                }}
+                helperText="Changing the connection resets the optional port"
+              >
+                <MenuItem value="https">HTTPS / NTLM · verified certificate</MenuItem>
+                <MenuItem value="http_ntlm">HTTP / NTLM · encrypted messages</MenuItem>
+              </TextField>
+            )}
+            <TextField
+              label="Port (optional)"
+              type="number"
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+              helperText={
+                selected?.kind === "winrm"
+                  ? winrmTransport === "http_ntlm"
+                    ? "Default 5985 · HTTP / NTLM"
+                    : "Default 5986 · HTTPS / NTLM"
+                  : "Default 22 · SSH"
               }
             />
-          </Stack>
-          <Typography sx={{ my: 2 }}>{run.job.message}</Typography>
-          {["queued", "running"].includes(run.job.status) ? (
-            <>
-              <LinearProgress
-                variant={run.job.status === "queued" ? "determinate" : "indeterminate"}
-                value={0}
+            {selected?.kind.startsWith("ssh_") && (
+              <TextField
+                label="Approved SSH fingerprint"
+                value={fingerprint}
+                onChange={(e) => setFingerprint(e.target.value)}
+                helperText="SHA256 fingerprint verified through a trusted channel"
               />
-              <Button
-                color="warning"
-                disabled={busy || run.cancel_requested}
-                sx={{ mt: 1 }}
-                onClick={() =>
-                  action(async () => {
-                    await auditRequest(token, `/${run.id}/cancel`, {});
-                  })
-                }
-              >
-                {run.cancel_requested ? "Cancelling…" : "Cancel run"}
+            )}
+          </Box>
+          {selected && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              Credential scope: {selected.allowed_cidrs.join(", ")}
+            </Typography>
+          )}
+          {selected?.kind === "winrm" && (
+            <Alert severity={winrmTransport === "http_ntlm" ? "warning" : "info"} sx={{ mt: 2 }}>
+              {winrmTransport === "http_ntlm"
+                ? "Messages are encrypted; server identity is not verified by a certificate."
+                : "HTTPS requires a trusted certificate with the target IP in its subject alternative names. Certificate checks cannot be disabled."}
+            </Alert>
+          )}
+          <Stack direction="row" spacing={2} useFlexGap sx={{ mt: 2, flexWrap: "wrap" }}>
+            <Button disabled={!valid || busy} onClick={() => queue("connection")}>
+              Test connection
+            </Button>
+            <Button
+              variant="contained"
+              disabled={!valid || busy}
+              onClick={() => queue("inventory")}
+            >
+              Collect inventory
+            </Button>
+            <Button
+              disabled={busy}
+              onClick={() => {
+                setForm(emptyCredential);
+                fileGeneration.current++;
+                setError("");
+                setCreateOpen(true);
+              }}
+            >
+              Add credential
+            </Button>
+            {selected && (
+              <Button color="warning" disabled={busy} onClick={() => setRevoke(selected)}>
+                Revoke credential
               </Button>
-            </>
-          ) : (
-            <Stack direction="row" useFlexGap sx={{ gap: 1, flexWrap: "wrap" }}>
-              <Button
-                disabled={busy}
-                onClick={() =>
-                  action(async () => setDetail(await auditRequest<HostAudit>(token, `/${run.id}`)))
-                }
-              >
-                View evidence
-              </Button>
-              {run.mode === "inventory" &&
-                ["finished", "failed"].includes(run.job.status) &&
-                credentials.find((credential) => credential.id === run.credential_id)?.kind ===
-                  "winrm" && (
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setCollectOpen(false)}>
+            Inventur schließen
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Accordion data-testid="catalog-panel" disableGutters>
+        <AccordionSummary>
+          <Typography>Kataloge und Prüfumfang</Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Stack spacing={2}>
+            <PatchCatalogPanel token={token} />
+            <SoftwareCatalogPanel token={token} />
+            <Alert severity="info">
+              Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows: OS
+              build, machine-wide uninstall registry and Get-HotFix. Completed Windows inventories
+              can be assessed against Microsoft OS build baselines and the listed software advisory
+              ranges. Software coverage is limited to supported product rules. Linux patch
+              assessment and per-user software are not included.
+            </Alert>
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
+      <Accordion data-testid="history-panel" disableGutters>
+        <AccordionSummary>
+          <Typography>Verlauf und technische Details · {visibleRuns.length} Läufe</Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Stack spacing={2}>
+            {!visibleRuns.length && (
+              <Typography color="text.secondary">
+                Noch keine Inventurläufe in diesem Bereich.
+              </Typography>
+            )}
+            {visibleRuns.map((run) => (
+              <Paper key={run.id} data-testid={`run-card-${run.id}`} sx={{ p: 3 }}>
+                <Stack
+                  direction="row"
+                  sx={{ justifyContent: "space-between", alignItems: "center", gap: 2 }}
+                >
+                  <Box>
+                    <Typography variant="h6">
+                      {run.target}:{run.port}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {run.mode === "connection" ? "Connection test" : "Host inventory"} ·{" "}
+                      {new Date(run.created_at).toLocaleString()}
+                    </Typography>
+                    {credentials.find((credential) => credential.id === run.credential_id)?.kind ===
+                      "winrm" && (
+                      <Typography variant="body2" color="text.secondary">
+                        {winrmLabel(run.winrm_transport)}
+                      </Typography>
+                    )}
+                  </Box>
+                  <Chip
+                    label={run.job.status.toUpperCase()}
+                    color={
+                      run.job.status === "finished"
+                        ? "success"
+                        : run.job.status === "failed"
+                          ? "error"
+                          : "default"
+                    }
+                  />
+                </Stack>
+                <Typography sx={{ my: 2 }}>{run.job.message}</Typography>
+                {["queued", "running"].includes(run.job.status) ? (
                   <>
+                    <LinearProgress
+                      variant={run.job.status === "queued" ? "determinate" : "indeterminate"}
+                      value={0}
+                    />
                     <Button
-                      disabled={busy}
+                      color="warning"
+                      disabled={busy || run.cancel_requested}
+                      sx={{ mt: 1 }}
                       onClick={() =>
                         action(async () => {
-                          const assessment = await auditRequest<SoftwareAssessment>(
-                            token,
-                            `/${run.id}/assess-software`,
-                            {},
-                          );
-                          const saved = await auditRequest<SoftwareAssessment[]>(
-                            token,
-                            `/${run.id}/software-assessments`,
-                          );
-                          setSoftwareView({
-                            target: run.target,
-                            assessments: [
-                              assessment,
-                              ...saved.filter((item) => item.id !== assessment.id),
-                            ],
-                          });
+                          await auditRequest(token, `/${run.id}/cancel`, {});
                         })
                       }
                     >
-                      Assess installed software
-                    </Button>
-                    <Button
-                      disabled={busy}
-                      onClick={() =>
-                        action(async () => {
-                          const saved = await auditRequest<SoftwareAssessment[]>(
-                            token,
-                            `/${run.id}/software-assessments`,
-                          );
-                          setSoftwareView({ target: run.target, assessments: saved });
-                        })
-                      }
-                    >
-                      View software assessments
-                    </Button>
-                    <Button
-                      disabled={busy}
-                      onClick={() =>
-                        action(async () => {
-                          const assessment = await auditRequest<HostAssessment>(
-                            token,
-                            `/${run.id}/assess`,
-                            {},
-                          );
-                          const saved = await auditRequest<HostAssessment[]>(
-                            token,
-                            `/${run.id}/assessments`,
-                          );
-                          setAssessmentView({
-                            target: run.target,
-                            assessments: [
-                              assessment,
-                              ...saved.filter((item) => item.id !== assessment.id),
-                            ],
-                          });
-                        })
-                      }
-                    >
-                      Assess Windows patches
-                    </Button>
-                    <Button
-                      disabled={busy}
-                      onClick={() =>
-                        action(async () => {
-                          const saved = await auditRequest<HostAssessment[]>(
-                            token,
-                            `/${run.id}/assessments`,
-                          );
-                          setAssessmentView({ target: run.target, assessments: saved });
-                        })
-                      }
-                    >
-                      View assessments
+                      {run.cancel_requested ? "Cancelling…" : "Cancel run"}
                     </Button>
                   </>
+                ) : (
+                  <Stack direction="row" useFlexGap sx={{ gap: 1, flexWrap: "wrap" }}>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        action(async () =>
+                          setDetail(await auditRequest<HostAudit>(token, `/${run.id}`)),
+                        )
+                      }
+                    >
+                      View evidence
+                    </Button>
+                    {run.mode === "inventory" &&
+                      ["finished", "failed"].includes(run.job.status) &&
+                      credentials.find((credential) => credential.id === run.credential_id)
+                        ?.kind === "winrm" && (
+                        <>
+                          <Button
+                            disabled={
+                              busy ||
+                              (run.job.status === "failed" &&
+                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                !(detail?.id === run.id && detail.inventory))
+                            }
+                            onClick={() =>
+                              action(async () => {
+                                const assessment = await auditRequest<SoftwareAssessment>(
+                                  token,
+                                  `/${run.id}/assess-software`,
+                                  {},
+                                );
+                                const saved = await auditRequest<SoftwareAssessment[]>(
+                                  token,
+                                  `/${run.id}/software-assessments`,
+                                );
+                                setSoftwareView({
+                                  target: run.target,
+                                  assessments: [
+                                    assessment,
+                                    ...saved.filter((item) => item.id !== assessment.id),
+                                  ],
+                                });
+                              })
+                            }
+                          >
+                            Assess installed software
+                          </Button>
+                          <Button
+                            disabled={
+                              busy ||
+                              (run.job.status === "failed" &&
+                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                !(detail?.id === run.id && detail.inventory))
+                            }
+                            onClick={() =>
+                              action(async () => {
+                                const saved = await auditRequest<SoftwareAssessment[]>(
+                                  token,
+                                  `/${run.id}/software-assessments`,
+                                );
+                                setSoftwareView({ target: run.target, assessments: saved });
+                              })
+                            }
+                          >
+                            View software assessments
+                          </Button>
+                          <Button
+                            disabled={
+                              busy ||
+                              overview?.hosts.find((host) => host.target === run.target)
+                                ?.platform === "windows_client" ||
+                              (run.job.status === "failed" &&
+                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                !(detail?.id === run.id && detail.inventory))
+                            }
+                            onClick={() =>
+                              action(async () => {
+                                const assessment = await auditRequest<HostAssessment>(
+                                  token,
+                                  `/${run.id}/assess`,
+                                  {},
+                                );
+                                const saved = await auditRequest<HostAssessment[]>(
+                                  token,
+                                  `/${run.id}/assessments`,
+                                );
+                                setAssessmentView({
+                                  target: run.target,
+                                  assessments: [
+                                    assessment,
+                                    ...saved.filter((item) => item.id !== assessment.id),
+                                  ],
+                                });
+                              })
+                            }
+                          >
+                            Assess Windows patches
+                          </Button>
+                          <Button
+                            disabled={
+                              busy ||
+                              (run.job.status === "failed" &&
+                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                !(detail?.id === run.id && detail.inventory))
+                            }
+                            onClick={() =>
+                              action(async () => {
+                                const saved = await auditRequest<HostAssessment[]>(
+                                  token,
+                                  `/${run.id}/assessments`,
+                                );
+                                setAssessmentView({ target: run.target, assessments: saved });
+                              })
+                            }
+                          >
+                            View assessments
+                          </Button>
+                        </>
+                      )}
+                  </Stack>
                 )}
-            </Stack>
-          )}
-        </Paper>
-      ))}
+              </Paper>
+            ))}
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
+      <HostStatusDialog
+        host={overviewDetail}
+        busy={busy}
+        close={() => setOverviewDetail(null)}
+        inspect={(host) => {
+          if (host.inventory)
+            void action(async () =>
+              setDetail(await auditRequest<HostAudit>(token, `/${host.inventory!.id}`)),
+            );
+        }}
+        assessWindows={(host) => {
+          if (host.inventory) void assessWindows(host.inventory.id);
+        }}
+        assessSoftware={(host) => {
+          if (host.inventory) void assessSoftware(host.inventory.id);
+        }}
+        openWindows={(host) => {
+          if (host.inventory)
+            void action(async () =>
+              setAssessmentView({
+                target: host.target,
+                assessments: await auditRequest<HostAssessment[]>(
+                  token,
+                  `/${host.inventory!.id}/assessments`,
+                ),
+              }),
+            );
+        }}
+        openSoftware={(host) => {
+          if (host.inventory)
+            void action(async () =>
+              setSoftwareView({
+                target: host.target,
+                assessments: await auditRequest<SoftwareAssessment[]>(
+                  token,
+                  `/${host.inventory!.id}/software-assessments`,
+                ),
+              }),
+            );
+        }}
+        collect={(host) => {
+          setTarget(host.target);
+          setCredentialId(String(host.latest_run.credential_id));
+          setPort(String(host.latest_run.port));
+          setFingerprint(host.latest_run.ssh_fingerprint ?? "");
+          setWinrmTransport(host.latest_run.winrm_transport);
+          setOverviewDetail(null);
+          setCollectOpen(true);
+        }}
+      />
       <Dialog
         open={createOpen}
         onClose={() => {
@@ -736,15 +949,26 @@ function AuditPanel({
   );
 }
 
-export function HostAudits() {
+export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter }) {
+  const [query, setQuery] = useSearchParams();
+  const queryValue = query.get("customer_id") ?? "";
+  const queryCustomer = /^[1-9][0-9]{0,9}$/.test(queryValue) ? queryValue : "";
   const { data: customers = [] } = useCustomers();
-  const [customer, setCustomer] = useState("");
+  const [customer, setCustomer] = useState(queryCustomer);
   const [input, setInput] = useState("");
   const [session, setSession] = useState<{ token: string; customerId: number } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const secure = canUseAuditApi();
   const sessionGeneration = useRef(0);
+  useEffect(() => {
+    if (queryCustomer && queryCustomer !== customer) {
+      sessionGeneration.current++;
+      setSession(null);
+      setInput("");
+      setCustomer(queryCustomer);
+    }
+  }, [queryCustomer, customer]);
   useEffect(() => {
     const clear = () => {
       sessionGeneration.current++;
@@ -780,9 +1004,9 @@ export function HostAudits() {
   return (
     <Stack spacing={3}>
       <Box>
-        <Typography variant="h4">Authenticated inventory</Typography>
+        <Typography variant="h4">{platformNames[platform]}</Typography>
         <Typography color="text.secondary">
-          Read operating-system and software evidence through SSH or encrypted WinRM connections.
+          Updatebedarf, geprüfte OS-Baseline und offene Abdeckung auf einen Blick.
         </Typography>
       </Box>
       {session ? (
@@ -794,6 +1018,7 @@ export function HostAudits() {
           <AuditPanel
             token={session.token}
             customerId={session.customerId}
+            platform={platform}
             lock={() => {
               setSession(null);
               setInput("");
@@ -821,7 +1046,10 @@ export function HostAudits() {
               select
               label="Customer"
               value={customer}
-              onChange={(e) => setCustomer(e.target.value)}
+              onChange={(e) => {
+                setCustomer(e.target.value);
+                setQuery(e.target.value ? { customer_id: e.target.value } : {}, { replace: true });
+              }}
               disabled={!secure || busy}
             >
               {customers.map((c) => (

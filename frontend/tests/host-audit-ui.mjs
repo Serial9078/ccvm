@@ -13,8 +13,9 @@ const browser = await chromium.launch({
   args: ["--no-sandbox"],
   executablePath: process.env.CCVM_TEST_CHROMIUM || undefined,
 });
+let page;
 try {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
@@ -23,6 +24,8 @@ try {
   let rejectSave = false;
   let modes = [];
   const submissions = [];
+  const apiCalls = [];
+  let overviewExtras = [];
   const now = new Date().toISOString();
   let catalog = {
     id: 1,
@@ -66,6 +69,8 @@ try {
     ],
     expired: false,
   };
+  const synchronizedWindowsCatalog = structuredClone(catalog);
+  const synchronizedSoftwareCatalog = structuredClone(softwareCatalog);
   let softwareStatus = "version_matches_found";
   const softwareAssessments = [];
   let softwareRequests = 0;
@@ -120,6 +125,8 @@ try {
               catalog_scope: "Recent Edge advisories",
               matches_total: matched ? 1 : 0,
               matches_truncated: false,
+              reference_fix: matched ? "150.0.1000.2" : null,
+              reference_fix_complete: true,
               matches: matched
                 ? [
                     {
@@ -278,6 +285,102 @@ try {
     },
     hotfixes: { status: "not_applicable", source: "none", items: [] },
   };
+  function inventoryEvidence(run) {
+    const windows =
+      credentials.find((credential) => credential.id === run.credential_id)?.kind === "winrm";
+    return windows
+      ? {
+          schema_version: 1,
+          os: {
+            family: "Windows",
+            name: "Fixture Windows Server 2022",
+            version: "10.0.20348",
+            kernel: "20348.1",
+            architecture: "AMD64",
+            hostname: "lab-windows",
+            product_type: "3",
+          },
+          packages: { ...evidence.packages, source: "registry-uninstall" },
+          hotfixes: {
+            status: "complete",
+            source: "Get-HotFix",
+            items: [{ id: "KB0000001", description: "Fixture update" }],
+          },
+        }
+      : { schema_version: 1, ...evidence };
+  }
+  function overviewAssessment(item) {
+    if (!item) return null;
+    const copy = structuredClone(item);
+    if (copy.result.coverage?.vendor_catalog)
+      copy.result.coverage.vendor_catalog = copy.result.coverage.vendor_catalog.map((scope) => ({
+        ...scope,
+        unavailable_count: scope.unavailable_cves.length,
+      }));
+    return { ...copy, current_catalog: true, evidence_matches: true, engine_current: true };
+  }
+  function overviewResponse() {
+    const selected = runs.find((run) => run.mode === "inventory" && !run.failedNoEvidence);
+    const hosts = [...overviewExtras];
+    if (selected) {
+      const collected = inventoryEvidence(selected);
+      const latest = runs[0];
+      hosts.unshift({
+        asset_id: 1,
+        target: selected.target,
+        platform: collected.os.family === "Windows" ? "windows_server" : "linux",
+        latest_run: {
+          id: latest.id,
+          credential_id: latest.credential_id,
+          port: latest.port,
+          winrm_transport: latest.winrm_transport ?? "https",
+          ssh_fingerprint: latest.ssh_fingerprint ?? null,
+          mode: latest.mode,
+          status: latest.job.status,
+          message: latest.job.message,
+          created_at: latest.created_at,
+          completed_at: latest.completed_at,
+        },
+        inventory: {
+          id: selected.id,
+          completed_at: selected.completed_at,
+          os: collected.os,
+          package_count: collected.packages.items.length,
+          package_status: collected.packages.status,
+          hotfix_count: collected.hotfixes.items.length,
+          hotfix_status: collected.hotfixes.status,
+        },
+        windows_assessment: overviewAssessment(
+          assessments.find((item) => item.host_audit_id === selected.id),
+        ),
+        software_assessment: overviewAssessment(
+          softwareAssessments.find((item) => item.host_audit_id === selected.id),
+        ),
+        issues: latest.failedNoEvidence ? ["latest_collection_failed"] : [],
+      });
+    }
+    return {
+      customer_id: 1,
+      generated_at: now,
+      hosts,
+      issues: [],
+      catalogs: {
+        windows: catalog
+          ? { id: catalog.id, retrieved_at: catalog.retrieved_at, expired: catalog.expired }
+          : null,
+        software: softwareCatalog
+          ? {
+              id: softwareCatalog.id,
+              retrieved_at: softwareCatalog.retrieved_at,
+              expired: softwareCatalog.expired,
+            }
+          : null,
+      },
+      limit: 200,
+      hosts_total: hosts.length,
+      hosts_truncated: false,
+    };
+  }
   await page.route(`${origin}/**`, async (route) => {
     const request = route.request();
     assert.equal(request.url().includes(token) || request.url().includes(password), false);
@@ -286,9 +389,43 @@ try {
     const respond = (json, status = 200) =>
       route.fulfill({ status, json, headers: { "Cache-Control": "no-store" } });
     if (path.startsWith("/api/v1/")) {
+      apiCalls.push({ path, method: request.method(), query: url.search });
+      if (
+        [
+          "/api/v1/domains",
+          "/api/v1/urls",
+          "/api/v1/url-details",
+          "/api/v1/url-security",
+          "/api/v1/url-screenshots",
+          "/api/v1/findings",
+          "/api/v1/network-scans",
+        ].includes(path)
+      ) {
+        assert.equal(request.method(), "GET", "Category navigation must never submit a scan");
+        assert.equal(
+          request.headers()["authorization"],
+          undefined,
+          "Operator token must not leak into public category clients",
+        );
+        return respond([]);
+      }
+      if (path === "/api/v1/network-scans/capabilities")
+        return respond({
+          enabled: true,
+          allowed_cidrs: ["192.0.2.0/24"],
+          max_addresses: 256,
+          tcp: true,
+          udp: false,
+          credentialed: false,
+        });
       if (path === "/api/v1/customers")
         return respond([{ id: 1, name: "Lab customer", uuid: "synthetic-customer" }]);
       assert.equal(request.headers()["authorization"], `Bearer ${token}`);
+      if (path === "/api/v1/host-audits/overview") {
+        assert.equal(request.method(), "GET");
+        assert.equal(url.searchParams.get("customer_id"), "1");
+        return respond(overviewResponse());
+      }
       if (path === "/api/v1/host-audits/patch-catalog") {
         assert.equal(request.method(), "GET");
         return respond(catalog);
@@ -310,9 +447,10 @@ try {
       if (/\/api\/v1\/host-audits\/\d+\/software-assessments$/.test(path)) {
         assert.equal(request.method(), "GET");
         return respond(
-          softwareAssessments.filter(
-            (item) => item.host_audit_id === Number(path.split("/").at(-2)),
-          ),
+          [
+            ...softwareAssessments,
+            ...overviewExtras.map((host) => host.software_assessment).filter(Boolean),
+          ].filter((item) => item.host_audit_id === Number(path.split("/").at(-2))),
         );
       }
       if (/\/api\/v1\/host-audits\/\d+\/assess$/.test(path)) {
@@ -332,7 +470,10 @@ try {
       if (/\/api\/v1\/host-audits\/\d+\/assessments$/.test(path)) {
         assert.equal(request.method(), "GET");
         return respond(
-          assessments.filter((item) => item.host_audit_id === Number(path.split("/").at(-2))),
+          [
+            ...assessments,
+            ...overviewExtras.map((host) => host.windows_assessment).filter(Boolean),
+          ].filter((item) => item.host_audit_id === Number(path.split("/").at(-2))),
         );
       }
       if (path === "/api/v1/host-audits/credentials" && request.method() === "POST") {
@@ -386,8 +527,9 @@ try {
               : 22),
           ...(credential.kind === "winrm" ? { winrm_transport: payload.winrm_transport } : {}),
           mode: payload.mode,
-          created_at: "2026-11-03T12:00:00Z",
-          completed_at: "2026-11-03T12:00:01Z",
+          ssh_fingerprint: payload.ssh_fingerprint ?? null,
+          created_at: now,
+          completed_at: now,
           cancel_requested: false,
           job: {
             id: runs.length + 1,
@@ -402,36 +544,23 @@ try {
       if (path === "/api/v1/host-audits") return respond(runs);
       if (/\/api\/v1\/host-audits\/\d+$/.test(path)) {
         const run = runs.find((candidate) => candidate.id === Number(path.split("/").at(-1)));
-        const windows =
-          credentials.find((credential) => credential.id === run.credential_id)?.kind === "winrm";
-        return respond({
-          ...run,
-          inventory: windows
-            ? {
-                os: {
-                  family: "Windows",
-                  name: "Fixture Windows",
-                  version: "10.0",
-                  kernel: "20348.1",
-                  architecture: "AMD64",
-                  hostname: "lab-windows",
-                },
-                packages: { ...evidence.packages, source: "Uninstall registry" },
-                hotfixes: {
-                  status: "complete",
-                  source: "Get-HotFix",
-                  items: [{ id: "KB0000001", description: "Fixture update" }],
-                },
-              }
-            : evidence,
-        });
+        return respond({ ...run, inventory: run.failedNoEvidence ? null : inventoryEvidence(run) });
       }
       throw new Error(`Unexpected fixture endpoint ${path}`);
     }
-    const file =
-      path === "/host-audits" || path === "/"
-        ? resolve(root, "index.html")
-        : resolve(root, path.replace(/^\//, ""));
+    const file = [
+      "/host-audits",
+      "/windows-servers",
+      "/windows-clients",
+      "/linux",
+      "/vmware",
+      "/domains",
+      "/urls",
+      "/networks",
+      "/",
+    ].includes(path)
+      ? resolve(root, "index.html")
+      : resolve(root, path.replace(/^\//, ""));
     assert.ok(file.startsWith(root + "/"));
     const contentType =
       {
@@ -443,12 +572,32 @@ try {
       }[extname(file)] || "application/octet-stream";
     return route.fulfill({ body: await readFile(file), contentType });
   });
-  await page.goto(`${origin}/host-audits`);
-  await page.getByRole("heading", { name: "Authenticated inventory", exact: true }).waitFor();
+  async function openInventory() {
+    const form = page.getByTestId("inventory-form-dialog");
+    await form.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "Inventur starten", exact: true }).click();
+    await form.waitFor();
+  }
+  async function closeInventory() {
+    if (await page.getByTestId("inventory-form-dialog").isVisible())
+      await page.getByRole("button", { name: "Inventur schließen", exact: true }).click();
+    await page.getByTestId("inventory-form-dialog").waitFor({ state: "hidden" });
+  }
+  async function openHistory() {
+    const heading = page.getByRole("button", { name: /Verlauf und technische Details/ });
+    if ((await heading.getAttribute("aria-expanded")) !== "true") await heading.click();
+  }
+  async function openCatalogs() {
+    const heading = page.getByRole("button", { name: /Kataloge und Prüfumfang/ });
+    if ((await heading.getAttribute("aria-expanded")) !== "true") await heading.click();
+  }
+  await page.goto(`${origin}/host-audits?customer_id=1`);
+  await page.getByRole("heading", { name: "Host-Übersicht", exact: true }).waitFor();
   await page.getByRole("combobox", { name: "Customer", exact: true }).click();
   await page.getByRole("option", { name: "Lab customer" }).click();
   await page.getByLabel("Operator token", { exact: true }).fill(token);
   await page.getByRole("button", { name: "Unlock host audits" }).click();
+  await openInventory();
   await page.getByRole("button", { name: "Add credential" }).click();
   await page.getByLabel("Credential name", { exact: true }).fill("Linux lab");
   await page.getByLabel("Username", { exact: true }).fill("inventory");
@@ -461,7 +610,9 @@ try {
   rejectSave = false;
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Save credential", exact: true }).click();
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page
+    .getByRole("dialog", { name: "Add encrypted credential", exact: true })
+    .waitFor({ state: "hidden" });
   await page.getByLabel("Target IP", { exact: true }).fill("192.0.2.1");
   assert.equal(
     await page.getByRole("button", { name: "Collect inventory", exact: true }).isDisabled(),
@@ -471,7 +622,9 @@ try {
     .getByLabel("Approved SSH fingerprint", { exact: true })
     .fill("SHA256:" + "A".repeat(43));
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
+  await openHistory();
   await page.getByText("Fixture inventory finished", { exact: true }).waitFor();
+  await openInventory();
   await page.getByRole("button", { name: "Collect inventory", exact: true }).click();
   await page.getByRole("button", { name: "View evidence", exact: true }).first().waitFor();
   assert.equal(
@@ -497,12 +650,15 @@ try {
     fullPage: true,
     animations: "disabled",
   });
+  await openInventory();
   await page.getByRole("button", { name: "Revoke credential", exact: true }).click();
   await page.getByRole("button", { name: "Keep credential", exact: true }).click();
   assert.equal(credentials[0].enabled, true);
   await page.getByRole("button", { name: "Revoke credential", exact: true }).click();
   await page.getByRole("button", { name: "Revoke and erase secret", exact: true }).click();
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page
+    .getByRole("button", { name: "Revoke and erase secret", exact: true })
+    .waitFor({ state: "hidden" });
   assert.equal(credentials[0].enabled, false);
   assert.deepEqual(modes, ["connection", "inventory"]);
   await page.getByRole("button", { name: "Add credential", exact: true }).click();
@@ -513,7 +669,9 @@ try {
   await page.getByLabel("Allowed credential CIDRs", { exact: true }).fill("192.0.2.0/24");
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Save credential", exact: true }).click();
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page
+    .getByRole("dialog", { name: "Add encrypted credential", exact: true })
+    .waitFor({ state: "hidden" });
   const connection = page.getByRole("combobox", { name: "WinRM connection", exact: true });
   await connection.waitFor();
   assert.equal(await connection.innerText(), "HTTPS / NTLM · verified certificate");
@@ -523,9 +681,11 @@ try {
   await page.getByText("HTTPS / NTLM · certificate validation required", { exact: true }).waitFor();
   assert.equal(submissions.at(-1).winrm_transport, "https");
   assert.equal(Object.hasOwn(submissions.at(-1), "port"), false);
+  await openInventory();
   await page.getByLabel("Port (optional)", { exact: true }).fill("5990");
   await connection.click();
   await page.getByRole("option", { name: "HTTP / NTLM · encrypted messages", exact: true }).click();
+  await page.getByRole("listbox").waitFor({ state: "hidden" });
   assert.equal(await page.getByLabel("Port (optional)", { exact: true }).inputValue(), "");
   await page.getByText("Default 5985 · HTTP / NTLM", { exact: true }).waitFor();
   await page
@@ -537,6 +697,7 @@ try {
   await page.getByText("HTTP / NTLM · message encryption required", { exact: true }).waitFor();
   assert.equal(submissions.at(-1).winrm_transport, "http_ntlm");
   assert.equal(Object.hasOwn(submissions.at(-1), "port"), false);
+  await openInventory();
   await page.getByLabel("Port (optional)", { exact: true }).fill("5991");
   await page.getByRole("button", { name: "Collect inventory", exact: true }).click();
   await page.getByText("192.0.2.1:5991", { exact: true }).waitFor();
@@ -555,8 +716,12 @@ try {
       { exact: true },
     )
     .waitFor();
-  await page.getByRole("dialog").getByText("Fixture Windows", { exact: true }).waitFor();
+  await page
+    .getByRole("dialog")
+    .getByText("Fixture Windows Server 2022", { exact: true })
+    .waitFor();
   await page.getByRole("button", { name: "Close evidence", exact: true }).click();
+  await openCatalogs();
   const inventorySubmissions = submissions.length;
   const retainedRuns = JSON.stringify(runs);
   await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
@@ -724,6 +889,7 @@ try {
   assert.equal(submissions.length, inventorySubmissions);
   assert.equal(JSON.stringify(runs), retainedRuns);
   await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
+  await openInventory();
   await connection.click();
   await page
     .getByRole("option", { name: "HTTPS / NTLM · verified certificate", exact: true })
@@ -738,6 +904,288 @@ try {
     0,
   );
   await page.getByText("Default 5986 · HTTPS / NTLM", { exact: true }).waitFor();
+  await closeInventory();
+  // The default surface shows patch decisions; historical runs, catalogs and
+  // collection forms remain available without displacing the current overview.
+  catalog = structuredClone(synchronizedWindowsCatalog);
+  softwareCatalog = structuredClone(synchronizedSoftwareCatalog);
+  const freshUntil = new Date(Date.now() + 86400000).toISOString();
+  function sampleHost(
+    id,
+    target,
+    platform,
+    patchStatus,
+    softwareState = "no_matches_in_checked_ranges",
+  ) {
+    const os =
+      platform === "linux"
+        ? {
+            family: "Linux",
+            name: "Fixture Linux",
+            hostname: `fixture-${id}`,
+            version: "12",
+            kernel: "6.1",
+          }
+        : {
+            family: "Windows",
+            name:
+              platform === "windows_client" ? "Fixture Windows 11" : "Fixture Windows Server 2022",
+            hostname: `fixture-${id}`,
+            version: "10.0.20348",
+            kernel: "20348.9000",
+            product_type: platform === "windows_client" ? "1" : "3",
+          };
+    const windows = structuredClone(assessments.find((item) => item.status === "build_gap"));
+    Object.assign(windows, {
+      id: 1000 + id,
+      host_audit_id: id,
+      status: patchStatus,
+      expired: false,
+      current_catalog: true,
+      evidence_matches: true,
+      engine_current: true,
+    });
+    Object.assign(windows.result, {
+      status: patchStatus,
+      valid_until: freshUntil,
+      installed_build: patchStatus === "build_gap" ? "10.0.20348.1" : "10.0.20348.9000",
+    });
+    const software = structuredClone(
+      softwareAssessments.find((item) => item.status === "version_matches_found"),
+    );
+    Object.assign(software, {
+      id: 2000 + id,
+      host_audit_id: id,
+      status: softwareState,
+      expired: false,
+      current_catalog: true,
+      evidence_matches: true,
+      engine_current: true,
+    });
+    Object.assign(software.result, { status: softwareState, valid_until: freshUntil });
+    software.result.summary = {
+      ...software.result.summary,
+      inventory_entries: 1,
+      assessed_entries: 1,
+      unassessed_entries: 0,
+      matched_product_versions: softwareState === "version_matches_found" ? 1 : 0,
+      cve_matches: softwareState === "version_matches_found" ? 1 : 0,
+    };
+    if (softwareState !== "version_matches_found")
+      software.result.products.forEach((product) => {
+        product.matches = [];
+        product.matches_total = 0;
+        product.status = "no_match_in_catalog";
+      });
+    software.result.coverage.vendor_catalog = software.result.coverage.vendor_catalog.map(
+      (scope) => ({ ...scope, unavailable_count: scope.unavailable_cves.length }),
+    );
+    return {
+      asset_id: id,
+      target,
+      platform,
+      latest_run: {
+        id,
+        credential_id: 2,
+        port: 5985,
+        winrm_transport: "http_ntlm",
+        ssh_fingerprint: null,
+        mode: "inventory",
+        status: "finished",
+        message: "Fixture collection finished",
+        created_at: now,
+        completed_at: now,
+      },
+      inventory: {
+        id,
+        completed_at: now,
+        os,
+        package_count: 1,
+        package_status: "complete",
+        hotfix_count: 1,
+        hotfix_status: "complete",
+      },
+      windows_assessment: windows,
+      software_assessment: software,
+      issues: [],
+    };
+  }
+  const needsPatch = sampleHost(
+    101,
+    "192.0.2.20",
+    "windows_server",
+    "build_gap",
+    "version_matches_found",
+  );
+  needsPatch.windows_assessment.result.cve_references_total = 977;
+  const baselineHost = sampleHost(102, "192.0.2.21", "windows_server", "meets_catalog_baseline");
+  const staleHost = sampleHost(103, "192.0.2.22", "windows_server", "meets_catalog_baseline");
+  staleHost.windows_assessment.expired = true;
+  staleHost.windows_assessment.result.valid_until = new Date(Date.now() - 86400000).toISOString();
+  staleHost.issues = ["windows_assessment_stale"];
+  const failedHost = sampleHost(104, "192.0.2.23", "windows_server", "meets_catalog_baseline");
+  failedHost.latest_run = {
+    ...failedHost.latest_run,
+    id: 204,
+    status: "failed",
+    message: "The fixed inventory command failed",
+  };
+  failedHost.issues = ["latest_collection_failed"];
+  const unknownHost = sampleHost(105, "192.0.2.24", "windows_server", "meets_catalog_baseline");
+  unknownHost.windows_assessment = null;
+  unknownHost.software_assessment = null;
+  unknownHost.issues = ["windows_assessment_missing", "software_assessment_missing"];
+  const clientHost = sampleHost(106, "192.0.2.30", "windows_client", "unsupported");
+  clientHost.windows_assessment.result.valid_until = null;
+  const linuxHost = sampleHost(107, "192.0.2.40", "linux", "unsupported");
+  linuxHost.windows_assessment = null;
+  linuxHost.software_assessment = null;
+  const unclassified = sampleHost(108, "192.0.2.50", "unclassified", "unsupported");
+  unclassified.inventory = null;
+  unclassified.windows_assessment = null;
+  unclassified.software_assessment = null;
+  unclassified.latest_run.status = "failed";
+  unclassified.issues = ["latest_collection_failed"];
+  runs.unshift({
+    ...structuredClone(runs[0]),
+    id: 6,
+    failedNoEvidence: true,
+    mode: "inventory",
+    job: {
+      id: 6,
+      status: "failed",
+      progress: 100,
+      message: "Fixture failed collector: no evidence",
+    },
+  });
+  overviewExtras = [
+    needsPatch,
+    baselineHost,
+    staleHost,
+    failedHost,
+    unknownHost,
+    clientHost,
+    linuxHost,
+    unclassified,
+  ];
+  await page.getByRole("button", { name: "Status aktualisieren", exact: true }).click();
+  const overview = page.getByTestId("host-overview");
+  const hostRow = (ip) => overview.getByRole("row").filter({ hasText: ip });
+  await hostRow("192.0.2.20").waitFor();
+  await openHistory();
+  const failedRun = page.getByTestId("run-card-6");
+  await failedRun.getByText("Fixture failed collector: no evidence", { exact: true }).waitFor();
+  for (const name of ["Assess Windows patches", "Assess installed software"]) {
+    const button = failedRun.getByRole("button", { name, exact: true });
+    assert.ok((await button.count()) === 0 || (await button.isDisabled()));
+  }
+  // Fold technical history again: decision cards and current host status are the default surface.
+  await page.getByRole("button", { name: /Verlauf und technische Details/ }).click();
+  await page.getByRole("button", { name: /Kataloge und Prüfumfang/ }).click();
+
+  await hostRow("192.0.2.20").getByText("Windows-Update nötig", { exact: true }).waitFor();
+  await hostRow("192.0.2.20").getByText("KB9999999", { exact: true }).waitFor();
+  await hostRow("192.0.2.20")
+    .getByText("Microsoft Edge 150.0.1000.1 → 150.0.1000.2", { exact: true })
+    .waitFor();
+  assert.equal(
+    (await overview.innerText()).includes("977"),
+    false,
+    "Related advisory references must not become patch or vulnerability counters",
+  );
+  await hostRow("192.0.2.21").getByText("OS-Baseline erfüllt", { exact: true }).waitFor();
+  await hostRow("192.0.2.21")
+    .getByText("Kein Treffer in geprüften Regeln", { exact: true })
+    .waitFor();
+  assert.equal(await hostRow("192.0.2.22").locator(".MuiChip-colorSuccess").count(), 0);
+  assert.equal(await hostRow("192.0.2.23").locator(".MuiChip-colorSuccess").count(), 0);
+  await hostRow("192.0.2.23").getByText("Neuester Lauf fehlgeschlagen", { exact: true }).waitFor();
+  assert.equal(await hostRow("192.0.2.24").locator(".MuiChip-colorSuccess").count(), 0);
+  assert.equal(await hostRow("192.0.2.50").locator(".MuiChip-colorSuccess").count(), 0);
+  await hostRow("192.0.2.20").getByRole("button", { name: "Details", exact: true }).click();
+  const statusDialog = page.getByRole("dialog", { name: "Host-Status · 192.0.2.20", exact: true });
+  await statusDialog.waitFor();
+  await statusDialog.getByText("Microsoft Edge", { exact: true }).waitFor();
+  await statusDialog
+    .getByText("Microsoft Edge 150.0.1000.1 → 150.0.1000.2", { exact: true })
+    .waitFor();
+  // Closing a status dialog only reads saved evidence. No scan or login starts.
+  await statusDialog.getByRole("button", { name: /schließen/i }).click();
+  await statusDialog.waitFor({ state: "hidden" });
+  const requestsBeforeFiltering = apiCalls.filter((request) => request.method !== "GET").length;
+  await overview.getByLabel("Host suchen", { exact: true }).fill("192.0.2.21");
+  await hostRow("192.0.2.21").waitFor();
+  assert.equal(await overview.getByRole("row").count(), 2);
+  await overview.getByLabel("Host suchen", { exact: true }).fill("");
+  await overview.getByRole("combobox", { name: "Statusfilter", exact: true }).click();
+  await page.getByRole("option", { name: "Ungeprüft / Fehler", exact: true }).click();
+  assert.equal(
+    await hostRow("192.0.2.20").count(),
+    0,
+    "A fully evaluated build gap is actionable, not an unknown result",
+  );
+  await hostRow("192.0.2.23").waitFor();
+  await overview.getByRole("combobox", { name: "Statusfilter", exact: true }).click();
+  await page.getByRole("option", { name: "Alle Status", exact: true }).click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({
+    path: "test-artifacts/host-patch-overview.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  for (const [label, path, shown, hidden] of [
+    ["Windows Server", "/windows-servers", "192.0.2.20", "192.0.2.30"],
+    ["Windows Clients", "/windows-clients", "192.0.2.30", "192.0.2.20"],
+    ["Linux", "/linux", "192.0.2.40", "192.0.2.20"],
+    ["VMware", "/vmware", null, "192.0.2.20"],
+  ]) {
+    await page.getByRole("link", { name: label, exact: true }).click();
+    await page.getByRole("heading", { name: label, exact: true }).waitFor();
+    assert.equal(new URL(page.url()).pathname, path);
+    assert.equal(new URL(page.url()).searchParams.get("customer_id"), "1");
+    assert.equal(
+      await page.getByRole("button", { name: "Unlock host audits", exact: true }).count(),
+      0,
+      "Platform navigation retains the volatile in-memory operator session",
+    );
+    if (shown)
+      await page.getByTestId("host-overview").getByRole("row").filter({ hasText: shown }).waitFor();
+    assert.equal(
+      await page.getByTestId("host-overview").getByRole("row").filter({ hasText: hidden }).count(),
+      0,
+    );
+  }
+  await page
+    .getByText(
+      "Für VMware ist noch keine authentifizierte Inventur oder Patchbewertung angebunden.",
+      { exact: false },
+    )
+    .waitFor();
+  assert.equal(
+    apiCalls.filter((request) => request.method !== "GET").length,
+    requestsBeforeFiltering,
+    "Search, filter and platform navigation must never submit scans or authenticate to targets",
+  );
+  for (const [label, path] of [
+    ["Domains", "/domains"],
+    ["URLs", "/urls"],
+    ["Netzwerk", "/networks"],
+  ]) {
+    await page.getByRole("link", { name: label, exact: true }).click();
+    await page.waitForURL((url) => url.pathname === path);
+    assert.equal(new URL(page.url()).searchParams.get("customer_id"), "1");
+  }
+  assert.equal(
+    apiCalls.filter((request) => request.method !== "GET").length,
+    requestsBeforeFiltering,
+  );
+  await page.getByRole("link", { name: "Host-Inventur", exact: true }).click();
+  await page.getByRole("heading", { name: "Host-Übersicht", exact: true }).waitFor();
+  // Leaving private inventory clears its in-memory session; no token is kept
+  // in a public route, browser storage or customer query string.
+  await page.getByLabel("Operator token", { exact: true }).fill(token);
+  await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
+  await page.getByText("Operator access unlocked", { exact: true }).waitFor();
   assert.deepEqual(modes, ["connection", "inventory", "connection", "connection", "inventory"]);
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
   assert.equal((await page.content()).includes(token), false);
@@ -760,10 +1208,67 @@ try {
   await page.reload();
   await page.getByRole("button", { name: "Unlock host audits", exact: true }).waitFor();
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Navigation öffnen", exact: true }).click();
+  const mobileNavigation = page.getByRole("navigation", { name: "Hauptnavigation", exact: true });
+  for (const label of [
+    "Domains",
+    "URLs",
+    "Netzwerk",
+    "Windows Server",
+    "Windows Clients",
+    "Linux",
+    "VMware",
+  ]) {
+    assert.equal(await mobileNavigation.getByRole("link", { name: label, exact: true }).count(), 1);
+  }
+  await mobileNavigation.getByRole("link", { name: "Windows Server", exact: true }).click();
+  await page.getByRole("heading", { name: "Windows Server", exact: true }).waitFor();
+  await mobileNavigation.waitFor({ state: "hidden" });
+  assert.equal(new URL(page.url()).searchParams.get("customer_id"), "1");
+  assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
+  await page.getByLabel("Operator token", { exact: true }).fill(token);
+  await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
+  await page
+    .getByTestId("host-overview")
+    .getByRole("row")
+    .filter({ hasText: "192.0.2.20" })
+    .waitFor();
+  assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  assert.equal((await page.content()).includes(token), false);
+  assert.ok(
+    await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
+    "Mobile layout must not overflow the page",
+  );
+  await page.screenshot({
+    path: "test-artifacts/host-platform-mobile.png",
+    fullPage: true,
+    animations: "disabled",
+  });
   assert.deepEqual(errors, []);
   console.log(
-    "Host audit UI passed: volatile secrets, encrypted inventory, OS baselines and scoped software ranges from saved evidence, unassessed software, missing catalogs, expired histories and lock",
+    "Host audit UI passed: patch priorities and explicit fixes, scoped baselines, failed/stale/unknown coverage, separate platform routes, customer context, responsive navigation, volatile secrets, encrypted inventory and retained histories",
   );
+} catch (error) {
+  await mkdir("test-artifacts", { recursive: true });
+  await page?.screenshot({
+    path: "test-artifacts/host-audit-failure.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  console.error(
+    await page?.locator(".MuiMenu-root").evaluateAll((elements) =>
+      elements.map((element) => ({
+        text: element.textContent,
+        rect: element.getBoundingClientRect().toJSON(),
+        papers: [...element.querySelectorAll(".MuiPaper-root")].map((paper) => ({
+          style: paper.getAttribute("style"),
+          rect: paper.getBoundingClientRect().toJSON(),
+        })),
+      })),
+    ),
+  );
+  throw error;
 } finally {
   await browser.close();
 }

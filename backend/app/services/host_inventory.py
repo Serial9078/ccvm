@@ -18,6 +18,11 @@ ERRORS = {
     "tls_verification_failed": "WinRM TLS certificate validation failed",
     "message_encryption_required": "WinRM requires encrypted NTLM messages and responses",
     "invalid_private_key": "SSH private key or passphrase could not be read",
+    "collector_command_limit": "The fixed Windows collector exceeds its safe command-line budget",
+    "remote_command_too_long": "The Windows remote shell rejected the collector command length",
+    "remote_powershell_parse_failed": "PowerShell could not parse the fixed Windows collector",
+    "remote_permission_denied": "The Windows collector was denied permission to run",
+    "remote_command_unavailable": "The Windows collector requires an available PowerShell command",
     "remote_command_failed": (
         "The fixed inventory command failed; verify Python 3 / PowerShell and account permissions"
     ),
