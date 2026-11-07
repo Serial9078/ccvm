@@ -25,6 +25,7 @@ CLIENTS = "192.0.2.0/24,198.51.100.0/24"
 TOKEN_NAMES = ("CCVM_AUDIT_OPERATOR_TOKEN", "CCVM_AUDIT_VAULT_KEY")
 PRE_TRANSPORT_RELEASE = "cb3b1486b3077fe1fac96925a7971235c07de7f0"
 HTTP_INVENTORY_RELEASE = "2d4c31446303c3851b9ebacb55c143596faef0dd"
+WINDOWS_PATCH_RELEASE = "f3c546e5200b9d7379e0981abef132ecda1e2b6a"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -459,7 +460,9 @@ with SessionLocal() as db:
     )
     ids = {name: inspect(name)["Id"] for name in names}
     run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
-    script = (REPOSITORY / "scripts/update-windows-patch-assessment.py").read_bytes()
+    script = run(
+        "git", "show", f"{target}:scripts/update-windows-patch-assessment.py", cwd=REPOSITORY
+    ).stdout
 
     def update(*flags):
         result = run(
@@ -604,15 +607,224 @@ print('Stored inventory and jobs/findings unchanged by operator-only assessment'
     )
 
 
+def verify_software_update(source, target, operation):
+    """Migrate a retained deployment and exercise assessment over actual TLS."""
+    seed = """import hashlib,json
+from datetime import UTC,datetime
+from app.database.session import SessionLocal
+from app.models.host_audit import AuditCredential
+from app.models.job import Job
+from app.models.finding import Finding
+from app.api.v1.host_audits import start_audit
+from app.schemas.host_audit import HostAuditCreate
+with SessionLocal() as db:
+    credential=db.query(AuditCredential).one()
+    audit=start_audit(HostAuditCreate(customer_id=credential.customer_id,
+        credential_id=credential.id,target='192.0.2.11',winrm_transport='http_ntlm'),db)
+    audit.inventory={'schema_version':1,'os':{
+        'family':'Windows','name':'Microsoft Windows Server 2022 Standard',
+        'version':'10.0.20348','kernel':'20348.1000','architecture':'64-bit',
+        'hostname':'SYNTHETIC-WINDOWS','product_type':'3','sku':'7',
+        'installation_type':'Server','edition_id':'ServerStandard',
+        'native_architecture':'AMD64','display_version':'21H2'},
+        'packages':{'status':'complete','source':'registry-uninstall','items':[
+            {'name':'Microsoft Edge','version':'150.0.1.2','architecture':'unknown',
+             'publisher':'Microsoft Corporation','registry_key':'Microsoft Edge',
+             'registry_view':'wow6432','install_scope':'machine'},
+            {'name':'Synthetic application','version':'1.0','architecture':'unknown',
+             'publisher':'Synthetic publisher','registry_key':'Synthetic',
+             'registry_view':'native','install_scope':'machine'}]},
+        'hotfixes':{'status':'complete','source':'Get-HotFix','items':[]}}
+    audit.completed_at=datetime.now(UTC);audit.job.status='finished';audit.job.progress=100
+    audit.job.message='Previously collected synthetic Windows inventory';db.commit()
+    print(json.dumps({'audit':audit.id,'jobs':db.query(Job).count(),
+        'findings':db.query(Finding).count(),'hash':audit.scope_sha256,
+        'inventory':hashlib.sha256(json.dumps(audit.inventory,sort_keys=True).encode()).hexdigest()}))
+"""
+    saved = json.loads(seed_inventory(seed))
+    paths = [
+        source / "docker-compose.yml",
+        source / "docker-compose.authenticated.yml",
+        source / "frontend/default.conf",
+        source / ".git/ccvm-authenticated-deployment.json",
+        source / ".git/ccvm-host-inventory-update.json",
+        source / ".git/ccvm-windows-patch-deployment.json",
+        *(
+            Path(operation["private"]) / name
+            for name in ("vault.env", "operator.env", "gateway.conf")
+        ),
+    ]
+    retained = {path: path.read_bytes() for path in paths}
+    names = (
+        "ccvm-backend",
+        "ccvm-worker",
+        "ccvm-frontend",
+        "ccvm-postgres",
+        "ccvm-audit-gateway",
+        "haproxy-edge",
+    )
+    ids = {name: inspect(name)["Id"] for name in names}
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = run(
+        "git", "show", f"{target}:scripts/update-software-assessment.py", cwd=REPOSITORY
+    ).stdout
+
+    def update(*flags):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            data=script,
+            cwd=source,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if result.returncode:
+            marker = source / ".git/ccvm-software-assessment-deployment.json"
+            if marker.is_file():
+                log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+                if log.is_file():
+                    print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert result.returncode == 0
+
+    update()
+    assert not (source / ".git/ccvm-software-assessment-deployment.json").exists()
+    update("--apply")
+    assert ids == {name: inspect(name)["Id"] for name in names}
+    assert retained == {path: path.read_bytes() for path in paths}
+    # Import a deliberately synthetic catalog directly in the disposable DB.
+    # Live Microsoft downloads have separate parser/network checks and are not
+    # a prerequisite for a reproducible deployment regression.
+    # Embed only the pure synthetic snapshot builder, without importing pytest
+    # or adding development dependencies to the retained application image.
+    import ast
+
+    module = ast.parse((BACKEND / "integration/host_software_postgres.py").read_text())
+    builder = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "catalog_fixture"
+    )
+    catalog = (
+        "from datetime import UTC,datetime\n"
+        + ast.unparse(builder)
+        + "\nfrom app.database.session import SessionLocal\n"
+        "from app.services.software_catalog_sync import store_catalog\n"
+        "with SessionLocal() as db:\n"
+        "    data=catalog_fixture();first=store_catalog(db,data)\n"
+        "    assert store_catalog(db,data).id==first.id\n"
+        "print('Synthetic immutable software catalog imported idempotently')\n"
+    )
+    print(docker("exec", "ccvm-worker", "python", "-c", catalog), flush=True)
+    token = load_operator().read_env(Path(operation["private"]) / "operator.env")[
+        "CCVM_AUDIT_OPERATOR_TOKEN"
+    ]
+    client = """import http.client,json,socket,ssl,sys
+p=json.load(sys.stdin);context=ssl.create_default_context()
+def request(path,*,method='GET',body=None,token=True):
+    raw=socket.create_connection(('127.0.0.1',p['port']),timeout=10)
+    raw.sendall(b'PROXY TCP4 192.0.2.1 127.0.0.1 12345 '+str(p['port']).encode()+b'\\r\\n')
+    with context.wrap_socket(raw,server_hostname=p['hostname']) as tls:
+        data=json.dumps(body).encode() if body is not None else b''
+        headers=[f'{method} {path} HTTP/1.1',f"Host: {p['hostname']}",
+            'Content-Type: application/json',f'Content-Length: {len(data)}','Connection: close']
+        if token:headers.append('Authorization: Bearer '+p['token'])
+        tls.sendall(('\\r\\n'.join(headers)+'\\r\\n\\r\\n').encode()+data)
+        response=http.client.HTTPResponse(tls);response.begin()
+        assert response.getheader('Cache-Control')=='no-store'
+        return response.status,json.loads(response.read())
+base='/api/v1/host-audits';path=f"{base}/{p['audit']}/assess-software"
+assert request(path,method='POST',body={},token=False)[0]==401
+status,catalog=request(base+'/software-catalog');assert status==200 and catalog['entry_count']==1
+status,first=request(path,method='POST',body={})
+assert status==200 and first['status']=='version_matches_found'
+assert first['result']['summary']['inventory_entries']==2
+assert first['result']['summary']['unassessed_entries']==1
+assert first['result']['products'][0]['matches'][0]['cve']=='CVE-2026-0001'
+status,second=request(path,method='POST',body={});assert status==200 and second['id']==first['id']
+status,history=request(f"{base}/{p['audit']}/software-assessments")
+assert status==200 and len(history)==1 and history[0]['id']==first['id']
+print('Real TLS/operator software API: protected, exact ranges, immutable and idempotent')
+"""
+    print(
+        docker(
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            "container:haproxy-edge",
+            "--entrypoint",
+            "python",
+            operation["images"]["backend"],
+            "-I",
+            "-c",
+            client,
+            data=json.dumps(
+                {
+                    "port": operation["tls_port"],
+                    "hostname": operation["hostname"],
+                    "token": token,
+                    "audit": saved["audit"],
+                }
+            ).encode(),
+        ),
+        flush=True,
+    )
+    verify = """import hashlib,json,sys
+from app.database.session import SessionLocal
+from app.models.host_audit import HostAudit
+from app.models.host_assessment import HostAssessment
+from app.models.software_assessment import SoftwareAssessment
+from app.models.job import Job
+from app.models.finding import Finding
+p=json.load(sys.stdin)
+with SessionLocal() as db:
+    audit=db.get(HostAudit,p['audit'])
+    assert audit.scope_sha256==p['hash']
+    evidence=json.dumps(audit.inventory,sort_keys=True).encode()
+    assert hashlib.sha256(evidence).hexdigest()==p['inventory']
+    assert db.query(Job).count()==p['jobs'] and db.query(Finding).count()==p['findings']
+    assert db.query(HostAssessment).count()==1
+    assert db.query(SoftwareAssessment).count()==1
+print('Stored inventory and jobs/findings unchanged by operator-only assessment')
+"""
+    print(
+        docker(
+            "exec", "-i", "ccvm-worker", "python", "-c", verify, data=json.dumps(saved).encode()
+        ),
+        flush=True,
+    )
+    marker = source / ".git/ccvm-software-assessment-deployment.json"
+    record = json.loads(marker.read_text())
+    record["phase"] = "services"
+    load_operator().write_json(marker, record)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    update("--apply", "--resume")
+    assert ids == {name: inspect(name)["Id"] for name in names}
+    assert retained == {path: path.read_bytes() for path in paths}
+    print(
+        "VERIFIED: retained software update, private API, resume and history",
+        flush=True,
+    )
+
+
 def main():
     if sys.argv[1:] not in (
         [],
         ["--host-inventory-update"],
         ["--windows-patch-update"],
+        ["--software-assessment-update"],
     ):
         raise RuntimeError("Unknown disposable deployment fixture mode")
     update_mode = bool(sys.argv[1:])
-    patch_mode = sys.argv[1:] == ["--windows-patch-update"]
+    patch_mode = sys.argv[1:] in (["--windows-patch-update"], ["--software-assessment-update"])
+    software_mode = sys.argv[1:] == ["--software-assessment-update"]
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
@@ -818,8 +1030,10 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                 )
             if patch_mode:
                 verify_windows_patch_update(
-                    source, reviewed_target, json.loads(journal.read_text())
+                    source, WINDOWS_PATCH_RELEASE, json.loads(journal.read_text())
                 )
+            if software_mode:
+                verify_software_update(source, reviewed_target, json.loads(journal.read_text()))
         finally:
             with contextlib.suppress(Exception):
                 compose(

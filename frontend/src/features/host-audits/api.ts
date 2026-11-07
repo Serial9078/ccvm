@@ -120,6 +120,97 @@ export interface HostAssessment {
   expired: boolean;
 }
 
+export interface SoftwareCatalogCoverage {
+  product_key: string;
+  discovered: number;
+  parsed: number;
+  unavailable_cves: string[];
+  scope: string;
+}
+
+export interface SoftwareCatalog {
+  id: number;
+  source: string;
+  sha256: string;
+  retrieved_at: string;
+  created_at: string;
+  coverage_start: string;
+  coverage_end: string;
+  entry_count: number;
+  coverage: SoftwareCatalogCoverage[];
+  expired: boolean;
+}
+
+export interface SoftwareAssessmentResult {
+  schema_version: number;
+  engine_version: string;
+  status: string;
+  reason: string;
+  evaluated_at: string;
+  valid_until: string | null;
+  evidence_collected_at: string | null;
+  catalog_retrieved_at: string | null;
+  summary: {
+    inventory_entries: number;
+    identified_entries: number;
+    assessed_entries: number;
+    unassessed_entries: number;
+    product_versions: number;
+    matched_product_versions: number;
+    cve_matches: number;
+  };
+  coverage: {
+    scope: string;
+    status: string;
+    package_status: string;
+    catalog_start: string | null;
+    catalog_end: string | null;
+    vendor_catalog: SoftwareCatalogCoverage[];
+    exploitability: string;
+    per_user: string;
+  };
+  products: {
+    product_key: string;
+    name: string;
+    version: string;
+    publisher: string;
+    evidence_basis: string;
+    evidence_count: number;
+    status: string;
+    reason: string;
+    checked_cves: number;
+    matches: {
+      cve: string;
+      title: string;
+      severity: string;
+      source_product: string;
+      affected_ranges: { introduced: string; fixed: string }[];
+      source_urls: string[];
+      document_ids: string[];
+    }[];
+    matches_total: number;
+    matches_truncated: boolean;
+    catalog_scope: string;
+  }[];
+  unassessed: {
+    name: string;
+    version: string;
+    publisher: string;
+    reason: string;
+    evidence_count: number;
+  }[];
+  products_total: number;
+  products_truncated: boolean;
+  unassessed_total: number;
+  unassessed_truncated: boolean;
+  limitations: string[];
+  sources: { id: string; url: string; sha256: string }[];
+}
+
+export interface SoftwareAssessment extends Omit<HostAssessment, "result"> {
+  result: SoftwareAssessmentResult;
+}
+
 // Use transient component state, not query/mutation caches, localStorage or
 // sessionStorage. No token or credential appears in a URL or request log.
 export async function auditRequest<T>(

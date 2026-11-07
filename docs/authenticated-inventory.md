@@ -297,6 +297,63 @@ assessment requests, immutable evidence, unchanged jobs/findings, service resume
 and idempotency. Its catalog and host evidence are explicitly synthetic; source
 parsing and native Windows collection have separate checks.
 
+### Installed Windows software and CVE version ranges
+
+The software assessment is separate from the Windows Server build baseline.
+It evaluates the retained machine-wide uninstall registry evidence, including
+publisher, exact product name, version, registry key and registry view. Older
+inventories lacking this identity need to be collected again. Registry view does
+not establish executable architecture; the collector does not use Win32_Product.
+
+The first supported rules cover Microsoft Edge for Windows and a deliberately
+curated 7-Zip advisory (CVE-2025-55188). Edge-specific CVEs whose MSRC titles
+explicitly name Microsoft Edge are discovered in the selected monthly documents
+and checked against Microsoft-authored CVE Program records
+with explicit affected version ranges. A Windows-specific product record takes
+precedence over the generic Chromium desktop family; the chosen source identity
+is retained in the result. Unsupported or conflicting version data remains an
+unavailable check. The 7-Zip range is validated against its CVE record and the
+vendor release history. Upstream Chromium CVEs and advisories titled for other
+components are outside this first mapping. This is not a complete advisory catalog for either product.
+
+The dialog shows matched products, numeric installed versions, applicable CVE
+ranges, fixed versions, official sources and unassessed registry rows. A version
+match is evidence of version applicability, not a successful exploit. No match in
+the selected ranges does not establish that the application or host is secure.
+Missing identity, unknown products, incomplete package collection, skipped source
+records, stale evidence and expired catalogs are visible coverage limits.
+Assessments use saved evidence only and retain their evidence hash, catalog and
+engine version. They never create public legacy findings or scan jobs.
+
+`scripts/update-software-assessment.py --target <reviewed-merge-sha>
+--host <deployment-host>` checks the verified Windows assessment update journal
+before publishing. `--apply` retains the current images, containers, ingress,
+keys, inventories and OS assessments, takes a private PostgreSQL backup and adds
+exactly two initially empty software tables. Interrupted runs continue with
+`--apply --resume` using `.git/ccvm-software-assessment-deployment.json`.
+
+Synchronize public sources separately on the worker:
+
+```bash
+sudo docker exec ccvm-worker python -m app.services.software_catalog_sync --months 3
+```
+
+The import completes all bounded source downloads and validation before saving
+an immutable snapshot. A failed import retains the previous snapshot. Refresh the
+UI status, collect a fresh Windows inventory and choose **Assess installed software**.
+Neither deployment nor assessment signs in to another host automatically.
+
+CI checks the real public software feed separately from deterministic synthetic
+assessment tests. Native Docker CI exercises the full retained update chain and
+protected TLS endpoints; PostgreSQL checks preserve populated OS assessment
+history through the additive migration and reject destructive downgrades.
+
+Primary software sources:
+
+- [Microsoft security update API](https://github.com/microsoft/MSRC-Microsoft-Security-Updates-API)
+- [CVE Program records](https://github.com/CVEProject/cvelistV5)
+- [7-Zip release history](https://www.7-zip.org/history.txt)
+
 ### Retained gateway mount repair
 
 On older Docker runtimes, mounting `/run/ccvm` alongside a tmpfs on the alias

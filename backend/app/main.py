@@ -16,6 +16,7 @@ from app.api.v1 import (
     network_scans,
     pipelines,
     ports,
+    software_assessments,
     subdomains,
     technologies,
     url_details,
@@ -102,6 +103,7 @@ app.include_router(
 )
 app.include_router(network_scans.router, prefix="/api/v1")
 app.include_router(host_assessments.router, prefix="/api/v1")
+app.include_router(software_assessments.router, prefix="/api/v1")
 app.include_router(host_audits.router, prefix="/api/v1")
 app.include_router(
     findings.router,

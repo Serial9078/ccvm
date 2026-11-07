@@ -1274,7 +1274,28 @@ def test_empty_postgresql_database_migrates_to_head():
             existing_rows[name] = []
             without_network_fixture[name] = []
         alembic_command(
-            url, "upgrade", "head", log_name="upgrade-existing-patch-assessment-history"
+            url, "upgrade", "c8f3a0e2b741", log_name="upgrade-existing-patch-assessment-history"
+        )
+        with engine.connect() as connection:
+            assert all_data_rows(connection) == existing_rows
+        from integration.host_software_postgres import (
+            remove_retained_patch_fixture,
+            seed_retained_patch_history,
+        )
+
+        retained_patch_history = seed_retained_patch_history(engine)
+        with engine.connect() as connection:
+            existing_rows = all_data_rows(connection)
+            assert existing_rows["windows_patch_catalogs"]
+            assert existing_rows["host_assessments"]
+            assert any(
+                row["winrm_transport"] == "http_ntlm" for row in existing_rows["host_audits"]
+            )
+        for name in ("software_advisory_catalogs", "software_assessments"):
+            existing_rows[name] = []
+            without_network_fixture[name] = []
+        alembic_command(
+            url, "upgrade", "head", log_name="upgrade-populated-patch-history-with-software-tables"
         )
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
@@ -1283,6 +1304,12 @@ def test_empty_postgresql_database_migrates_to_head():
             assert actual_heads == expected_heads, (actual_heads, expected_heads)
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
+        print(
+            "Software migration added exactly two empty tables and preserved populated "
+            "OS catalogs, assessments, HTTP evidence and every prior row",
+            flush=True,
+        )
+        remove_retained_patch_fixture(engine, retained_patch_history)
         assert_legacy_inventory_history(engine, legacy_inventory)
         remove_network_fixture(engine, network_fixture)
         with engine.connect() as connection:
@@ -1294,9 +1321,11 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_network_postgresql_behavior(connection)
             from integration.host_audit_postgres import assert_native_inventory
             from integration.host_patch_postgres import assert_native_patch_assessment
+            from integration.host_software_postgres import assert_native_software_assessment
 
             assert_native_inventory(connection)
             assert_native_patch_assessment(connection)
+            assert_native_software_assessment(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
         from integration.operator_docker import assert_paused_worker_maintenance
 
@@ -1322,6 +1351,11 @@ def test_empty_postgresql_database_migrates_to_head():
         from integration.host_patch_postgres import assert_downgrade_retains_patch_history
 
         assert_downgrade_retains_patch_history(
+            engine, url, alembic_command, all_data_rows, assert_schema_matches_models
+        )
+        from integration.host_software_postgres import assert_downgrade_retains_software_history
+
+        assert_downgrade_retains_software_history(
             engine, url, alembic_command, all_data_rows, assert_schema_matches_models
         )
         _, encrypted_first = authenticated_deployment_snapshot()

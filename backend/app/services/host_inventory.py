@@ -163,7 +163,21 @@ def normalize_inventory(data, kind, mode):
         for row in rows:
             if not isinstance(row, dict):
                 raise CollectionError("Invalid inventory row")
-            normalized.append({key: text(row.get(key)) for key in columns})
+            item = {key: text(row.get(key)) for key in columns}
+            if name == "packages" and section["source"] == "registry-uninstall":
+                # These optional registry facts identify the recorded uninstall
+                # entry; neither registry view proves a program's architecture.
+                # Older evidence stays valid without inventing missing identity.
+                for key in ("publisher", "registry_key", "registry_view", "install_scope"):
+                    if key in row:
+                        item[key] = text(row[key])
+                        if any(127 <= ord(character) <= 159 for character in item[key]):
+                            raise CollectionError("Invalid inventory text field")
+                if "registry_view" in item and item["registry_view"] not in {"native", "wow6432"}:
+                    raise CollectionError("Invalid inventory registry view")
+                if "install_scope" in item and item["install_scope"] != "machine":
+                    raise CollectionError("Invalid inventory install scope")
+            normalized.append(item)
         if status in {"unavailable", "not_requested", "not_applicable"} and normalized:
             raise CollectionError("Inventory rows contradict coverage status")
         result[name] = {
