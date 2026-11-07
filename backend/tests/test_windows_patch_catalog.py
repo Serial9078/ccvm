@@ -171,6 +171,45 @@ def test_pre_patch_tuesday_missing_current_month_bounds_coverage_at_last_publish
     assert [item["id"] for item in result["documents"]] == ["2026-Oct", "2026-Nov"]
 
 
+@pytest.mark.parametrize("historical_current", ["1601-01-01T00:00:00Z", "invalid-unused-date"])
+def test_out_of_window_historical_mariner_revision_metadata_is_not_current_evidence(
+    monkeypatch, historical_current
+):
+    data = index()
+    data["value"].insert(
+        0,
+        {
+            "ID": "2004-Sep",
+            "DocumentTitle": "Mariner Release Notes",
+            "InitialReleaseDate": "2004-09-02T00:00:00Z",
+            "CurrentReleaseDate": historical_current,
+            "CvrfUrl": f"{catalog.API}/cvrf/2004-Sep",
+        },
+    )
+    session = fixture_session(monkeypatch, update_index=data)
+    result = catalog.fetch_catalog(now=NOW)
+    assert [doc["id"] for doc in result["documents"]] == ["2026-Sep", "2026-Oct", "2026-Nov"]
+    assert all("2004-Sep" not in url for url, _ in session.calls)
+    assert len(result["entries"]) == 4
+
+
+@pytest.mark.parametrize("change", ["sentinel", "malformed", "initial_outside_window"])
+def test_selected_window_release_metadata_is_still_strict_before_any_document_fetch(
+    monkeypatch, change
+):
+    data = index()
+    if change == "sentinel":
+        data["value"][0]["CurrentReleaseDate"] = "1601-01-01T00:00:00Z"
+    elif change == "malformed":
+        data["value"][0]["CurrentReleaseDate"] = "invalid-date"
+    else:
+        data["value"][0]["InitialReleaseDate"] = "2004-09-02T00:00:00Z"
+    session = fixture_session(monkeypatch, update_index=data)
+    with pytest.raises(catalog.CatalogError):
+        catalog.fetch_catalog(now=NOW)
+    assert len(session.calls) == 1
+
+
 @pytest.mark.parametrize("value", [0, 13, True, "3", None])
 def test_invalid_month_windows_are_rejected_before_network(monkeypatch, value):
     monkeypatch.setattr(catalog.requests, "Session", lambda: pytest.fail("Session created"))

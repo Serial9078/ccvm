@@ -297,6 +297,17 @@ def diagnostics(source):
         print(content, flush=True)
 
 
+def seed_inventory(code):
+    # start_audit() commits a queued row before this fixture marks it complete.
+    # Pause the real worker so synthetic retained evidence never triggers a
+    # target connection during setup. The backend has the same DB/vault scope.
+    docker("pause", "ccvm-worker")
+    try:
+        return docker("exec", "ccvm-backend", "python", "-c", code)
+    finally:
+        docker("unpause", "ccvm-worker")
+
+
 def verify_inventory_update(source, target, operation):
     """Exercise the actual reviewed updater against a populated old schema."""
     seed = """from datetime import UTC, datetime
@@ -319,7 +330,7 @@ with SessionLocal() as db:
     audit.completed_at=datetime.now(UTC);db.commit()
 print('Seeded encrypted credential and completed HTTPS inventory before update')
 """
-    print(docker("exec", "ccvm-worker", "python", "-c", seed), flush=True)
+    print(seed_inventory(seed), flush=True)
     private = Path(operation["private"])
     retained_files = [
         source / "docker-compose.yml",
@@ -425,7 +436,7 @@ with SessionLocal() as db:
         'findings':db.query(Finding).count(),'hash':audit.scope_sha256,
         'inventory':hashlib.sha256(json.dumps(audit.inventory,sort_keys=True).encode()).hexdigest()}))
 """
-    saved = json.loads(docker("exec", "ccvm-worker", "python", "-c", seed))
+    saved = json.loads(seed_inventory(seed))
     paths = [
         source / "docker-compose.yml",
         source / "docker-compose.authenticated.yml",

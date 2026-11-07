@@ -488,11 +488,16 @@ def fetch_catalog(*, months=3, now=None, progress=None):
             if identifier in seen:
                 raise CatalogError("Duplicate Microsoft update index identity")
             seen.add(identifier)
+            # The index includes unrelated historical Mariner documents whose
+            # revision timestamp can be the 1601 sentinel. Their metadata is
+            # outside this catalog's evidence window and is never fetched.
+            if not start <= document_month <= now.date():
+                continue
             initial = _timestamp(item.get("InitialReleaseDate"), source=True)
             current = _timestamp(item.get("CurrentReleaseDate"), source=True)
-            if current < initial:
+            if current < initial or initial.date() < start:
                 raise CatalogError("Invalid Microsoft update index dates")
-            if start <= document_month <= now.date() and start <= initial.date() <= now.date():
+            if initial.date() <= now.date():
                 if item.get("CvrfUrl") != f"{API}/cvrf/{identifier}":
                     raise CatalogError("Microsoft update index contains a different source URL")
                 selected[identifier] = {"initial": initial, "current": current}
