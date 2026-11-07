@@ -24,6 +24,7 @@ import {
   matchesPlatform,
   assessmentWarning,
   softwareFix,
+  updateStatusLabels,
 } from "./overview-state";
 import type { OverviewHost, HostOverview, HostPlatformFilter } from "./overview-state";
 
@@ -39,6 +40,13 @@ const issueLabels: Record<string, string> = {
   latest_connection_failed: "Neuester Verbindungstest fehlgeschlagen",
   inventory_missing: "Noch keine verwertbare Inventur",
   windows_client_patch_coverage_unavailable: "Windows-Client-OS noch nicht abgedeckt",
+  windows_update_query_required: "Online-Updateabfrage erforderlich",
+  windows_update_query_incomplete: "Online-Updateabfrage unvollständig",
+  windows_update_query_stale: "Online-Updateabfrage veraltet",
+  windows_client_update_query_required: "Online-Updateabfrage erforderlich",
+  update_query_required: "Online-Updateabfrage erforderlich",
+  update_query_incomplete: "Online-Updateabfrage unvollständig",
+  stale_evidence: "Online-Updateabfrage veraltet",
   patch_assessment_unsupported: "Patchbewertung dieser Plattform noch nicht verfügbar",
   inventory_identity_incomplete: "Plattformzuordnung unvollständig",
   software_details_truncated: "Software-Detailanzeige gekürzt",
@@ -48,12 +56,53 @@ const issueLabels: Record<string, string> = {
 export function WindowsStatus({ host }: { host: OverviewHost }) {
   const assessment = host.windows_assessment;
   const state = hostState(host);
-  if (host.platform === "windows_client")
+  if (host.platform === "windows_client") {
+    const query = assessment?.result.windows_updates;
+    const fresh = current(assessment) && !state.collectionIssue;
     return (
-      <Typography variant="body2" color="text.secondary">
-        OS-Patchbewertung für Clients noch nicht verfügbar
-      </Typography>
+      <Stack spacing={0.5}>
+        <Chip
+          size="small"
+          variant="outlined"
+          color={fresh && assessment?.status === "updates_offered" ? "warning" : "default"}
+          label={
+            !assessment
+              ? "Updateabfrage erforderlich"
+              : ["update_query_required", "update_query_incomplete", "stale_evidence"].includes(
+                    assessment.status,
+                  )
+                ? updateStatusLabels[assessment.status]
+                : !fresh
+                  ? assessmentWarning(assessment) ||
+                    updateStatusLabels[assessment.status] ||
+                    "Updateabfrage erforderlich"
+                  : updateStatusLabels[assessment.status] || "Updateabfrage erforderlich"
+          }
+        />
+        {query && (
+          <Typography variant="body2">
+            {query.summary?.security ?? 0} Sicherheit · {query.summary?.quality ?? 0} Qualität ·{" "}
+            {query.summary?.feature ?? 0} Funktion · {query.summary?.definition ?? 0} Definition
+          </Typography>
+        )}
+        <Typography variant="caption" color="text.secondary">
+          {query
+            ? `Geräte-Updatequelle · ${date(query.queried_at)}`
+            : "Explizite Onlineabfrage der Geräte-Updatequelle starten"}
+        </Typography>
+        {assessment?.status === "no_update_offers" && (
+          <Typography variant="caption" color="text.secondary">
+            Keine Angebote der konfigurierten Quelle · keine vollständige Patchfreigabe
+          </Typography>
+        )}
+        {query?.reboot_required === true && (
+          <Typography variant="caption" color="warning.main">
+            Gerät meldet ausstehenden Neustart
+          </Typography>
+        )}
+      </Stack>
     );
+  }
   if (state.needsWindows)
     return (
       <Stack spacing={0.5}>
@@ -62,7 +111,7 @@ export function WindowsStatus({ host }: { host: OverviewHost }) {
           {assessment?.result.installed_build} → {assessment?.result.baseline_build}
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          {assessment?.result.baseline_kbs.join(", ")}
+          {assessment?.result.baseline_kbs?.join(", ")}
         </Typography>
       </Stack>
     );
@@ -206,17 +255,29 @@ export function HostOverviewPanel({
         {[
           {
             id: "update-count",
-            label: "Updatebedarf",
+            label: platform === "windows-client" ? "Updatebedarf prüfen" : "Updatebedarf",
             value: hosts.filter((host) => hostState(host).attention).length,
             color: "error.main",
-            hint: "Hosts mit aktuellem Build- oder Software-Befund",
+            hint:
+              platform === "windows-client"
+                ? "Nicht optionale Sicherheits-/Qualitätsangebote oder Software-Befunde"
+                : "Hosts mit aktuellem Build- oder Software-Befund",
           },
           {
             id: "baseline-count",
-            label: "OS-Baseline erfüllt",
-            value: hosts.filter((host) => hostState(host).baseline).length,
-            color: "success.main",
-            hint: "Windows-OS-Build; keine Entwarnung für alle Programme",
+            label: platform === "windows-client" ? "Keine Updateangebote" : "OS-Baseline erfüllt",
+            value: hosts.filter((host) =>
+              platform === "windows-client"
+                ? current(host.windows_assessment) &&
+                  !hostState(host).collectionIssue &&
+                  host.windows_assessment?.status === "no_update_offers"
+                : hostState(host).baseline,
+            ).length,
+            color: platform === "windows-client" ? "info.main" : "success.main",
+            hint:
+              platform === "windows-client"
+                ? "Quelle bietet nichts an · keine vollständige Patchfreigabe"
+                : "Windows-OS-Build; keine Entwarnung für alle Programme",
           },
           {
             id: "unknown-count",
@@ -271,9 +332,13 @@ export function HostOverviewPanel({
                 sx={{ minWidth: 170 }}
               >
                 <MenuItem value="all">Alle Status</MenuItem>
-                <MenuItem value="updates">Updatebedarf</MenuItem>
+                <MenuItem value="updates">
+                  {platform === "windows-client" ? "Updateangebote prüfen" : "Updatebedarf"}
+                </MenuItem>
                 <MenuItem value="unknown">Ungeprüft / Fehler</MenuItem>
-                <MenuItem value="baseline">OS-Baseline erfüllt</MenuItem>
+                {platform !== "windows-client" && (
+                  <MenuItem value="baseline">OS-Baseline erfüllt</MenuItem>
+                )}
               </TextField>
             </Stack>
           </Stack>
@@ -285,8 +350,10 @@ export function HostOverviewPanel({
           )}
           {platform === "windows-client" && (
             <Alert severity="info">
-              Die Softwareprüfung unterstützt ausgewählte Produktregeln. Die OS-Patchbewertung ist
-              derzeit nur für Windows Server verfügbar.
+              Windows-Clients: explizite Onlineabfrage der am Gerät konfigurierten Windows Update-
+              oder WSUS-Quelle. Sicherheits-, Qualitäts-, Funktions- und Definitionsangebote
+              getrennt prüfen. Es werden keine Updates installiert. Die Softwareprüfung bleibt
+              separat.
             </Alert>
           )}
           {platform === "linux" && (

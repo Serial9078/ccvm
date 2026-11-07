@@ -50,7 +50,12 @@ def assessment_output(row, now=None):
             "result",
             "evaluated_at",
         )
-    } | {"expired": expired(row.result.get("valid_until"), now)}
+    } | {
+        "expired": expired(row.result.get("valid_until"), now),
+        "provider": row.result.get("provider", "msrc-cvrf"),
+        "source": row.result.get("source", "msrc-cvrf"),
+        "catalog_applicable": row.result.get("catalog_applicable", True),
+    }
 
 
 def checked_catalog(db):
@@ -120,10 +125,17 @@ def create_assessment(
     audit_id: int, payload: AssessmentCreate | None = None, db: Session = Depends(get_db)
 ):
     from app.services.windows_patch_assessment import ENGINE_VERSION, assess_windows_patches
+    from app.services.windows_update_assessment import (
+        ENGINE_VERSION as CLIENT_ENGINE,
+    )
+    from app.services.windows_update_assessment import (
+        assess_windows_updates,
+        is_windows_client,
+    )
 
     audit = checked_audit(db, audit_id, lock=True)
     if (
-        audit.mode != "inventory"
+        audit.mode not in {"inventory", "windows_updates"}
         or not isinstance(audit.inventory, dict)
         or audit.completed_at is None
         or audit.job.status not in {"finished", "failed"}
@@ -138,13 +150,17 @@ def create_assessment(
         raise HTTPException(
             status_code=422, detail="Stored inventory failed assessment validation"
         ) from None
-    catalog, data = checked_catalog(db)
+    client = is_windows_client(audit.inventory)
+    engine_version = CLIENT_ENGINE if client else ENGINE_VERSION
+    # An actual WUA offer query uses the host's configured update source. A
+    # missing or damaged Server CVRF snapshot cannot block its local evaluation.
+    catalog, data = (None, None) if client else checked_catalog(db)
     prior = (
         db.query(HostAssessment)
         .filter_by(
             host_audit_id=audit.id,
             catalog_id=catalog.id if catalog else None,
-            engine_version=ENGINE_VERSION,
+            engine_version=engine_version,
             evidence_sha256=evidence_hash,
         )
         .first()
@@ -154,12 +170,20 @@ def create_assessment(
             raise HTTPException(status_code=409, detail="Stored assessment identity changed")
         return assessment_output(prior, now)
     try:
-        result = assess_windows_patches(
-            copy.deepcopy(audit.inventory),
-            data,
-            evidence_collected_at=utc(audit.completed_at),
-            now=now,
-        )
+        if client:
+            result = assess_windows_updates(
+                copy.deepcopy(audit.inventory),
+                evidence_collected_at=utc(audit.completed_at),
+                evidence_mode=audit.mode,
+                now=now,
+            )
+        else:
+            result = assess_windows_patches(
+                copy.deepcopy(audit.inventory),
+                data,
+                evidence_collected_at=utc(audit.completed_at),
+                now=now,
+            )
         canonical_bytes(result, limit=4 * 1024 * 1024)
         if not isinstance(result, dict) or not isinstance(result.get("status"), str):
             raise ValueError("Invalid assessment result")
@@ -172,7 +196,7 @@ def create_assessment(
         asset_id=audit.asset_id,
         host_audit_id=audit.id,
         catalog_id=catalog.id if catalog else None,
-        engine_version=ENGINE_VERSION,
+        engine_version=engine_version,
         evidence_sha256=evidence_hash,
         status=result["status"],
         result=result,

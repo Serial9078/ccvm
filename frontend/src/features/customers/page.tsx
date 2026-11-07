@@ -62,9 +62,9 @@ export function Customers() {
             },
           }}
           sx={{
-            borderColor: "#1e293b",
+            borderColor: "divider",
             "& .MuiDataGrid-columnHeaders": {
-              backgroundColor: "#0f172a",
+              backgroundColor: "background.paper",
             },
           }}
         />

@@ -117,6 +117,8 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
             status_code=422,
             detail="A WinRM transport can only be selected for Windows credentials",
         )
+    if payload.mode == "windows_updates" and credential.kind != "winrm":
+        raise HTTPException(status_code=422, detail="Windows update searches require WinRM")
     if credential.kind.startswith("ssh_") and not payload.ssh_fingerprint:
         raise HTTPException(
             status_code=422,
@@ -164,9 +166,13 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
         status="queued",
         progress=0,
         message=(
-            "Authenticated host inventory queued"
-            if payload.mode == "inventory"
-            else "Authenticated connection test queued"
+            "Configured-source Windows update search queued; update metadata may be refreshed"
+            if payload.mode == "windows_updates"
+            else (
+                "Authenticated host inventory queued"
+                if payload.mode == "inventory"
+                else "Authenticated connection test queued"
+            )
         ),
     )
     db.add(job)

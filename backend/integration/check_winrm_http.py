@@ -48,6 +48,22 @@ EVIDENCE = {
     "packages": {"status": "not_requested", "source": "registry-uninstall", "items": []},
     "hotfixes": {"status": "not_requested", "source": "Get-HotFix", "items": []},
 }
+UPDATE_EVIDENCE = {
+    "schema_version": 1,
+    "source": "windows-update-agent",
+    "mode": "online",
+    "server_selection": "default",
+    "queried_at": "2026-11-07T12:00:00Z",
+    "status": "complete",
+    "result_code": 2,
+    "total": 0,
+    "items": [],
+    "truncated": False,
+    "hidden_updates": "not_assessed",
+    "drivers": "not_assessed",
+    "superseded": "excluded",
+    "reboot_required": None,
+}
 
 
 def unwrap(context, data):
@@ -86,7 +102,7 @@ def wrap(context, data):
     return result
 
 
-def soap_reply(plaintext, actions):
+def soap_reply(plaintext, actions, mode):
     request = ET.fromstring(plaintext)
     action = request.find("env:Header/a:Action", NS).text.rsplit("/", 1)[1]
     actions.append(action)
@@ -106,14 +122,33 @@ def soap_reply(plaintext, actions):
         compressed = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", bootstrap)
         assert compressed is not None
         command = gzip.decompress(base64.b64decode(compressed[1], validate=True)).decode("utf-8")
-        source = (BACKEND / "app/services/windows_inventory.ps1").read_text()
-        assert command == "$ccvmMode = 'connection'\n" + source
+        update_command = mode == "windows_updates" and actions.count("Command") == 2
+        source_mode = (
+            "windows_updates"
+            if update_command
+            else ("inventory" if mode == "windows_updates" else "connection")
+        )
+        filename = "windows_update_inventory.ps1" if update_command else "windows_inventory.ps1"
+        source = (BACKEND / "app/services" / filename).read_text()
+        assert command == f"$ccvmMode = '{source_mode}'\n" + source
         assert len(" ".join(["powershell", *arguments])) < 8000
         assert request.find(".//w:Option[@Name='WINRS_SKIP_CMD_SHELL']", NS).text == "TRUE"
-        ET.SubElement(body, f"{{{NS['rsp']}}}CommandId").text = "fixture-command"
+        ET.SubElement(body, f"{{{NS['rsp']}}}CommandId").text = (
+            f"fixture-{actions.count('Command')}"
+        )
     elif action == "Receive":
+        evidence = EVIDENCE
+        if mode == "windows_updates":
+            if actions.count("Command") == 2:
+                evidence = UPDATE_EVIDENCE
+            else:
+                evidence = {
+                    **EVIDENCE,
+                    "packages": {**EVIDENCE["packages"], "status": "complete"},
+                    "hotfixes": {**EVIDENCE["hotfixes"], "status": "complete"},
+                }
         ET.SubElement(body, f"{{{NS['rsp']}}}Stream", Name="stdout").text = base64.b64encode(
-            json.dumps(EVIDENCE).encode()
+            json.dumps(evidence).encode()
         ).decode()
         state = ET.SubElement(
             body,
@@ -177,7 +212,7 @@ class Peer(BaseHTTPRequestHandler):
             return
         assert self.headers["Content-Type"] == TYPE
         plaintext = unwrap(self.context, data)
-        response = soap_reply(plaintext, self.server.actions)
+        response = soap_reply(plaintext, self.server.actions, self.server.mode)
         self.respond(200, wrap(self.context, response))
         self.server.encrypted_messages += 1
 
@@ -193,28 +228,49 @@ def main():
         os.environ["NTLM_USER_FILE"] = str(credentials)
         server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
         server.daemon_threads = True
-        server.errors, server.actions = [], []
-        server.authenticated, server.encrypted_messages = 0, 0
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            result = host_inventory.collect(
-                {
-                    "target": "127.0.0.1",
-                    "port": server.server_address[1],
-                    "kind": "winrm",
-                    "winrm_transport": "http_ntlm",
-                    "mode": "connection",
-                    "username": "FIXTURE\\inventory",
-                    "secrets": {"password": PASSWORD},
-                    "ca_bundle": None,
-                }
-            )
-            assert result == EVIDENCE
-            assert server.authenticated == 1
-            assert server.actions == ["Create", "Command", "Receive", "Signal", "Delete"]
-            assert server.encrypted_messages == 5
-            assert not server.errors, server.errors
+            for mode in ("connection", "windows_updates"):
+                server.mode = mode
+                server.errors, server.actions = [], []
+                server.authenticated, server.encrypted_messages = 0, 0
+                result = host_inventory.collect(
+                    {
+                        "target": "127.0.0.1",
+                        "port": server.server_address[1],
+                        "kind": "winrm",
+                        "winrm_transport": "http_ntlm",
+                        "mode": mode,
+                        "username": "FIXTURE\\inventory",
+                        "secrets": {"password": PASSWORD},
+                        "ca_bundle": None,
+                    }
+                )
+                if mode == "windows_updates":
+                    assert result.pop("windows_updates") == UPDATE_EVIDENCE
+                    assert result["os"] == EVIDENCE["os"]
+                    assert result["packages"]["status"] == "complete"
+                    assert server.actions == [
+                        "Create",
+                        "Command",
+                        "Receive",
+                        "Signal",
+                        "Command",
+                        "Receive",
+                        "Signal",
+                        "Delete",
+                    ]
+                    assert server.encrypted_messages == 8
+                    host_inventory.normalize_inventory(
+                        {**result, "windows_updates": UPDATE_EVIDENCE}, "winrm", mode
+                    )
+                else:
+                    assert result == EVIDENCE
+                    assert server.actions == ["Create", "Command", "Receive", "Signal", "Delete"]
+                    assert server.encrypted_messages == 5
+                assert server.authenticated == 1
+                assert not server.errors, server.errors
         finally:
             server.shutdown()
             server.server_close()
@@ -223,8 +279,10 @@ def main():
                 os.environ.pop("NTLM_USER_FILE", None)
             else:
                 os.environ["NTLM_USER_FILE"] = previous
-        print("VERIFIED: real NTLM handshake and five sealed WSMan exchanges on loopback")
-        print("Verified fixed collector command; returned evidence is a synthetic protocol fixture")
+        print("VERIFIED: real NTLM handshake and sealed one/two-command WSMan sessions on loopback")
+        print(
+            "Verified exact fixed collectors; evidence is synthetic and no host search was executed"
+        )
 
 
 if __name__ == "__main__":

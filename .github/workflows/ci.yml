@@ -222,6 +222,21 @@ jobs:
       - name: Preserve populated software and OS history through the inventory overview update
         run: python backend/integration/authenticated_deployment.py --inventory-overview-update
 
+  windows-clients-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Preserve the populated overview release through client and platform coverage publication
+        run: python backend/integration/authenticated_deployment.py --windows-clients-update
+
   software-advisory-source:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -263,3 +278,6 @@ jobs:
       - name: Verify fixed read-only collector against native Windows OS and registry
         shell: powershell
         run: ./backend/integration/check_windows_inventory.ps1
+      - name: Verify bounded Windows Update collector with native offline COM and deterministic online cases
+        shell: powershell
+        run: ./backend/integration/check_windows_updates.ps1

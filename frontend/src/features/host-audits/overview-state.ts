@@ -1,4 +1,4 @@
-import type { SoftwareAssessmentResult } from "./api";
+import type { SoftwareAssessmentResult, WindowsUpdateEvidence } from "./api";
 
 export type HostPlatformFilter = "all" | "windows-server" | "windows-client" | "linux" | "vmware";
 export interface OverviewAssessment {
@@ -6,6 +6,8 @@ export interface OverviewAssessment {
   status: string;
   expired: boolean;
   current_catalog: boolean;
+  provider?: string;
+  catalog_applicable?: boolean;
   evidence_matches: boolean;
   engine_current: boolean;
   evaluated_at: string;
@@ -34,16 +36,27 @@ export interface OverviewHost {
     package_status: string;
     hotfix_count: number;
     hotfix_status: string;
+    mode?: string;
+    windows_updates?:
+      | (Pick<
+          WindowsUpdateEvidence,
+          "queried_at" | "status" | "result_code" | "total" | "reboot_required" | "truncated"
+        > & { has_evidence: boolean })
+      | null;
   } | null;
   windows_assessment:
     | (OverviewAssessment & {
         result: {
           reason: string;
           valid_until: string | null;
-          installed_build: string | null;
-          baseline_build: string | null;
-          baseline_kbs: string[];
-          product: { name: string } | null;
+          installed_build?: string | null;
+          baseline_build?: string | null;
+          baseline_kbs?: string[];
+          product?: { name: string } | null;
+          provider?: string;
+          source?: string;
+          windows_updates?: WindowsUpdateEvidence | null;
+          limitations?: string[];
         };
       })
     | null;
@@ -91,6 +104,13 @@ export const platformNames: Record<HostPlatformFilter, string> = {
   linux: "Linux",
   vmware: "VMware",
 };
+export const updateStatusLabels: Record<string, string> = {
+  updates_offered: "Updates angeboten",
+  no_update_offers: "Keine Updateangebote",
+  update_query_required: "Updateabfrage erforderlich",
+  update_query_incomplete: "Updateabfrage unvollständig",
+  stale_evidence: "Updateabfrage veraltet",
+};
 export function date(value?: string | null) {
   if (!value || !Number.isFinite(new Date(value).valueOf())) return "Noch keine";
   return new Date(value).toLocaleString();
@@ -101,7 +121,9 @@ export function current(
   return Boolean(
     assessment &&
     !assessment.expired &&
-    assessment.current_catalog &&
+    (assessment.current_catalog ||
+      (assessment.provider === "windows-update-agent" &&
+        assessment.catalog_applicable === false)) &&
     assessment.evidence_matches &&
     assessment.engine_current &&
     assessment.result.valid_until &&
@@ -115,7 +137,11 @@ export function hostState(host: OverviewHost) {
   const windows = host.windows_assessment;
   const software = host.software_assessment;
   const needsWindows =
-    host.platform === "windows_server" && current(windows) && windows?.status === "build_gap";
+    current(windows) &&
+    ((host.platform === "windows_server" && windows?.status === "build_gap") ||
+      (host.platform === "windows_client" &&
+        windows?.status === "updates_offered" &&
+        Boolean(windows.result.windows_updates?.summary?.actionable)));
   const needsSoftware = current(software) && Boolean(software?.result.summary.cve_matches);
   const baselineMatch =
     host.platform === "windows_server" &&
@@ -132,7 +158,12 @@ export function hostState(host: OverviewHost) {
   );
   const baseline = baselineMatch && !collectionIssue;
   const windowsUnknown =
-    !current(windows) || !["build_gap", "meets_catalog_baseline"].includes(windows?.status ?? "");
+    !current(windows) ||
+    !(
+      host.platform === "windows_client"
+        ? ["updates_offered", "no_update_offers"]
+        : ["build_gap", "meets_catalog_baseline"]
+    ).includes(windows?.status ?? "");
   const softwareIncomplete =
     !current(software) ||
     !["version_matches_found", "no_matches_in_checked_ranges"].includes(software?.status ?? "") ||
@@ -155,9 +186,37 @@ export function assessmentWarning(
   if (!assessment) return "Noch nicht bewertet";
   if (!assessment.engine_current) return "Prüfregeln erneuert · neu bewerten";
   if (!assessment.evidence_matches) return "Evidenz geändert · neu bewerten";
-  if (!assessment.current_catalog) return "Katalog erneuert · neu bewerten";
+  if (
+    !assessment.current_catalog &&
+    !(assessment.provider === "windows-update-agent" && assessment.catalog_applicable === false)
+  )
+    return "Katalog erneuert · neu bewerten";
   if (!current(assessment)) return "Bewertung nicht aktuell";
   return "";
+}
+
+export function freshWindowsUpdateQuery(host: OverviewHost) {
+  const query = host.inventory?.windows_updates;
+  if (
+    host.inventory?.mode !== "windows_updates" ||
+    !query?.queried_at ||
+    query.status !== "complete"
+  )
+    return false;
+  const timestamp = new Date(query.queried_at).valueOf();
+  const collected = new Date(host.inventory.completed_at).valueOf();
+  return (
+    Number.isFinite(timestamp) &&
+    Number.isFinite(collected) &&
+    timestamp <= collected &&
+    collected <= Date.now() &&
+    collected + 24 * 60 * 60 * 1000 > Date.now() &&
+    timestamp <= Date.now() &&
+    timestamp + 24 * 60 * 60 * 1000 > Date.now() &&
+    query.has_evidence &&
+    query.result_code === 2 &&
+    query.truncated === false
+  );
 }
 
 export function softwareFix(

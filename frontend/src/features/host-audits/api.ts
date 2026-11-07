@@ -25,8 +25,43 @@ export interface Inventory {
   os: Record<string, string>;
   packages: InventorySection;
   hotfixes: InventorySection;
+  windows_updates?: WindowsUpdateEvidence | null;
 }
 export type WinrmTransport = "https" | "http_ntlm";
+export type AuditMode = "connection" | "inventory" | "windows_updates";
+
+export type WindowsUpdateClassification =
+  "security" | "quality" | "feature" | "definition" | "other";
+export interface WindowsUpdateOffer {
+  update_id: string;
+  revision: number;
+  title: string;
+  kbs: string[];
+  categories: { id: string; name: string; type?: string }[];
+  classification?: WindowsUpdateClassification;
+  is_optional?: boolean | null;
+  is_mandatory?: boolean | null;
+  actionable?: boolean;
+}
+export interface WindowsUpdateEvidence {
+  queried_at: string | null;
+  mode: string;
+  server_selection: string;
+  status: string;
+  result_code?: number | null;
+  total: number;
+  items: WindowsUpdateOffer[];
+  items_truncated?: boolean;
+  truncated?: boolean;
+  summary?: Record<
+    WindowsUpdateClassification | "offers" | "optional" | "optional_unknown" | "actionable",
+    number
+  >;
+  reboot_required: boolean | null;
+  hidden_updates?: string;
+  drivers?: string;
+  superseded?: string;
+}
 
 export interface HostAudit {
   id: number;
@@ -34,7 +69,7 @@ export interface HostAudit {
   credential_id: number;
   target: string;
   port: number;
-  mode: "connection" | "inventory";
+  mode: AuditMode;
   winrm_transport?: WinrmTransport;
   cancel_requested: boolean;
   created_at: string;
@@ -65,6 +100,7 @@ export interface PatchAssessmentResult {
   valid_until: string | null;
   evidence_collected_at: string | null;
   catalog_retrieved_at: string | null;
+  provider?: never;
   installed_build: string | null;
   product: {
     id: string;
@@ -106,6 +142,21 @@ export interface PatchAssessmentResult {
   }[];
 }
 
+export interface WindowsUpdateAssessmentResult {
+  schema_version: number;
+  engine_version: string;
+  provider: "windows-update-agent";
+  source: string;
+  catalog_applicable: false;
+  status: string;
+  reason: string;
+  evaluated_at: string;
+  valid_until: string | null;
+  evidence_collected_at: string | null;
+  windows_updates: WindowsUpdateEvidence | null;
+  limitations: string[];
+}
+
 export interface HostAssessment {
   id: number;
   customer_id: number;
@@ -115,9 +166,12 @@ export interface HostAssessment {
   engine_version: string;
   evidence_sha256: string;
   status: string;
-  result: PatchAssessmentResult;
+  result: PatchAssessmentResult | WindowsUpdateAssessmentResult;
   evaluated_at: string;
   expired: boolean;
+  provider?: string;
+  source?: string;
+  catalog_applicable?: boolean;
 }
 
 export interface SoftwareCatalogCoverage {

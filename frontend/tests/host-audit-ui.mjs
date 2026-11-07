@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolve, extname } from "node:path";
 import { chromium } from "playwright";
 
@@ -18,6 +19,7 @@ try {
   page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   page.setDefaultTimeout(15000);
   const errors = [];
+  const logoRequests = [];
   page.on("pageerror", (error) => errors.push(String(error)));
   let credentials = [];
   let runs = [];
@@ -26,6 +28,7 @@ try {
   const submissions = [];
   const apiCalls = [];
   let overviewExtras = [];
+  let wuaQueryRequests = 0;
   const now = new Date().toISOString();
   let catalog = {
     id: 1,
@@ -74,6 +77,262 @@ try {
   let softwareStatus = "version_matches_found";
   const softwareAssessments = [];
   let softwareRequests = 0;
+  const stageIds = [
+    "discovery",
+    "inventory",
+    "configuration",
+    "os_baseline",
+    "software_checks",
+    "offered_updates",
+  ];
+  const platformCapability = (id, name, offered = false) => ({
+    id,
+    name,
+    stages: Object.fromEntries(
+      stageIds.map((stage) => [
+        stage,
+        {
+          status:
+            stage === "discovery"
+              ? "available"
+              : stage === "inventory" && id !== "vmware"
+                ? "limited"
+                : stage === "offered_updates" && offered
+                  ? "limited"
+                  : "unavailable",
+          provider:
+            stage === "offered_updates" && offered
+              ? "windows-update-agent"
+              : "synthetic-capability",
+          scope:
+            stage === "offered_updates" && offered
+              ? "Explizite Onlineabfrage der konfigurierten Updatequelle; keine vollständige CVE-Abdeckung"
+              : stage === "os_baseline"
+                ? "Für diese Plattform noch keine OS-Patchbewertung angebunden"
+                : "Synthetischer, begrenzter Prüfumfang",
+          prerequisites: stage === "inventory" ? ["Freigegebenes Inventurkonto"] : [],
+          limitations: ["Nicht verfügbare Prüfstufen sind keine Entwarnung"],
+        },
+      ]),
+    ),
+  });
+  const capabilities = {
+    version: "1",
+    stage_labels: [
+      { id: "discovery", name: "Erkennung" },
+      { id: "inventory", name: "Inventur" },
+      { id: "configuration", name: "Konfiguration" },
+      { id: "os_baseline", name: "OS-Baseline" },
+      { id: "software_checks", name: "Software-Regeln" },
+      { id: "offered_updates", name: "Updateangebote" },
+    ],
+    platforms: [
+      platformCapability("windows_server", "Windows Server"),
+      platformCapability("windows_client", "Windows Clients", true),
+      platformCapability("linux", "Linux"),
+      platformCapability("vmware", "VMware"),
+    ],
+    limitations: ["Ein Netzwerkscan ersetzt keine authentifizierte Patchprüfung"],
+  };
+  function discoveredResponse(offset) {
+    const count = offset === 0 ? 200 : 1;
+    return {
+      customer_id: 1,
+      total: 201,
+      limit: 200,
+      offset,
+      has_more: offset === 0,
+      items: Array.from({ length: count }, (_, index) => {
+        const number = offset + index + 1;
+        return {
+          asset_id: 300 + number,
+          ip_address: `192.0.2.${number}`,
+          last_seen: now,
+          scan_id: 9,
+          discovery_status: "observed",
+          services:
+            number === 80
+              ? [
+                  {
+                    port: 443,
+                    protocol: "tcp",
+                    state: "open",
+                    service: "https",
+                    product: "VMware vSphere SOAP service",
+                    version: "",
+                    audit_coverage: "unavailable",
+                  },
+                ]
+              : [
+                  {
+                    port: 22,
+                    protocol: "tcp",
+                    state: "open",
+                    service: "ssh",
+                    product: "Reported SSH service",
+                    version: "",
+                    audit_coverage: "unavailable",
+                  },
+                ],
+          services_total: 1,
+          services_truncated: false,
+          inventory_status: "not_inventoried",
+          host_audit_id: null,
+          inventory_collected_at: null,
+        };
+      }),
+      limitations: ["Netzwerkbeobachtungen bestimmen keine OS-Version oder Patchabdeckung"],
+    };
+  }
+  function wuaReport(status = "complete", empty = false, stale = false) {
+    const items = empty
+      ? []
+      : [
+          [
+            "00000000-0000-0000-0000-000000000001",
+            "Synthetic security update",
+            "KB9999001",
+            "security",
+            false,
+            true,
+          ],
+          [
+            "00000000-0000-0000-0000-000000000002",
+            "Synthetic quality update",
+            "KB9999002",
+            "quality",
+            false,
+            true,
+          ],
+          [
+            "00000000-0000-0000-0000-000000000003",
+            "Synthetic feature offer",
+            "KB9999003",
+            "feature",
+            true,
+            false,
+          ],
+          [
+            "00000000-0000-0000-0000-000000000004",
+            "Synthetic definition update",
+            "KB9999004",
+            "definition",
+            false,
+            false,
+          ],
+        ].map(([update_id, title, kb, classification, is_optional, actionable]) => ({
+          update_id,
+          revision: 1,
+          title,
+          kbs: [kb],
+          classification,
+          is_optional,
+          is_mandatory: false,
+          actionable,
+          categories: [
+            {
+              id: {
+                security: "0fa1201d-4330-4fa8-8ae9-b877473b6441",
+                quality: "e6cf1350-c01b-414d-a61f-263d14d133b4",
+                feature: "3689bdc8-b205-4af4-8d4a-a63924c5e9d5",
+                definition: "e0789628-ce08-4437-be74-2495b842f43b",
+              }[classification],
+              name: classification,
+              type: "UpdateClassification",
+            },
+          ],
+          is_hidden: false,
+          is_installed: false,
+        }));
+    return {
+      schema_version: 1,
+      source: "windows-update-agent",
+      mode: "online",
+      server_selection: "default",
+      queried_at: stale ? new Date(Date.now() - 3 * 86400000).toISOString() : now,
+      status,
+      result_code: status === "complete" ? 2 : 3,
+      total: items.length,
+      truncated: false,
+      items_truncated: false,
+      reboot_required: !empty,
+      hidden_updates: "not_assessed",
+      drivers: "not_assessed",
+      superseded: "excluded",
+      items,
+      summary: {
+        offers: items.length,
+        security: empty ? 0 : 1,
+        quality: empty ? 0 : 1,
+        feature: empty ? 0 : 1,
+        definition: empty ? 0 : 1,
+        other: 0,
+        optional: empty ? 0 : 1,
+        optional_unknown: 0,
+        actionable: empty ? 0 : 2,
+      },
+    };
+  }
+  function clientAssessment(run, status = "updates_offered") {
+    const incomplete = [
+      "update_query_required",
+      "update_query_incomplete",
+      "stale_evidence",
+    ].includes(status);
+    const report =
+      status === "update_query_required"
+        ? null
+        : wuaReport(
+            status === "update_query_incomplete" ? "partial" : "complete",
+            status === "no_update_offers",
+            status === "stale_evidence",
+          );
+    const valid =
+      status === "update_query_required" || status === "stale_evidence"
+        ? null
+        : new Date(Date.now() + 86400000).toISOString();
+    const result = {
+      schema_version: 1,
+      engine_version: "windows-client-wua-v1",
+      provider: "windows-update-agent",
+      source: "configured_windows_update_service",
+      catalog_applicable: false,
+      status,
+      reason:
+        status === "no_update_offers"
+          ? "The configured update source offered no visible software updates. This does not establish that the device is fully patched."
+          : incomplete
+            ? "Collect a complete and current online Windows update query."
+            : "The configured update source offered security, quality, feature and definition updates.",
+      evaluated_at: now,
+      valid_until: valid,
+      evidence_collected_at: now,
+      windows_updates: report,
+      limitations: [
+        "No offers does not mean fully patched. Configured source approvals and deferrals affect results.",
+        "No updates are downloaded or installed; drivers and hidden updates are not assessed.",
+      ],
+    };
+    return {
+      id: 4000 + run.id,
+      customer_id: 1,
+      asset_id: run.asset_id ?? 106,
+      host_audit_id: run.id,
+      catalog_id: null,
+      provider: "windows-update-agent",
+      source: result.source,
+      catalog_applicable: false,
+      current_catalog: false,
+      evidence_matches: true,
+      engine_current: true,
+      engine_version: result.engine_version,
+      evidence_sha256: "e".repeat(64),
+      status,
+      result,
+      evaluated_at: now,
+      expired: !valid,
+    };
+  }
   function assessSoftware(run) {
     const status = softwareCatalog ? softwareStatus : "catalog_unavailable";
     const available = ["version_matches_found", "no_matches_in_checked_ranges"].includes(status);
@@ -187,6 +446,7 @@ try {
     };
   }
   function assess(run) {
+    if (run.mode === "windows_updates") return clientAssessment(run);
     const status = catalog ? assessmentStatus : "catalog_unavailable";
     const available = status === "build_gap" || status === "meets_catalog_baseline";
     const result = {
@@ -288,7 +548,7 @@ try {
   function inventoryEvidence(run) {
     const windows =
       credentials.find((credential) => credential.id === run.credential_id)?.kind === "winrm";
-    return windows
+    const data = windows
       ? {
           schema_version: 1,
           os: {
@@ -308,6 +568,18 @@ try {
           },
         }
       : { schema_version: 1, ...evidence };
+    if (run.mode === "windows_updates") {
+      data.os = {
+        ...data.os,
+        name: "Fixture Windows 11",
+        hostname: "lab-client",
+        version: "10.0.26100",
+        kernel: "26100.1",
+        product_type: "1",
+      };
+      data.windows_updates = wuaReport();
+    }
+    return data;
   }
   function overviewAssessment(item) {
     if (!item) return null;
@@ -317,18 +589,36 @@ try {
         ...scope,
         unavailable_count: scope.unavailable_cves.length,
       }));
-    return { ...copy, current_catalog: true, evidence_matches: true, engine_current: true };
+    return {
+      ...copy,
+      current_catalog: copy.catalog_applicable === false ? false : true,
+      evidence_matches: true,
+      engine_current: true,
+    };
   }
   function overviewResponse() {
-    const selected = runs.find((run) => run.mode === "inventory" && !run.failedNoEvidence);
-    const hosts = [...overviewExtras];
-    if (selected) {
+    const targets = [...new Set(runs.map((run) => run.target))];
+    const dynamic = [];
+    for (const target of targets) {
+      const selected = runs.find(
+        (run) =>
+          run.target === target &&
+          ["inventory", "windows_updates"].includes(run.mode) &&
+          !run.failedNoEvidence,
+      );
+      if (!selected) continue;
       const collected = inventoryEvidence(selected);
-      const latest = runs[0];
-      hosts.unshift({
-        asset_id: 1,
-        target: selected.target,
-        platform: collected.os.family === "Windows" ? "windows_server" : "linux",
+      const latest = runs.find((run) => run.target === target);
+      const updates = collected.windows_updates;
+      dynamic.push({
+        asset_id: selected.asset_id ?? 1,
+        target,
+        platform:
+          collected.os.family === "Linux"
+            ? "linux"
+            : collected.os.product_type === "1"
+              ? "windows_client"
+              : "windows_server",
         latest_run: {
           id: latest.id,
           credential_id: latest.credential_id,
@@ -343,12 +633,24 @@ try {
         },
         inventory: {
           id: selected.id,
+          mode: selected.mode,
           completed_at: selected.completed_at,
           os: collected.os,
           package_count: collected.packages.items.length,
           package_status: collected.packages.status,
           hotfix_count: collected.hotfixes.items.length,
           hotfix_status: collected.hotfixes.status,
+          windows_updates: updates
+            ? {
+                has_evidence: true,
+                queried_at: updates.queried_at,
+                status: updates.status,
+                result_code: updates.result_code,
+                total: updates.total,
+                reboot_required: updates.reboot_required,
+                truncated: updates.truncated,
+              }
+            : null,
         },
         windows_assessment: overviewAssessment(
           assessments.find((item) => item.host_audit_id === selected.id),
@@ -359,6 +661,10 @@ try {
         issues: latest.failedNoEvidence ? ["latest_collection_failed"] : [],
       });
     }
+    const hosts = [
+      ...dynamic,
+      ...overviewExtras.filter((host) => !dynamic.some((item) => item.target === host.target)),
+    ];
     return {
       customer_id: 1,
       generated_at: now,
@@ -386,6 +692,7 @@ try {
     assert.equal(request.url().includes(token) || request.url().includes(password), false);
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path === "/assets/cloudcollab-logo.jpg") logoRequests.push(request.method());
     const respond = (json, status = 200) =>
       route.fulfill({ status, json, headers: { "Cache-Control": "no-store" } });
     if (path.startsWith("/api/v1/")) {
@@ -421,6 +728,16 @@ try {
       if (path === "/api/v1/customers")
         return respond([{ id: 1, name: "Lab customer", uuid: "synthetic-customer" }]);
       assert.equal(request.headers()["authorization"], `Bearer ${token}`);
+      if (path === "/api/v1/host-audits/capabilities") {
+        assert.equal(request.method(), "GET");
+        return respond(capabilities);
+      }
+      if (path === "/api/v1/host-audits/discovered") {
+        assert.equal(request.method(), "GET");
+        assert.equal(url.searchParams.get("customer_id"), "1");
+        assert.equal(url.searchParams.get("limit"), "200");
+        return respond(discoveredResponse(Number(url.searchParams.get("offset") || 0)));
+      }
       if (path === "/api/v1/host-audits/overview") {
         assert.equal(request.method(), "GET");
         assert.equal(url.searchParams.get("customer_id"), "1");
@@ -439,7 +756,7 @@ try {
         assert.deepEqual(request.postDataJSON(), {});
         softwareRequests++;
         const run = runs.find((candidate) => candidate.id === Number(path.split("/").at(-2)));
-        assert.equal(run.mode, "inventory");
+        assert.ok(["inventory", "windows_updates"].includes(run.mode));
         const result = assessSoftware(run);
         softwareAssessments.unshift(result);
         return respond(result);
@@ -458,7 +775,7 @@ try {
         assert.deepEqual(request.postDataJSON(), {});
         assessmentRequests++;
         const run = runs.find((candidate) => candidate.id === Number(path.split("/").at(-2)));
-        assert.equal(run.mode, "inventory");
+        assert.ok(["inventory", "windows_updates"].includes(run.mode));
         assert.equal(
           credentials.find((credential) => credential.id === run.credential_id).kind,
           "winrm",
@@ -504,7 +821,11 @@ try {
         const payload = request.postDataJSON();
         modes.push(payload.mode);
         submissions.push(payload);
-        assert.equal(payload.target, "192.0.2.1");
+        assert.equal(
+          payload.target,
+          payload.mode === "windows_updates" ? "192.0.2.30" : "192.0.2.1",
+        );
+        if (payload.mode === "windows_updates") wuaQueryRequests++;
         const credential = credentials.find((cred) => cred.id === payload.credential_id);
         if (credential.kind === "winrm") {
           assert.ok(["https", "http_ntlm"].includes(payload.winrm_transport));
@@ -516,6 +837,7 @@ try {
         const run = {
           id: runs.length + 1,
           customer_id: 1,
+          asset_id: payload.target === "192.0.2.30" ? 106 : 1,
           credential_id: credential.id,
           target: payload.target,
           port:
@@ -568,6 +890,7 @@ try {
         ".js": "text/javascript",
         ".css": "text/css",
         ".png": "image/png",
+        ".jpg": "image/jpeg",
         ".svg": "image/svg+xml",
       }[extname(file)] || "application/octet-stream";
     return route.fulfill({ body: await readFile(file), contentType });
@@ -593,9 +916,53 @@ try {
   }
   await page.goto(`${origin}/host-audits?customer_id=1`);
   await page.getByRole("heading", { name: "Host-Übersicht", exact: true }).waitFor();
+  const logo = page.getByRole("img", { name: "CloudCollab", exact: true });
+  await logo.waitFor();
+  await logo.evaluate((element) => element.decode());
+  assert.equal(await logo.getAttribute("src"), "/assets/cloudcollab-logo.jpg");
+  assert.equal(
+    await logo.evaluate((element) => element.complete && element.naturalWidth > 0),
+    true,
+  );
+  assert.ok(logoRequests.length >= 1 && logoRequests.every((method) => method === "GET"));
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(resolve(root, "assets/cloudcollab-logo.jpg")))
+      .digest("hex"),
+    "088bb3bb2fa7ef8ac5a1e17f62d114d094528be72f8c0f05f2d2cf19aeaeecd3",
+    "The built app must use the original CloudCollab JPEG bytes",
+  );
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      body: getComputedStyle(document.body).backgroundColor,
+      header: getComputedStyle(document.querySelector("header")).backgroundColor,
+    })),
+    { body: "rgb(8, 8, 8)", header: "rgb(0, 0, 0)" },
+  );
+
   await page.getByRole("combobox", { name: "Customer", exact: true }).click();
   await page.getByRole("option", { name: "Lab customer" }).click();
   await page.getByLabel("Operator token", { exact: true }).fill(token);
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll("button")].find(
+      (element) => element.textContent === "Unlock host audits",
+    );
+    return (
+      button &&
+      !button.disabled &&
+      getComputedStyle(button).backgroundColor === "rgb(250, 250, 250)"
+    );
+  });
+  assert.deepEqual(
+    await page
+      .getByRole("button", { name: "Unlock host audits", exact: true })
+      .evaluate((element) => ({
+        background: getComputedStyle(element).backgroundColor,
+        color: getComputedStyle(element).color,
+      })),
+    { background: "rgb(250, 250, 250)", color: "rgb(0, 0, 0)" },
+    "Primary actions follow the monochrome CloudCollab brand",
+  );
   await page.getByRole("button", { name: "Unlock host audits" }).click();
   await openInventory();
   await page.getByRole("button", { name: "Add credential" }).click();
@@ -605,7 +972,7 @@ try {
   await page.getByLabel("Password", { exact: true }).fill(password);
   rejectSave = true;
   await page.getByRole("button", { name: "Save credential", exact: true }).click();
-  await page.getByText("Fixture save rejected", { exact: true }).waitFor();
+  await page.getByRole("dialog",{name:"Add encrypted credential",exact:true}).getByText("Fixture save rejected", { exact: true }).waitFor();
   assert.equal(await page.getByLabel("Password", { exact: true }).inputValue(), "");
   rejectSave = false;
   await page.getByLabel("Password", { exact: true }).fill(password);
@@ -905,6 +1272,101 @@ try {
   );
   await page.getByText("Default 5986 · HTTPS / NTLM", { exact: true }).waitFor();
   await closeInventory();
+  // Coverage and discovered-device preparation read private metadata only.
+  // Neither expanding a capability nor preparing a target authenticates to it.
+  const metadataPosts = apiCalls.filter((call) => call.method !== "GET").length;
+  assert.equal(
+    apiCalls.filter(
+      (call) => call.path.endsWith("/capabilities") && call.path.includes("host-audits"),
+    ).length,
+    0,
+  );
+  assert.equal(apiCalls.filter((call) => call.path.endsWith("/discovered")).length, 0);
+  const capabilityPanel = page.getByTestId("capabilities-panel");
+  await capabilityPanel
+    .getByRole("button", { name: "Prüfumfang nach Plattform", exact: true })
+    .click();
+  const capabilityTable = page.getByRole("table", { name: "Plattform-Prüfumfang", exact: true });
+  await capabilityTable.waitFor();
+  for (const platform of ["VMware", "Linux"]) {
+    const row = capabilityTable
+      .getByRole("row")
+      .filter({ has: page.getByText(platform, { exact: true }) });
+    await row
+      .getByRole("button", {
+        name: `${platform} · OS-Baseline: Nicht verfügbar. Prüfumfang anzeigen`,
+        exact: true,
+      })
+      .waitFor();
+  }
+  await capabilityTable
+    .getByRole("button", {
+      name: "Windows Clients · Updateangebote: Begrenzt. Prüfumfang anzeigen",
+      exact: true,
+    })
+    .click();
+  const scopeDialog = page.getByRole("dialog", {
+    name: "Windows Clients · Updateangebote",
+    exact: true,
+  });
+  await scopeDialog
+    .getByText(
+      "Explizite Onlineabfrage der konfigurierten Updatequelle; keine vollständige CVE-Abdeckung",
+      { exact: true },
+    )
+    .waitFor();
+  await scopeDialog.getByRole("button", { name: "Schließen", exact: true }).click();
+  await scopeDialog.waitFor({ state: "hidden" });
+  await capabilityPanel
+    .getByRole("button", { name: "Prüfumfang nach Plattform", exact: true })
+    .click();
+  const discoveryPanel = page.getByTestId("discovered-devices-panel");
+  await discoveryPanel.getByRole("button", { name: "Erkannte Geräte", exact: true }).click();
+  const deviceTable = page.getByRole("table", { name: "Erkannte Netzwerkgeräte", exact: true });
+  const observed = deviceTable
+    .getByRole("row")
+    .filter({ has: page.getByText("192.0.2.80", { exact: true }) });
+  await observed.getByText("Gemeldet: VMware vSphere SOAP service", { exact: true }).waitFor();
+  await observed.getByText("Inventur fehlt", { exact: true }).waitFor();
+  assert.equal(await observed.locator(".MuiChip-colorSuccess").count(), 0);
+  assert.equal(
+    await discoveryPanel
+      .getByRole("link", { name: "Netzwerk öffnen", exact: true })
+      .getAttribute("href"),
+    "/networks?customer_id=1",
+  );
+  await discoveryPanel.getByRole("button", { name: "Weiter", exact: true }).click();
+  await deviceTable.getByText("192.0.2.201", { exact: true }).waitFor();
+  assert.ok(
+    apiCalls.some(
+      (call) =>
+        call.path.endsWith("/discovered") &&
+        new URLSearchParams(call.query).get("offset") === "200",
+    ),
+  );
+  await discoveryPanel.getByRole("button", { name: "Zurück", exact: true }).click();
+  await observed.waitFor();
+  await observed
+    .getByRole("button", { name: "Inventur vorbereiten für 192.0.2.80", exact: true })
+    .click();
+  const prepared = page.getByTestId("inventory-form-dialog");
+  await prepared.waitFor();
+  assert.equal(await prepared.getByLabel("Target IP", { exact: true }).inputValue(), "192.0.2.80");
+  assert.equal(
+    await prepared
+      .getByRole("combobox", { name: "Credential", exact: true })
+      .locator("..")
+      .locator("input")
+      .inputValue(),
+    "",
+  );
+  assert.equal(
+    await prepared.getByRole("button", { name: "Collect inventory", exact: true }).isDisabled(),
+    true,
+  );
+  assert.equal(apiCalls.filter((call) => call.method !== "GET").length, metadataPosts);
+  await closeInventory();
+  await discoveryPanel.getByRole("button", { name: /Erkannte Geräte/ }).click();
   // The default surface shows patch decisions; historical runs, catalogs and
   // collection forms remain available without displacing the current overview.
   catalog = structuredClone(synchronizedWindowsCatalog);
@@ -1036,7 +1498,38 @@ try {
   unknownHost.software_assessment = null;
   unknownHost.issues = ["windows_assessment_missing", "software_assessment_missing"];
   const clientHost = sampleHost(106, "192.0.2.30", "windows_client", "unsupported");
-  clientHost.windows_assessment.result.valid_until = null;
+  clientHost.windows_assessment = null;
+  clientHost.inventory.mode = "inventory";
+  clientHost.inventory.windows_updates = null;
+  const queryClientHost = (id, target, status) => {
+    const value = sampleHost(id, target, "windows_client", "unsupported");
+    const report = clientAssessment({ id, asset_id: id }, status);
+    value.windows_assessment = report;
+    value.inventory.mode = "windows_updates";
+    value.latest_run.mode = "windows_updates";
+    const query = report.result.windows_updates;
+    value.inventory.windows_updates = query
+      ? {
+          has_evidence: true,
+          queried_at: query.queried_at,
+          status: query.status,
+          result_code: query.result_code,
+          total: query.total,
+          reboot_required: query.reboot_required,
+          truncated: query.items_truncated,
+        }
+      : null;
+    return value;
+  };
+  const noOffers = queryClientHost(109, "192.0.2.31", "no_update_offers");
+  const incompleteClient = queryClientHost(110, "192.0.2.32", "update_query_incomplete");
+  const staleClient = queryClientHost(111, "192.0.2.33", "stale_evidence");
+  const timeoutClient = queryClientHost(112, "192.0.2.34", "update_query_incomplete");
+  timeoutClient.windows_assessment.result.windows_updates.status = "timeout";
+  timeoutClient.inventory.windows_updates.status = "timeout";
+  timeoutClient.latest_run.status = "failed";
+  timeoutClient.issues = ["latest_collection_failed"];
+
   const linuxHost = sampleHost(107, "192.0.2.40", "linux", "unsupported");
   linuxHost.windows_assessment = null;
   linuxHost.software_assessment = null;
@@ -1065,6 +1558,10 @@ try {
     failedHost,
     unknownHost,
     clientHost,
+    noOffers,
+    incompleteClient,
+    staleClient,
+    timeoutClient,
     linuxHost,
     unclassified,
   ];
@@ -1148,6 +1645,127 @@ try {
       0,
       "Platform navigation retains the volatile in-memory operator session",
     );
+    if (label === "Windows Clients") {
+      const clientOverview = page.getByTestId("host-overview");
+      const clientRow = (ip) =>
+        clientOverview.getByRole("row").filter({ has: page.getByText(ip, { exact: true }) });
+      await clientRow("192.0.2.30")
+        .getByText("Updateabfrage erforderlich", { exact: true })
+        .waitFor();
+      await clientRow("192.0.2.31").getByText("Keine Updateangebote", { exact: true }).waitFor();
+      for (const ip of ["192.0.2.30", "192.0.2.31", "192.0.2.32", "192.0.2.33", "192.0.2.34"]) {
+        assert.equal(
+          await clientRow(ip).locator(".MuiChip-colorSuccess").count(),
+          0,
+          "No client query outcome proves a fully patched OS",
+        );
+      }
+      await clientRow("192.0.2.32")
+        .getByText("Updateabfrage unvollständig", { exact: true })
+        .waitFor();
+      await clientRow("192.0.2.33").getByText("Updateabfrage veraltet", { exact: true }).waitFor();
+      await clientRow("192.0.2.34")
+        .getByText("Neuester Lauf fehlgeschlagen", { exact: true })
+        .waitFor();
+      await clientRow("192.0.2.34").getByText("Fixture Windows 11", { exact: true }).waitFor();
+      await clientRow("192.0.2.30").getByRole("button", { name: "Details", exact: true }).click();
+      let clientDetail = page.getByRole("dialog", {
+        name: "Host-Status · 192.0.2.30",
+        exact: true,
+      });
+      assert.equal(
+        await clientDetail
+          .getByRole("button", { name: "Windows jetzt bewerten", exact: true })
+          .isDisabled(),
+        true,
+      );
+      const beforeQuery = apiCalls.filter((call) => call.method !== "GET").length;
+      await clientDetail
+        .getByRole("button", { name: "Windows-Updates abfragen", exact: true })
+        .click();
+      await clientDetail.waitFor({ state: "hidden" });
+      const queryForm = page.getByRole("dialog", { name: "Windows-Updates abfragen", exact: true });
+      await queryForm.waitFor();
+      assert.equal(
+        await queryForm.getByLabel("Target IP", { exact: true }).inputValue(),
+        "192.0.2.30",
+      );
+      await queryForm
+        .getByRole("button", { name: "Updateabfrage vorbereiten", exact: true })
+        .click();
+      const confirmation = page.getByRole("dialog", {
+        name: "Windows-Updatequelle abfragen",
+        exact: true,
+      });
+      await confirmation.waitFor();
+      assert.equal(
+        apiCalls.filter((call) => call.method !== "GET").length,
+        beforeQuery,
+        "Preparing an online query must not submit it",
+      );
+      assert.equal(wuaQueryRequests, 0);
+      await confirmation.getByRole("button", { name: "Abfrage starten", exact: true }).click();
+      await confirmation.waitFor({ state: "hidden" });
+      await queryForm.waitFor({ state: "hidden" });
+      assert.equal(wuaQueryRequests, 1);
+      assert.equal(submissions.at(-1).mode, "windows_updates");
+      assert.equal(submissions.at(-1).winrm_transport, "http_ntlm");
+      assert.equal(submissions.at(-1).target, "192.0.2.30");
+      await clientRow("192.0.2.30").getByRole("button", { name: "Details", exact: true }).click();
+      clientDetail = page.getByRole("dialog", { name: "Host-Status · 192.0.2.30", exact: true });
+      await clientDetail
+        .getByRole("button", { name: "Windows jetzt bewerten", exact: true })
+        .click();
+      const updateDialog = page.getByRole("dialog", {
+        name: "Windows-Updateangebote · 192.0.2.30",
+        exact: true,
+      });
+      await updateDialog.getByText("Updates angeboten", { exact: true }).waitFor();
+      for (const text of [
+        "Sicherheitsupdates: 1",
+        "Qualitätsupdates: 1",
+        "Funktionsupdates / Upgrades: 1",
+        "Definitionsupdates: 1",
+        "Synthetic security update",
+        "Synthetic quality update",
+        "Synthetic feature offer",
+        "Synthetic definition update",
+      ]) {
+        await updateDialog.getByText(text, { exact: true }).waitFor();
+      }
+      await updateDialog.getByText("Optional · separat entscheiden", { exact: true }).waitFor();
+      assert.equal(await updateDialog.locator(".MuiChip-colorSuccess").count(), 0);
+      assert.equal(
+        await updateDialog.getByText("Microsoft baseline build:", { exact: false }).count(),
+        0,
+        "Client offers must not be presented as a Server build baseline",
+      );
+      assert.equal(
+        wuaQueryRequests,
+        1,
+        "Assessment reads saved query evidence without another Windows query",
+      );
+      await page.screenshot({
+        path: "test-artifacts/windows-client-update-offers.png",
+        fullPage: true,
+        animations: "disabled",
+      });
+      await updateDialog.getByRole("button", { name: "Close assessment", exact: true }).click();
+      await updateDialog.waitFor({ state: "hidden" });
+      if (await clientDetail.isVisible()) {
+        await clientDetail
+          .getByRole("button", { name: "Host-Status schließen", exact: true })
+          .click();
+        await clientDetail.waitFor({ state: "hidden" });
+      }
+      await clientRow("192.0.2.30").getByText("Updates angeboten", { exact: true }).waitFor();
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({
+        path: "test-artifacts/windows-clients-overview.png",
+        fullPage: true,
+        animations: "disabled",
+      });
+    }
     if (shown)
       await page.getByTestId("host-overview").getByRole("row").filter({ hasText: shown }).waitFor();
     assert.equal(
@@ -1163,8 +1781,8 @@ try {
     .waitFor();
   assert.equal(
     apiCalls.filter((request) => request.method !== "GET").length,
-    requestsBeforeFiltering,
-    "Search, filter and platform navigation must never submit scans or authenticate to targets",
+    requestsBeforeFiltering + 2,
+    "Only the explicitly confirmed client query and saved-evidence assessment may submit requests",
   );
   for (const [label, path] of [
     ["Domains", "/domains"],
@@ -1177,7 +1795,7 @@ try {
   }
   assert.equal(
     apiCalls.filter((request) => request.method !== "GET").length,
-    requestsBeforeFiltering,
+    requestsBeforeFiltering + 2,
   );
   await page.getByRole("link", { name: "Host-Inventur", exact: true }).click();
   await page.getByRole("heading", { name: "Host-Übersicht", exact: true }).waitFor();
@@ -1186,7 +1804,14 @@ try {
   await page.getByLabel("Operator token", { exact: true }).fill(token);
   await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
   await page.getByText("Operator access unlocked", { exact: true }).waitFor();
-  assert.deepEqual(modes, ["connection", "inventory", "connection", "connection", "inventory"]);
+  assert.deepEqual(modes, [
+    "connection",
+    "inventory",
+    "connection",
+    "connection",
+    "inventory",
+    "windows_updates",
+  ]);
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
   assert.equal((await page.content()).includes(token), false);
   assert.equal((await page.content()).includes(password), false);

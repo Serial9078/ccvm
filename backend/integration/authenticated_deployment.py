@@ -27,6 +27,7 @@ PRE_TRANSPORT_RELEASE = "cb3b1486b3077fe1fac96925a7971235c07de7f0"
 HTTP_INVENTORY_RELEASE = "2d4c31446303c3851b9ebacb55c143596faef0dd"
 WINDOWS_PATCH_RELEASE = "f3c546e5200b9d7379e0981abef132ecda1e2b6a"
 SOFTWARE_RELEASE = "69706bff65dad6436af59aceec45fa325f01630e"
+OVERVIEW_RELEASE = "6c6474e27179998fe2d82815c0a826ca6de0a2e9"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -865,7 +866,9 @@ with engine.connect() as connection:
     )
     identities = {name: inspect(name)["Id"] for name in names}
     run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
-    script = (REPOSITORY / "scripts/update-inventory-overview.py").read_bytes()
+    script = run(
+        "git", "show", f"{target}:scripts/update-inventory-overview.py", cwd=REPOSITORY
+    ).stdout
     marker = source / ".git/ccvm-inventory-overview-deployment.json"
 
     def update(*flags):
@@ -962,6 +965,319 @@ print('Real TLS overview: operator guard, exact inventory basis, actionable soft
     )
 
 
+def verify_windows_clients_update(source, target, operation):
+    """Publish without migration, then assess synthetic offers over actual TLS.
+
+    No Windows target, WinRM connection or live update-source query participates
+    in this fixture. The only new inventory is committed while the worker is
+    paused, using the normal scoped audit helper and deliberately synthetic data.
+    """
+    snapshot = """import hashlib,json,sys
+from sqlalchemy import inspect
+from app.database.session import engine
+def stable(value):
+    if isinstance(value,(memoryview,bytes,bytearray)):
+        return {'bytes_hex':bytes(value).hex()}
+    return str(value)
+excluded=int(sys.argv[1]) if len(sys.argv)>1 else None
+with engine.connect() as connection:
+    connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+    result={}
+    for name in sorted(inspect(connection).get_table_names()):
+        quoted=engine.dialect.identifier_preparer.quote(name)
+        statement='SELECT * FROM '+quoted
+        if name=='host_assessments' and excluded is not None:
+            statement+=' WHERE id <> '+str(excluded)
+        rows=[dict(row) for row in connection.exec_driver_sql(statement).mappings()]
+        encoded=sorted(json.dumps(row,sort_keys=True,default=stable) for row in rows)
+        result[name]={'count':len(rows),'sha256':hashlib.sha256(
+            json.dumps(encoded,sort_keys=True).encode()).hexdigest()}
+    credential=connection.exec_driver_sql('SELECT customer_id FROM audit_credentials').one()
+    revision=connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar_one()
+    print(json.dumps({'tables':result,'customer':credential[0],'revision':revision}))
+"""
+
+    def capture(excluded_assessment=None):
+        arguments = () if excluded_assessment is None else (str(excluded_assessment),)
+        return json.loads(docker("exec", "ccvm-worker", "python", "-c", snapshot, *arguments))
+
+    before = capture()
+    assert before["revision"] == "d6a4b8e2f901"
+    assert before["tables"]["host_assessments"]["count"] == 1
+    assert before["tables"]["software_assessments"]["count"] == 1
+    assert before["tables"]["windows_patch_catalogs"]["count"] == 1
+    assert before["tables"]["software_advisory_catalogs"]["count"] == 1
+    paths = [
+        source / name
+        for name in (
+            "docker-compose.yml",
+            "docker-compose.network.yml",
+            "docker-compose.authenticated.yml",
+            "fixture.env",
+            "frontend/default.conf",
+            ".git/ccvm-authenticated-deployment.json",
+            ".git/ccvm-host-inventory-update.json",
+            ".git/ccvm-windows-patch-deployment.json",
+            ".git/ccvm-software-assessment-deployment.json",
+            ".git/ccvm-inventory-overview-deployment.json",
+        )
+    ]
+    paths += [
+        Path(operation["private"]) / name for name in ("vault.env", "operator.env", "gateway.conf")
+    ]
+    paths += [Path(operation["edge_path"])]
+    paths += sorted(Path(operation["certificate_dir"]).glob("*.pem"))
+    retained = {path: path.read_bytes() for path in paths}
+    names = (
+        "ccvm-backend",
+        "ccvm-worker",
+        "ccvm-frontend",
+        "ccvm-postgres",
+        "ccvm-audit-gateway",
+        "haproxy-edge",
+    )
+    identities = {name: inspect(name)["Id"] for name in names}
+    previous_head = run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip()
+    assert previous_head == OVERVIEW_RELEASE
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = run(
+        "git", "show", f"{target}:scripts/update-windows-clients.py", cwd=REPOSITORY
+    ).stdout
+    marker = source / ".git/ccvm-windows-clients-deployment.json"
+
+    def update(*flags):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            data=script,
+            cwd=source,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if result.returncode and marker.is_file():
+            log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+            if log.is_file():
+                print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert result.returncode == 0
+
+    def unchanged():
+        assert capture() == before
+        assert retained == {path: path.read_bytes() for path in paths}
+        assert identities == {name: inspect(name)["Id"] for name in names}
+
+    update()
+    assert not marker.exists()
+    assert run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip() == previous_head
+    unchanged()
+    update("--apply")
+    unchanged()
+    record = json.loads(marker.read_text())
+    assert record["version"] == "1.0.0" and record["phase"] == "verified"
+    assert record["target"] == target
+    record["phase"] = "services"
+    load_operator().write_json(marker, record)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    unchanged()
+    verified_journal = marker.read_bytes()
+    update("--apply", "--resume")
+    unchanged()
+    assert marker.read_bytes() == verified_journal
+    old_application(operation["images"]["backend"])
+
+    seed = """import json
+from datetime import UTC,datetime,timedelta
+from app.database.session import SessionLocal
+from app.models.asset import Asset
+from app.models.host import Host
+from app.models.host_audit import AuditCredential
+from app.models.network_scan import NetworkObservation,NetworkScan
+from app.api.v1.host_audits import start_audit
+from app.api.v1.network_scans import start_scan
+from app.schemas.host_audit import HostAuditCreate
+from app.schemas.network_scan import NetworkScanCreate
+with SessionLocal() as db:
+    credential=db.query(AuditCredential).one()
+    audit=start_audit(HostAuditCreate(customer_id=credential.customer_id,
+        credential_id=credential.id,target='192.0.2.12',mode='windows_updates',
+        winrm_transport='http_ntlm'),db)
+    now=datetime.now(UTC)
+    audit.inventory={'schema_version':1,'os':{
+        'family':'Windows','name':'Microsoft Windows 11 Pro','product_type':'1',
+        'hostname':'SYNTHETIC-CLIENT','architecture':'64-bit','native_architecture':'AMD64'},
+        'packages':{'status':'complete','source':'registry-uninstall','items':[]},
+        'hotfixes':{'status':'complete','source':'Get-HotFix','items':[]},
+        'windows_updates':{'schema_version':1,'source':'windows-update-agent',
+            'mode':'online','server_selection':'default',
+            'queried_at':(now-timedelta(minutes=1)).isoformat(),
+            'status':'complete','result_code':2,'total':1,'truncated':False,
+            'hidden_updates':'not_assessed','drivers':'not_assessed','superseded':'excluded',
+            'reboot_required':False,'items':[{
+                'update_id':'00000000-0000-4000-8000-000000000101','revision':200,
+                'title':'Synthetic retained client security offer','kbs':['KB5100001'],
+                'categories':[{'id':'0fa1201d-4330-4fa8-8ae9-b877473b6441',
+                    'type':'UpdateClassification','name':'Synthetic security classification'}],
+                'msrc_severity':'Critical','is_hidden':False,'is_installed':False,
+                'is_optional':False,'is_mandatory':False}]}}
+    audit.completed_at=now;audit.job.status='finished';audit.job.progress=100
+    audit.job.message='Completed synthetic inventory fixture';db.commit()
+    # Scope/jobs are made by the real helper, but the paused worker never probes.
+    created=start_scan(NetworkScanCreate(customer_id=credential.customer_id,
+        target='192.0.2.8/29',profile='fast'),db)
+    network=db.get(NetworkScan,created['id'])
+    for job in (network.discovery_job,network.audit_job):
+        job.status='finished';job.progress=100;job.message='Completed synthetic network fixture'
+    for address,services in (
+        ('192.0.2.12',[{'port':5985,'protocol':'tcp','state':'open','service':'http',
+            'product':'Synthetic reported service','version':'1.2.3',
+            'method':'probed','checks':[]}]),
+        ('192.0.2.13',[{'port':443,'protocol':'tcp','state':'open','service':'https',
+            'product':'Synthetic reported appliance','version':'4.5.6',
+            'method':'probed','checks':[]}]),
+        ('192.0.2.14',[]),
+    ):
+        asset=db.get(Asset,audit.asset_id) if address==audit.target else Asset(
+            customer_id=credential.customer_id,type='ip',target=address,ip_address=address)
+        host=Host(customer_id=credential.customer_id,hostname=address,ip_address=address,
+            source='nmap-network',alive=bool(services))
+        db.add_all([asset,host]);db.flush()
+        db.add(NetworkObservation(scan_id=network.id,host_id=host.id,asset_id=asset.id,
+            ip_address=address,services=services))
+    db.commit()
+    print(json.dumps({'audit':audit.id,'customer':credential.customer_id,'scan':network.id}))
+"""
+    saved = json.loads(seed_inventory(seed))
+    seeded = capture()
+    assert seeded["revision"] == before["revision"]
+    token = load_operator().read_env(Path(operation["private"]) / "operator.env")[
+        "CCVM_AUDIT_OPERATOR_TOKEN"
+    ]
+    client = """import http.client,json,socket,ssl,sys
+p=json.load(sys.stdin);context=ssl.create_default_context()
+def request(path,*,method='GET',body=None,token=True,private=True):
+    raw=socket.create_connection(('127.0.0.1',p['port']),timeout=10)
+    raw.sendall(b'PROXY TCP4 192.0.2.1 127.0.0.1 12345 '+str(p['port']).encode()+b'\\r\\n')
+    with context.wrap_socket(raw,server_hostname=p['hostname']) as tls:
+        data=json.dumps(body).encode() if body is not None else b''
+        headers=[f'{method} {path} HTTP/1.1',f"Host: {p['hostname']}",
+            'Content-Type: application/json',f'Content-Length: {len(data)}','Connection: close']
+        if token:headers.append('Authorization: Bearer '+p['token'])
+        tls.sendall(('\\r\\n'.join(headers)+'\\r\\n\\r\\n').encode()+data)
+        response=http.client.HTTPResponse(tls);response.begin()
+        if private:assert response.getheader('Cache-Control')=='no-store'
+        return response.status,json.loads(response.read())
+base='/api/v1/host-audits'
+capabilities=base+'/capabilities'
+discovered=base+'/discovered?customer_id='+str(p['customer'])+'&limit=200&offset=0'
+for path in (capabilities,discovered):
+    assert request(path,token=False)[0]==401
+status,matrix=request(capabilities)
+assert status==200 and matrix['version']=='scanner-capabilities-v1'
+assert {stage['id'] for stage in matrix['stage_labels']}=={
+    'discovery','inventory','configuration','os_baseline','software_checks','offered_updates'}
+platforms={platform['id']:platform for platform in matrix['platforms']}
+assert len(platforms)==8
+assert platforms['windows_client']['stages']['offered_updates']['status']=='limited'
+assert platforms['windows_client']['stages']['os_baseline']['status']=='unavailable'
+assert platforms['vmware']['stages']['inventory']['status']=='unavailable'
+assert platforms['linux']['stages']['os_baseline']['status']=='unavailable'
+status,queue=request(discovered)
+assert status==200 and queue['customer_id']==p['customer']
+assert queue['total']==2 and queue['has_more'] is False
+devices={device['ip_address']:device for device in queue['items']}
+assert set(devices)=={'192.0.2.12','192.0.2.13'}
+assert devices['192.0.2.12']['inventory_status']=='inventoried'
+assert devices['192.0.2.13']['inventory_status']=='not_inventoried'
+assert devices['192.0.2.12']['services'][0]['port']==5985
+assert devices['192.0.2.13']['services'][0]['product']=='Synthetic reported appliance'
+assert all(device['scan_id']==p['scan'] for device in devices.values())
+assert all('platform' not in device and 'os' not in device for device in devices.values())
+status,page=request(discovered.replace('limit=200','limit=1'))
+assert status==200 and len(page['items'])==1 and page['has_more'] is True
+status,next_page=request(discovered.replace('limit=200','limit=1').replace('offset=0','offset=1'))
+assert status==200 and len(next_page['items'])==1 and next_page['has_more'] is False
+assert page['items'][0]['ip_address']!=next_page['items'][0]['ip_address']
+assert request(discovered.replace('limit=200','limit=201'))[0]==422
+public={}
+for name in ('jobs','findings'):
+    status,data=request('/api/v1/'+name,token=False,private=False)
+    assert status==200;public[name]=data
+path=f"{base}/{p['audit']}/assess"
+assert request(path,method='POST',body={},token=False)[0]==401
+status,first=request(path,method='POST',body={})
+assert status==200 and first['status']=='updates_offered'
+assert first['engine_version']=='windows-client-wua-v1'
+assert first['catalog_id'] is None and first['catalog_applicable'] is False
+assert first['provider']=='windows-update-agent'
+assert first['result']['windows_updates']['mode']=='online'
+assert first['result']['windows_updates']['summary']['security']==1
+assert first['result']['windows_updates']['summary']['actionable']==1
+assert first['result']['windows_updates']['items'][0]['title']==p['private_offer']
+assert 'baseline_build' not in first['result']
+status,second=request(path,method='POST',body={})
+assert status==200 and second['id']==first['id']
+status,history=request(f"{base}/{p['audit']}/assessments")
+assert status==200 and len(history)==1 and history[0]['id']==first['id']
+status,overview=request(base+'/overview?customer_id='+str(p['customer']))
+assert status==200
+host=next(host for host in overview['hosts'] if host['target']=='192.0.2.12')
+assert host['platform']=='windows_client'
+assert host['windows_assessment']['status']=='updates_offered'
+for name in ('jobs','findings'):
+    status,data=request('/api/v1/'+name,token=False,private=False)
+    assert status==200 and data==public[name]
+    encoded=json.dumps(data)
+    for secret in (p['private_offer'],p['update_id'],p['token'],'KB5100001'):
+        assert secret not in encoded
+print(json.dumps({'assessment':first['id']}))
+"""
+    assessed = json.loads(
+        docker(
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            "container:haproxy-edge",
+            "--entrypoint",
+            "python",
+            operation["images"]["backend"],
+            "-I",
+            "-c",
+            client,
+            data=json.dumps(
+                {
+                    "port": operation["tls_port"],
+                    "hostname": operation["hostname"],
+                    "token": token,
+                    **saved,
+                    "private_offer": "Synthetic retained client security offer",
+                    "update_id": "00000000-0000-4000-8000-000000000101",
+                }
+            ).encode(),
+        )
+    )
+    after = capture()
+    assert after["tables"]["host_assessments"]["count"] == (
+        seeded["tables"]["host_assessments"]["count"] + 1
+    )
+    assert capture(assessed["assessment"]) == seeded
+    assert retained == {path: path.read_bytes() for path in paths}
+    assert identities == {name: inspect(name)["Id"] for name in names}
+    assert marker.read_bytes() == verified_journal
+    print(
+        "VERIFIED: migration-free Windows client update, all retained rows/journals/ingress, "
+        "stopped-service resume, private TLS capability/discovery APIs and synthetic local WUA "
+        "assessment without a catalog or public jobs/findings leakage",
+        flush=True,
+    )
+
+
 def main():
     if sys.argv[1:] not in (
         [],
@@ -969,6 +1285,7 @@ def main():
         ["--windows-patch-update"],
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
+        ["--windows-clients-update"],
     ):
         raise RuntimeError("Unknown disposable deployment fixture mode")
     update_mode = bool(sys.argv[1:])
@@ -976,12 +1293,18 @@ def main():
         ["--windows-patch-update"],
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
+        ["--windows-clients-update"],
     )
     software_mode = sys.argv[1:] in (
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
+        ["--windows-clients-update"],
     )
-    overview_mode = sys.argv[1:] == ["--inventory-overview-update"]
+    overview_mode = sys.argv[1:] in (
+        ["--inventory-overview-update"],
+        ["--windows-clients-update"],
+    )
+    windows_clients_mode = sys.argv[1:] == ["--windows-clients-update"]
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
@@ -1192,7 +1515,15 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             if software_mode:
                 verify_software_update(source, SOFTWARE_RELEASE, json.loads(journal.read_text()))
             if overview_mode:
-                verify_overview_update(source, reviewed_target, json.loads(journal.read_text()))
+                verify_overview_update(
+                    source,
+                    OVERVIEW_RELEASE if windows_clients_mode else reviewed_target,
+                    json.loads(journal.read_text()),
+                )
+            if windows_clients_mode:
+                verify_windows_clients_update(
+                    source, reviewed_target, json.loads(journal.read_text())
+                )
         finally:
             with contextlib.suppress(Exception):
                 compose(

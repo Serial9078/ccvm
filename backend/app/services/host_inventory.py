@@ -2,11 +2,14 @@
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 MAX_OUTPUT = 8 * 1024 * 1024
@@ -107,10 +110,179 @@ def text(value):
     return value
 
 
+def _update_text(value, limit=500):
+    if (
+        not isinstance(value, str)
+        or len(value) > limit
+        or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in value)
+    ):
+        raise CollectionError("Invalid Windows update evidence")
+    return value
+
+
+def _update_guid(value):
+    try:
+        parsed = uuid.UUID(_update_text(value, 36))
+    except (ValueError, AttributeError) as error:
+        raise CollectionError("Invalid Windows update evidence") from error
+    if str(parsed) != value.lower():
+        raise CollectionError("Invalid Windows update evidence")
+    return str(parsed)
+
+
+def _update_integer(value, maximum=2147483647):
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise CollectionError("Invalid Windows update evidence")
+    return value
+
+
+def normalize_windows_updates(data):
+    """Only typed configured-source evidence; no raw transport/COM errors."""
+    expected = {
+        "schema_version": 1,
+        "source": "windows-update-agent",
+        "mode": "online",
+        "server_selection": "default",
+        "hidden_updates": "not_assessed",
+        "drivers": "not_assessed",
+        "superseded": "excluded",
+    }
+    if not isinstance(data, dict) or any(data.get(key) != value for key, value in expected.items()):
+        raise CollectionError("Invalid Windows update evidence")
+    if type(data.get("schema_version")) is not int:
+        raise CollectionError("Invalid Windows update evidence")
+    queried_at = _update_text(data.get("queried_at"), 60)
+    try:
+        stamp = datetime.fromisoformat(queried_at.replace("Z", "+00:00"))
+        if stamp.utcoffset() is None or stamp.utcoffset().total_seconds() != 0:
+            raise ValueError("UTC timestamp required")
+    except ValueError as error:
+        raise CollectionError("Invalid Windows update evidence") from error
+    status = data.get("status")
+    code = data.get("result_code")
+    total = _update_integer(data.get("total"), 100000)
+    rows = data.get("items")
+    truncated = data.get("truncated")
+    reboot = data.get("reboot_required")
+    if (
+        not isinstance(status, str)
+        or status not in {"complete", "partial", "unavailable", "timeout"}
+        or not isinstance(rows, list)
+        or len(rows) > 200
+        or type(truncated) is not bool
+        or total < len(rows)
+        or truncated != (total > len(rows))
+        or (reboot is not None and type(reboot) is not bool)
+    ):
+        raise CollectionError("Invalid Windows update evidence")
+    if status in {"complete", "partial"}:
+        if type(code) is not int or code not in {2, 3}:
+            raise CollectionError("Invalid Windows update evidence")
+        if (status == "complete") != (code == 2 and not truncated):
+            raise CollectionError("Invalid Windows update evidence")
+    elif code is not None or total or rows or truncated:
+        raise CollectionError("Invalid Windows update evidence")
+    normalized, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise CollectionError("Invalid Windows update evidence")
+        identity = (_update_guid(row.get("update_id")), _update_integer(row.get("revision")))
+        if (
+            identity in seen
+            or row.get("is_installed") is not False
+            or row.get("is_hidden") is not False
+        ):
+            raise CollectionError("Invalid Windows update evidence")
+        seen.add(identity)
+        kbs, categories = row.get("kbs"), row.get("categories")
+        if not isinstance(kbs, list) or len(kbs) > 64 or not isinstance(categories, list):
+            raise CollectionError("Invalid Windows update evidence")
+        if len(categories) > 100 or any(
+            not isinstance(kb, str) or not re.fullmatch(r"KB[0-9]{1,12}", kb) for kb in kbs
+        ):
+            raise CollectionError("Invalid Windows update evidence")
+        normalized_categories = []
+        for category in categories:
+            if not isinstance(category, dict):
+                raise CollectionError("Invalid Windows update evidence")
+            normalized_categories.append(
+                {
+                    "id": _update_guid(category.get("id")),
+                    "name": _update_text(category.get("name")),
+                    "type": _update_text(category.get("type"), 64),
+                }
+            )
+        severity = row.get("msrc_severity")
+        if severity is not None:
+            severity = _update_text(severity, 32)
+            if severity not in {"Critical", "Important", "Moderate", "Low", ""}:
+                raise CollectionError("Invalid Windows update evidence")
+        optional = row.get("is_optional")
+        mandatory = row.get("is_mandatory")
+        if any(value is not None and type(value) is not bool for value in (optional, mandatory)):
+            raise CollectionError("Invalid Windows update evidence")
+        normalized.append(
+            {
+                "update_id": identity[0],
+                "revision": identity[1],
+                "title": _update_text(row.get("title"), 1000),
+                "kbs": list(dict.fromkeys(kbs)),
+                "categories": normalized_categories,
+                "msrc_severity": severity or None,
+                "is_installed": False,
+                "is_hidden": False,
+                "is_optional": optional,
+                "is_mandatory": mandatory,
+            }
+        )
+    result = {
+        **expected,
+        "queried_at": stamp.isoformat().replace("+00:00", "Z"),
+        "status": status,
+        "result_code": code,
+        "total": total,
+        "items": normalized,
+        "truncated": truncated,
+        "reboot_required": reboot,
+    }
+    if status in {"unavailable", "timeout"}:
+        error_code = data.get("error_code")
+        if not isinstance(error_code, str) or error_code not in {
+            "update_query_failed",
+            "invalid_evidence",
+            "timeout",
+        }:
+            raise CollectionError("Invalid Windows update evidence")
+        result["error_code"] = error_code
+    return result
+
+
+def _unavailable_windows_updates():
+    return {
+        "schema_version": 1,
+        "source": "windows-update-agent",
+        "mode": "online",
+        "server_selection": "default",
+        "queried_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "status": "unavailable",
+        "result_code": None,
+        "total": 0,
+        "items": [],
+        "truncated": False,
+        "hidden_updates": "not_assessed",
+        "drivers": "not_assessed",
+        "superseded": "excluded",
+        "reboot_required": None,
+        "error_code": "invalid_evidence",
+    }
+
+
 def normalize_inventory(data, kind, mode):
     """Accept bounded typed evidence, never arbitrary remote JSON or error text."""
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise CollectionError("Unsupported inventory format")
+    if mode == "windows_updates" and kind != "winrm":
+        raise CollectionError("Windows update searches require WinRM")
     os_data = data.get("os")
     family = "Windows" if kind == "winrm" else "Linux"
     if not isinstance(os_data, dict) or os_data.get("family") != family:
@@ -190,4 +362,11 @@ def normalize_inventory(data, kind, mode):
             "source": section["source"],
             "items": normalized,
         }
+    if mode == "windows_updates":
+        try:
+            result["windows_updates"] = normalize_windows_updates(data.get("windows_updates"))
+        except CollectionError:
+            # A malformed or unavailable update provider never erases the
+            # independently collected OS, registry and hotfix snapshot.
+            result["windows_updates"] = _unavailable_windows_updates()
     return result

@@ -23,10 +23,15 @@ def frozen_audit(db, job):
         raise ValueError("Host audit customer/asset identity changed")
     if asset.type != "ip" or asset.target != audit.target or job.plugin != "hostinventory":
         raise ValueError("Host audit target identity changed")
-    if audit.mode not in {"connection", "inventory"} or not 1 <= audit.port <= 65535:
+    if (
+        audit.mode not in {"connection", "inventory", "windows_updates"}
+        or not 1 <= audit.port <= 65535
+    ):
         raise ValueError("Invalid frozen host audit parameters")
     if credential.kind not in {"ssh_password", "ssh_key", "winrm"}:
         raise ValueError("Unsupported credential kind")
+    if audit.mode == "windows_updates" and credential.kind != "winrm":
+        raise ValueError("Windows update searches require WinRM")
     if audit.winrm_transport not in {"https", "http_ntlm"} or (
         credential.kind != "winrm" and audit.winrm_transport != "https"
     ):
@@ -61,7 +66,11 @@ def run_hostinventory(db, job):
             "ca_bundle": os.environ.get("CCVM_WINRM_CA_BUNDLE") or None,
         }
         job.progress = 10
-        job.message = "Authenticating and collecting read-only host evidence"
+        job.message = (
+            "Collecting inventory and searching configured Windows update source; no installation"
+            if audit.mode == "windows_updates"
+            else "Authenticating and collecting read-only host evidence"
+        )
         db.commit()
 
         def cancelled():
@@ -100,9 +109,18 @@ def run_hostinventory(db, job):
             audit.inventory[section]["status"] in {"unavailable", "truncated"}
             for section in ("packages", "hotfixes")
         )
+        if audit.mode == "windows_updates":
+            incomplete = incomplete or audit.inventory["windows_updates"]["status"] != "complete"
         job.status = "failed" if incomplete else "finished"
         if audit.mode == "connection":
             job.message = "Authenticated connection test finished; OS identity read successfully"
+        elif audit.mode == "windows_updates":
+            updates = audit.inventory["windows_updates"]
+            job.message = (
+                f"Windows update search {updates['status']}; inventory evidence retained. "
+                f"Offered updates: {updates['total']}. "
+                "Configured source only; no updates installed."
+            )
         else:
             job.message = (
                 (

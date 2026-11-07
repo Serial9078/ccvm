@@ -22,8 +22,11 @@ import {
 } from "@mui/material";
 import { auditRequest } from "./api";
 import type { HostAssessment, PatchCatalog } from "./api";
+import { WindowsUpdateReport } from "./windows-update-report";
+import { updateStatusLabels } from "./overview-state";
 
 const statuses: Record<string, string> = {
+  ...updateStatusLabels,
   build_gap: "Below Microsoft update baseline",
   meets_catalog_baseline: "Meets catalog build baseline",
   identity_incomplete: "More OS identity evidence needed",
@@ -135,7 +138,12 @@ export function PatchAssessmentDialog({
     ["build_gap", "meets_catalog_baseline"].includes(assessment?.status ?? "") && !hasValidity;
   return (
     <Dialog open onClose={close} maxWidth="lg" fullWidth>
-      <DialogTitle>Windows patch assessment · {target}</DialogTitle>
+      <DialogTitle>
+        {result?.provider === "windows-update-agent"
+          ? "Windows-Updateangebote"
+          : "Windows patch assessment"}{" "}
+        · {target}
+      </DialogTitle>
       <DialogContent>
         {!result ? (
           <Typography>No saved patch assessments for this inventory yet.</Typography>
@@ -164,7 +172,11 @@ export function PatchAssessmentDialog({
                 color={
                   assessment.status === "meets_catalog_baseline" && !expired && !validityUnknown
                     ? "success"
-                    : assessment.status === "build_gap" || expired || validityUnknown
+                    : ["build_gap", "updates_offered", "update_query_incomplete"].includes(
+                          assessment.status,
+                        ) ||
+                        expired ||
+                        validityUnknown
                       ? "warning"
                       : "default"
                 }
@@ -178,8 +190,9 @@ export function PatchAssessmentDialog({
             </Box>
             {expired && (
               <Alert severity="warning">
-                This saved assessment has expired. Collect current inventory or synchronize the
-                catalog, then assess again.
+                {result.provider === "windows-update-agent"
+                  ? "Diese gespeicherte Updateabfrage ist veraltet. Eine neue Onlineabfrage starten und die neue Evidenz bewerten."
+                  : "This saved assessment has expired. Collect current inventory or synchronize the catalog, then assess again."}
               </Alert>
             )}
             {validityUnknown && (
@@ -188,128 +201,139 @@ export function PatchAssessmentDialog({
                 and catalog data before relying on it.
               </Alert>
             )}
-            {result.product && <Typography variant="h6">{result.product.name}</Typography>}
-            <Stack direction="row" useFlexGap sx={{ gap: 3, flexWrap: "wrap" }}>
-              <Typography>
-                Installed OS build: <strong>{result.installed_build ?? "Unavailable"}</strong>
-              </Typography>
-              <Typography>
-                Microsoft baseline build: <strong>{result.baseline_build ?? "Unavailable"}</strong>
-              </Typography>
-            </Stack>
-            {result.baseline_kbs.length > 0 && (
-              <Typography>
-                Baseline update:{" "}
-                {result.baseline_kbs.map((kb, index) => (
-                  <span key={kb}>
-                    {index > 0 && ", "}
-                    {/^KB\d+$/.test(kb) ? (
-                      <Link
-                        href={`https://support.microsoft.com/help/${kb.slice(2)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        {kb}
-                      </Link>
-                    ) : (
-                      kb
-                    )}
-                  </span>
-                ))}
-              </Typography>
-            )}
-            <Typography variant="body2" color="text.secondary">
-              MSRC catalog retrieved {date(result.catalog_retrieved_at)} · Document coverage{" "}
-              {result.coverage.catalog_start ?? "unavailable"} to{" "}
-              {result.coverage.catalog_end ?? "unavailable"}
-            </Typography>
-            <Alert severity="info">
-              This compares standard Windows Server OS builds only. Component applicability,
-              third-party software, Linux and hotpatch coverage are not assessed.
-            </Alert>
-            {result.limitations.length > 0 && (
-              <Typography variant="body2" color="text.secondary">
-                {result.limitations.join(" ")}
-              </Typography>
-            )}
-            {result.cve_references.length > 0 && (
-              <Box>
-                <Typography variant="h6">
-                  Related CVE advisories · {result.cve_references_total.toLocaleString()}
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                  References associated with the baseline update. These are not confirmed
-                  vulnerabilities on this host.
-                </Typography>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Advisory</TableCell>
-                      <TableCell>Title</TableCell>
-                      <TableCell>Published severity</TableCell>
-                      <TableCell>Source documents</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {result.cve_references.slice(0, limit).map((reference) => (
-                      <TableRow key={reference.cve}>
-                        <TableCell>
-                          {/^CVE-\d{4}-\d{4,}$/.test(reference.cve) ? (
-                            <Link
-                              href={`https://msrc.microsoft.com/update-guide/vulnerability/${reference.cve}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              {reference.cve}
-                            </Link>
-                          ) : (
-                            reference.cve
-                          )}
-                        </TableCell>
-                        <TableCell sx={{ overflowWrap: "anywhere" }}>{reference.title}</TableCell>
-                        <TableCell>
-                          {reference.severity}
-                          {reference.cvss_score != null && ` · CVSS ${reference.cvss_score}`}
-                        </TableCell>
-                        <TableCell>{reference.document_ids.join(", ")}</TableCell>
-                      </TableRow>
+            {result.provider === "windows-update-agent" ? (
+              <WindowsUpdateReport result={result} />
+            ) : (
+              <>
+                {result.product && <Typography variant="h6">{result.product.name}</Typography>}
+                <Stack direction="row" useFlexGap sx={{ gap: 3, flexWrap: "wrap" }}>
+                  <Typography>
+                    Installed OS build: <strong>{result.installed_build ?? "Unavailable"}</strong>
+                  </Typography>
+                  <Typography>
+                    Microsoft baseline build:{" "}
+                    <strong>{result.baseline_build ?? "Unavailable"}</strong>
+                  </Typography>
+                </Stack>
+                {result.baseline_kbs.length > 0 && (
+                  <Typography>
+                    Baseline update:{" "}
+                    {result.baseline_kbs.map((kb, index) => (
+                      <span key={kb}>
+                        {index > 0 && ", "}
+                        {/^KB\d+$/.test(kb) ? (
+                          <Link
+                            href={`https://support.microsoft.com/help/${kb.slice(2)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {kb}
+                          </Link>
+                        ) : (
+                          kb
+                        )}
+                      </span>
                     ))}
-                  </TableBody>
-                </Table>
-                {result.cve_references.length > limit && (
-                  <Button onClick={() => setLimit(limit + 100)}>Show 100 more advisories</Button>
-                )}
-                {result.cve_references_truncated && (
-                  <Typography color="text.secondary">
-                    The stored advisory list is limited; total references:{" "}
-                    {result.cve_references_total.toLocaleString()}.
                   </Typography>
                 )}
-              </Box>
-            )}
-            {result.sources.length > 0 && (
-              <Box>
-                <Typography variant="subtitle1">Microsoft source documents</Typography>
-                {result.sources.map((source) => (
-                  <Typography
-                    key={source.document_id}
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ overflowWrap: "anywhere", mb: 1 }}
-                  >
-                    <Link
-                      href={referenceUrl(source.document_id)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {source.document_id}
-                    </Link>{" "}
-                    · Revision {date(source.current_release_date)}
-                    <br />
-                    SHA-256 {source.sha256}
+                <Typography variant="body2" color="text.secondary">
+                  MSRC catalog retrieved {date(result.catalog_retrieved_at)} · Document coverage{" "}
+                  {result.coverage.catalog_start ?? "unavailable"} to{" "}
+                  {result.coverage.catalog_end ?? "unavailable"}
+                </Typography>
+                <Alert severity="info">
+                  This compares standard Windows Server OS builds only. Component applicability,
+                  third-party software, Linux and hotpatch coverage are not assessed.
+                </Alert>
+                {result.limitations.length > 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    {result.limitations.join(" ")}
                   </Typography>
-                ))}
-              </Box>
+                )}
+                {result.cve_references.length > 0 && (
+                  <Box>
+                    <Typography variant="h6">
+                      Related CVE advisories · {result.cve_references_total.toLocaleString()}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      References associated with the baseline update. These are not confirmed
+                      vulnerabilities on this host.
+                    </Typography>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Advisory</TableCell>
+                          <TableCell>Title</TableCell>
+                          <TableCell>Published severity</TableCell>
+                          <TableCell>Source documents</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {result.cve_references.slice(0, limit).map((reference) => (
+                          <TableRow key={reference.cve}>
+                            <TableCell>
+                              {/^CVE-\d{4}-\d{4,}$/.test(reference.cve) ? (
+                                <Link
+                                  href={`https://msrc.microsoft.com/update-guide/vulnerability/${reference.cve}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  {reference.cve}
+                                </Link>
+                              ) : (
+                                reference.cve
+                              )}
+                            </TableCell>
+                            <TableCell sx={{ overflowWrap: "anywhere" }}>
+                              {reference.title}
+                            </TableCell>
+                            <TableCell>
+                              {reference.severity}
+                              {reference.cvss_score != null && ` · CVSS ${reference.cvss_score}`}
+                            </TableCell>
+                            <TableCell>{reference.document_ids.join(", ")}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    {result.cve_references.length > limit && (
+                      <Button onClick={() => setLimit(limit + 100)}>
+                        Show 100 more advisories
+                      </Button>
+                    )}
+                    {result.cve_references_truncated && (
+                      <Typography color="text.secondary">
+                        The stored advisory list is limited; total references:{" "}
+                        {result.cve_references_total.toLocaleString()}.
+                      </Typography>
+                    )}
+                  </Box>
+                )}
+                {result.sources.length > 0 && (
+                  <Box>
+                    <Typography variant="subtitle1">Microsoft source documents</Typography>
+                    {result.sources.map((source) => (
+                      <Typography
+                        key={source.document_id}
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ overflowWrap: "anywhere", mb: 1 }}
+                      >
+                        <Link
+                          href={referenceUrl(source.document_id)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {source.document_id}
+                        </Link>{" "}
+                        · Revision {date(source.current_release_date)}
+                        <br />
+                        SHA-256 {source.sha256}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
+              </>
             )}
           </Stack>
         )}

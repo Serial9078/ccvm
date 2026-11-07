@@ -28,6 +28,7 @@ import { useCustomers } from "../customers/hooks";
 import { auditRequest, canUseAuditApi } from "./api";
 import type {
   Credential,
+  AuditMode,
   HostAssessment,
   HostAudit,
   InventorySection,
@@ -37,8 +38,10 @@ import type {
 import { PatchAssessmentDialog, PatchCatalogPanel } from "./patch-assessments";
 import { SoftwareAssessmentDialog, SoftwareCatalogPanel } from "./software-assessments";
 import { HostOverviewPanel } from "./overview";
-import { platformNames, matchesPlatform } from "./overview-state";
+import { platformNames, matchesPlatform, freshWindowsUpdateQuery } from "./overview-state";
 import { HostStatusDialog } from "./host-status-dialog";
+import { CapabilitiesPanel } from "./capabilities-panel";
+import { DiscoveredDevicesPanel } from "./discovered-devices";
 import type { HostOverview, HostPlatformFilter, OverviewHost } from "./overview-state";
 
 const emptyCredential = {
@@ -140,6 +143,9 @@ function AuditPanel({
   const [overviewLoaded, setOverviewLoaded] = useState(false);
   const [overviewDetail, setOverviewDetail] = useState<OverviewHost | null>(null);
   const [collectOpen, setCollectOpen] = useState(false);
+  const [collectionMode, setCollectionMode] =
+    useState<Exclude<AuditMode, "connection">>("inventory");
+  const [updateQueryConfirm, setUpdateQueryConfirm] = useState(false);
   const [form, setForm] = useState(emptyCredential);
   const [createOpen, setCreateOpen] = useState(false);
   const fileGeneration = useRef(0);
@@ -167,6 +173,8 @@ function AuditPanel({
   };
   useEffect(() => {
     setCollectOpen(false);
+    setUpdateQueryConfirm(false);
+    setCollectionMode("inventory");
     setOverviewDetail(null);
     setDetail(null);
     setAssessmentView(null);
@@ -272,6 +280,7 @@ function AuditPanel({
         mode,
       });
       setCollectOpen(false);
+      setUpdateQueryConfirm(false);
     });
   const assessWindows = (auditId: number) =>
     action(async () => {
@@ -309,6 +318,19 @@ function AuditPanel({
     target &&
     (selected.kind === "winrm" || /^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)),
   );
+  const prepareHostCollection = (host: OverviewHost, mode?: "inventory" | "windows_updates") => {
+    setTarget(host.target);
+    setCredentialId(String(host.latest_run.credential_id));
+    setPort(String(host.latest_run.port));
+    setFingerprint(host.latest_run.ssh_fingerprint ?? "");
+    setWinrmTransport(host.latest_run.winrm_transport);
+    setCollectionMode(
+      mode ?? (host.latest_run.mode === "windows_updates" ? "windows_updates" : "inventory"),
+    );
+    setUpdateQueryConfirm(false);
+    setOverviewDetail(null);
+    setCollectOpen(true);
+  };
   return (
     <Stack spacing={3}>
       <Stack direction="row" spacing={2} sx={{ alignItems: "center", flexWrap: "wrap" }}>
@@ -318,10 +340,26 @@ function AuditPanel({
         <Button
           variant="contained"
           disabled={platform === "vmware"}
-          onClick={() => setCollectOpen(true)}
+          onClick={() => {
+            setCollectionMode("inventory");
+            setCollectOpen(true);
+          }}
         >
           Inventur starten
         </Button>
+        {platform === "windows-client" && (
+          <Button
+            variant="outlined"
+            disabled={busy}
+            onClick={() => {
+              setCollectionMode("windows_updates");
+              if (selected?.kind !== "winrm") setCredentialId("");
+              setCollectOpen(true);
+            }}
+          >
+            Windows-Updates abfragen
+          </Button>
+        )}
         <Button disabled={busy} onClick={() => void action(async () => {})}>
           Status aktualisieren
         </Button>
@@ -333,18 +371,55 @@ function AuditPanel({
         loading={!overviewLoaded}
         onDetail={setOverviewDetail}
       />
+      <DiscoveredDevicesPanel
+        token={token}
+        customerId={customerId}
+        onInventory={(address) => {
+          setTarget(address);
+          setCredentialId("");
+          setPort("");
+          setFingerprint("");
+          setWinrmTransport("https");
+          setCollectionMode("inventory");
+          setUpdateQueryConfirm(false);
+          setCollectOpen(true);
+        }}
+      />
+      <CapabilitiesPanel token={token} />
       <Dialog
         open={collectOpen}
-        onClose={() => !busy && setCollectOpen(false)}
+        onClose={() => {
+          if (!busy) {
+            setCollectOpen(false);
+            setUpdateQueryConfirm(false);
+          }
+        }}
         maxWidth="md"
         fullWidth
         data-testid="inventory-form-dialog"
       >
-        <DialogTitle>Inventur starten</DialogTitle>
+        <DialogTitle>
+          {collectionMode === "windows_updates" ? "Windows-Updates abfragen" : "Inventur starten"}
+        </DialogTitle>
         <DialogContent>
+          {error && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {error}
+            </Alert>
+          )}
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Read-only host inventory
+            {collectionMode === "windows_updates"
+              ? "Windows-Inventur und explizite Onlineabfrage der am Gerät konfigurierten Windows Update-/WSUS-Quelle."
+              : "Read-only host inventory"}
           </Typography>
+          {collectionMode === "windows_updates" && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Die Abfrage kontaktiert die konfigurierte Updatequelle und kann Metadaten
+              herunterladen sowie den lokalen Updatecache verändern. Sie installiert keine Updates
+              und startet das Gerät nicht neu. Keine Änderung der Updatequelle oder Richtlinien.
+              Laufzeit bis zu 180 Sekunden.
+            </Alert>
+          )}
           <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2 }}>
             <TextField
               select
@@ -361,11 +436,13 @@ function AuditPanel({
                 .filter(
                   (c) =>
                     c.enabled &&
-                    (platform === "linux"
-                      ? c.kind.startsWith("ssh_")
-                      : ["windows-server", "windows-client"].includes(platform)
-                        ? c.kind === "winrm"
-                        : true),
+                    (collectionMode === "windows_updates"
+                      ? c.kind === "winrm"
+                      : platform === "linux"
+                        ? c.kind.startsWith("ssh_")
+                        : ["windows-server", "windows-client"].includes(platform)
+                          ? c.kind === "winrm"
+                          : true),
                 )
                 .map((c) => (
                   <MenuItem key={c.id} value={String(c.id)}>
@@ -434,15 +511,28 @@ function AuditPanel({
             </Button>
             <Button
               variant="contained"
-              disabled={!valid || busy}
-              onClick={() => queue("inventory")}
+              disabled={
+                !valid ||
+                busy ||
+                (collectionMode === "windows_updates" && selected?.kind !== "winrm")
+              }
+              onClick={() =>
+                collectionMode === "windows_updates"
+                  ? setUpdateQueryConfirm(true)
+                  : queue("inventory")
+              }
             >
-              Collect inventory
+              {collectionMode === "windows_updates"
+                ? "Updateabfrage vorbereiten"
+                : "Collect inventory"}
             </Button>
             <Button
               disabled={busy}
               onClick={() => {
-                setForm(emptyCredential);
+                setForm({
+                  ...emptyCredential,
+                  kind: collectionMode === "windows_updates" ? "winrm" : emptyCredential.kind,
+                });
                 fileGeneration.current++;
                 setError("");
                 setCreateOpen(true);
@@ -460,6 +550,44 @@ function AuditPanel({
         <DialogActions>
           <Button disabled={busy} onClick={() => setCollectOpen(false)}>
             Inventur schließen
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={updateQueryConfirm}
+        onClose={() => !busy && setUpdateQueryConfirm(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Windows-Updatequelle abfragen</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            {error && <Alert severity="error">{error}</Alert>}
+            <Typography>
+              Auf {target} wird zuerst die Inventur gelesen und anschließend eine neue Onlineabfrage
+              der am Gerät konfigurierten Windows Update-/WSUS-Quelle ausgeführt.
+            </Typography>
+            <Alert severity="info">
+              Die Abfrage lädt gegebenenfalls Metadaten und aktualisiert den Updatecache. Sie
+              installiert keine Updates, ändert keine Updatequelle oder Richtlinie und löst keinen
+              Neustart aus. Laufzeit bis zu 180 Sekunden.
+            </Alert>
+            <Typography variant="body2" color="text.secondary">
+              Optionale, Funktions- und Definitionsangebote werden getrennt ausgewiesen. Keine
+              Angebote bedeuten keine vollständige Patchfreigabe.
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setUpdateQueryConfirm(false)}>
+            Zurück
+          </Button>
+          <Button
+            variant="contained"
+            disabled={busy || !valid || selected?.kind !== "winrm"}
+            onClick={() => queue("windows_updates")}
+          >
+            Abfrage starten
           </Button>
         </DialogActions>
       </Dialog>
@@ -503,8 +631,12 @@ function AuditPanel({
                       {run.target}:{run.port}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
-                      {run.mode === "connection" ? "Connection test" : "Host inventory"} ·{" "}
-                      {new Date(run.created_at).toLocaleString()}
+                      {run.mode === "connection"
+                        ? "Connection test"
+                        : run.mode === "windows_updates"
+                          ? "Windows-Updateabfrage mit Inventur"
+                          : "Host inventory"}{" "}
+                      · {new Date(run.created_at).toLocaleString()}
                     </Typography>
                     {credentials.find((credential) => credential.id === run.credential_id)?.kind ===
                       "winrm" && (
@@ -556,7 +688,7 @@ function AuditPanel({
                     >
                       View evidence
                     </Button>
-                    {run.mode === "inventory" &&
+                    {["inventory", "windows_updates"].includes(run.mode) &&
                       ["finished", "failed"].includes(run.job.status) &&
                       credentials.find((credential) => credential.id === run.credential_id)
                         ?.kind === "winrm" && (
@@ -613,8 +745,12 @@ function AuditPanel({
                           <Button
                             disabled={
                               busy ||
-                              overview?.hosts.find((host) => host.target === run.target)
-                                ?.platform === "windows_client" ||
+                              (overview?.hosts.find((host) => host.target === run.target)
+                                ?.platform === "windows_client" &&
+                                !overview?.hosts.some(
+                                  (host) =>
+                                    host.inventory?.id === run.id && freshWindowsUpdateQuery(host),
+                                )) ||
                               (run.job.status === "failed" &&
                                 !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
                                 !(detail?.id === run.id && detail.inventory))
@@ -711,14 +847,9 @@ function AuditPanel({
             );
         }}
         collect={(host) => {
-          setTarget(host.target);
-          setCredentialId(String(host.latest_run.credential_id));
-          setPort(String(host.latest_run.port));
-          setFingerprint(host.latest_run.ssh_fingerprint ?? "");
-          setWinrmTransport(host.latest_run.winrm_transport);
-          setOverviewDetail(null);
-          setCollectOpen(true);
+          prepareHostCollection(host);
         }}
+        queryWindows={(host) => prepareHostCollection(host, "windows_updates")}
       />
       <Dialog
         open={createOpen}
@@ -754,8 +885,12 @@ function AuditPanel({
                 });
               }}
             >
-              <MenuItem value="ssh_password">Linux · SSH password</MenuItem>
-              <MenuItem value="ssh_key">Linux · SSH private key</MenuItem>
+              {collectionMode !== "windows_updates" && (
+                <MenuItem value="ssh_password">Linux · SSH password</MenuItem>
+              )}
+              {collectionMode !== "windows_updates" && (
+                <MenuItem value="ssh_key">Linux · SSH private key</MenuItem>
+              )}
               <MenuItem value="winrm">Windows · WinRM / NTLM</MenuItem>
             </TextField>
             <TextField
@@ -916,6 +1051,23 @@ function AuditPanel({
                 · {detail.inventory.os.architecture}
               </Typography>
               <Typography>Host: {detail.inventory.os.hostname}</Typography>
+              {detail.inventory.windows_updates && (
+                <Alert
+                  severity={
+                    detail.inventory.windows_updates.status === "complete" ? "info" : "warning"
+                  }
+                  sx={{ mt: 2 }}
+                >
+                  Windows-Updateabfrage: {detail.inventory.windows_updates.status} ·{" "}
+                  {detail.inventory.windows_updates.total} Angebote der konfigurierten Gerätequelle
+                  ·{" "}
+                  {detail.inventory.windows_updates.queried_at
+                    ? new Date(detail.inventory.windows_updates.queried_at).toLocaleString()
+                    : "Zeitpunkt nicht verfügbar"}
+                  . Die Abfrage installiert keine Updates. Angebote und Klassifikation unter
+                  „Windows jetzt bewerten“ öffnen.
+                </Alert>
+              )}
               {detail.job.status === "failed" && (
                 <Alert severity="warning" sx={{ mt: 2 }}>
                   This inventory is incomplete. Available evidence is retained; unavailable sections
@@ -1006,7 +1158,13 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
       <Box>
         <Typography variant="h4">{platformNames[platform]}</Typography>
         <Typography color="text.secondary">
-          Updatebedarf, geprüfte OS-Baseline und offene Abdeckung auf einen Blick.
+          {platform === "windows-client"
+            ? "Updateangebote der Gerätequelle, Neustartbedarf und offene Prüfungen auf einen Blick."
+            : platform === "linux"
+              ? "OS- und Paketinventur sowie offene Prüfungen auf einen Blick."
+              : platform === "vmware"
+                ? "Erkannte Dienste und noch offene VMware-Prüfabdeckung auf einen Blick."
+                : "Updatebedarf, geprüfte OS-Baseline und offene Abdeckung auf einen Blick."}
         </Typography>
       </Box>
       {session ? (
