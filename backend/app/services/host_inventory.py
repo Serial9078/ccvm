@@ -124,6 +124,19 @@ def normalize_inventory(data, kind, mode):
             )
         },
     }
+    if family == "Windows":
+        # New collectors supply explicit identity fields for product/branch
+        # matching. Retained inventories stay valid and are never rewritten.
+        for key in (
+            "product_type",
+            "sku",
+            "installation_type",
+            "edition_id",
+            "display_version",
+            "native_architecture",
+        ):
+            if key in os_data:
+                result["os"][key] = text(os_data[key])
     for name, columns, sources in (
         (
             "packages",

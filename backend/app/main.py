@@ -9,6 +9,7 @@ from app.api.v1 import (
     dashboard,
     discovery,
     findings,
+    host_assessments,
     host_audits,
     hosts,
     jobs,
@@ -100,6 +101,7 @@ app.include_router(
     prefix="/api/v1",
 )
 app.include_router(network_scans.router, prefix="/api/v1")
+app.include_router(host_assessments.router, prefix="/api/v1")
 app.include_router(host_audits.router, prefix="/api/v1")
 app.include_router(
     findings.router,

@@ -160,6 +160,38 @@ jobs:
       - name: Update a populated old inventory release without changing the TLS gateway or keys
         run: python backend/integration/authenticated_deployment.py --host-inventory-update
 
+  windows-patch-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Add operator-only patch assessment to a populated retained inventory deployment
+        run: python backend/integration/authenticated_deployment.py --windows-patch-update
+
+  windows-patch-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify the current official MSRC catalog without host data or credentials
+        run: python integration/check_windows_patch_source.py
+
   gateway-mount-legacy:
     runs-on: ubuntu-latest
     timeout-minutes: 10

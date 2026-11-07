@@ -22,7 +22,14 @@ import {
 } from "@mui/material";
 import { useCustomers } from "../customers/hooks";
 import { auditRequest, canUseAuditApi } from "./api";
-import type { Credential, HostAudit, InventorySection, WinrmTransport } from "./api";
+import type {
+  Credential,
+  HostAssessment,
+  HostAudit,
+  InventorySection,
+  WinrmTransport,
+} from "./api";
+import { PatchAssessmentDialog, PatchCatalogPanel } from "./patch-assessments";
 
 const emptyCredential = {
   name: "",
@@ -128,6 +135,10 @@ function AuditPanel({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [detail, setDetail] = useState<HostAudit | null>(null);
+  const [assessmentView, setAssessmentView] = useState<{
+    target: string;
+    assessments: HostAssessment[];
+  } | null>(null);
   const [revoke, setRevoke] = useState<Credential | null>(null);
   const closeCredential = () => {
     fileGeneration.current++;
@@ -327,10 +338,12 @@ function AuditPanel({
           )}
         </Stack>
       </Paper>
+      <PatchCatalogPanel token={token} />
       <Alert severity="info">
         Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows: OS build,
-        machine-wide uninstall registry and Get-HotFix. These sources have limited coverage; CVE
-        matching, missing-patch assessment and per-user software are not included.
+        machine-wide uninstall registry and Get-HotFix. Completed Windows inventories can be
+        assessed against Microsoft OS build baselines. Third-party software CVE matching, Linux
+        patch assessment and per-user software are not included.
       </Alert>
       {!runs.length && (
         <Typography color="text.secondary">No authenticated runs for this customer yet.</Typography>
@@ -388,14 +401,62 @@ function AuditPanel({
               </Button>
             </>
           ) : (
-            <Button
-              disabled={busy}
-              onClick={() =>
-                action(async () => setDetail(await auditRequest<HostAudit>(token, `/${run.id}`)))
-              }
-            >
-              View evidence
-            </Button>
+            <Stack direction="row" useFlexGap sx={{ gap: 1, flexWrap: "wrap" }}>
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  action(async () => setDetail(await auditRequest<HostAudit>(token, `/${run.id}`)))
+                }
+              >
+                View evidence
+              </Button>
+              {run.mode === "inventory" &&
+                ["finished", "failed"].includes(run.job.status) &&
+                credentials.find((credential) => credential.id === run.credential_id)?.kind ===
+                  "winrm" && (
+                  <>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        action(async () => {
+                          const assessment = await auditRequest<HostAssessment>(
+                            token,
+                            `/${run.id}/assess`,
+                            {},
+                          );
+                          const saved = await auditRequest<HostAssessment[]>(
+                            token,
+                            `/${run.id}/assessments`,
+                          );
+                          setAssessmentView({
+                            target: run.target,
+                            assessments: [
+                              assessment,
+                              ...saved.filter((item) => item.id !== assessment.id),
+                            ],
+                          });
+                        })
+                      }
+                    >
+                      Assess Windows patches
+                    </Button>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        action(async () => {
+                          const saved = await auditRequest<HostAssessment[]>(
+                            token,
+                            `/${run.id}/assessments`,
+                          );
+                          setAssessmentView({ target: run.target, assessments: saved });
+                        })
+                      }
+                    >
+                      View assessments
+                    </Button>
+                  </>
+                )}
+            </Stack>
           )}
         </Paper>
       ))}
@@ -526,6 +587,14 @@ function AuditPanel({
           </Button>
         </DialogActions>
       </Dialog>
+      {assessmentView && (
+        <PatchAssessmentDialog
+          key={`${assessmentView.target}:${assessmentView.assessments[0]?.id ?? "empty"}`}
+          target={assessmentView.target}
+          assessments={assessmentView.assessments}
+          close={() => setAssessmentView(null)}
+        />
+      )}
       <Dialog open={revoke !== null} onClose={() => !busy && setRevoke(null)}>
         <DialogTitle>Revoke {revoke?.name}?</DialogTitle>
         <DialogContent>

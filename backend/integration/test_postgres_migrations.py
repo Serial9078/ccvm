@@ -1254,6 +1254,7 @@ def test_empty_postgresql_database_migrates_to_head():
         from integration.host_audit_postgres import (
             assert_legacy_inventory_history,
             seed_legacy_inventory_history,
+            seed_retained_http_history,
         )
 
         legacy_inventory = seed_legacy_inventory_history(engine)
@@ -1261,7 +1262,20 @@ def test_empty_postgresql_database_migrates_to_head():
             existing_rows = all_data_rows(connection)
         for row in existing_rows["host_audits"]:
             row["winrm_transport"] = "https"
-        alembic_command(url, "upgrade", "head", log_name="upgrade-existing-inventory-history")
+        alembic_command(
+            url, "upgrade", "b7e2c9d1a630", log_name="upgrade-existing-inventory-history"
+        )
+        with engine.connect() as connection:
+            assert all_data_rows(connection) == existing_rows
+        seed_retained_http_history(engine, legacy_inventory)
+        with engine.connect() as connection:
+            existing_rows = all_data_rows(connection)
+        for name in ("windows_patch_catalogs", "host_assessments"):
+            existing_rows[name] = []
+            without_network_fixture[name] = []
+        alembic_command(
+            url, "upgrade", "head", log_name="upgrade-existing-patch-assessment-history"
+        )
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
         with engine.connect() as connection:
@@ -1279,8 +1293,10 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_postgresql_behavior(connection)
             assert_network_postgresql_behavior(connection)
             from integration.host_audit_postgres import assert_native_inventory
+            from integration.host_patch_postgres import assert_native_patch_assessment
 
             assert_native_inventory(connection)
+            assert_native_patch_assessment(connection)
             # The outer transaction rolls back all smoke-test data on connection close.
         from integration.operator_docker import assert_paused_worker_maintenance
 
@@ -1301,6 +1317,11 @@ def test_empty_postgresql_database_migrates_to_head():
             engine, url, alembic_command, all_data_rows, assert_schema_matches_models
         )
         assert_downgrade_retains_http_transport(
+            engine, url, alembic_command, all_data_rows, assert_schema_matches_models
+        )
+        from integration.host_patch_postgres import assert_downgrade_retains_patch_history
+
+        assert_downgrade_retains_patch_history(
             engine, url, alembic_command, all_data_rows, assert_schema_matches_models
         )
         _, encrypted_first = authenticated_deployment_snapshot()

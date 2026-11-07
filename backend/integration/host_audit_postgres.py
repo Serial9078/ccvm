@@ -121,7 +121,8 @@ def assert_legacy_inventory_history(engine, fixtures):
         patch.setenv("CCVM_NETWORK_ALLOWED_CIDRS", "192.0.2.0/24")
 
         def collect(payload, cancelled):
-            assert payload["winrm_transport"] == "https"
+            expected = fixtures.get("target_transports", {}).get(payload["target"], "https")
+            assert payload["winrm_transport"] == expected
             assert not cancelled()
             return windows_evidence() if payload["kind"] == "winrm" else evidence()
 
@@ -129,7 +130,9 @@ def assert_legacy_inventory_history(engine, fixtures):
         with Session(engine) as db:
             for audit_id in fixtures["audits"]:
                 audit = db.get(HostAudit, audit_id)
-                assert audit.winrm_transport == "https"
+                assert audit.winrm_transport == fixtures.get("transports", {}).get(
+                    audit_id, "https"
+                )
                 assert audit.scope_sha256 == audit_vault.audit_hash(audit, audit.credential)
                 assert audit_vault.decrypt(audit.credential) == {"password": SECRET}
                 if audit.job.status == "queued":
@@ -148,10 +151,48 @@ def assert_legacy_inventory_history(engine, fixtures):
             db.execute(sa.delete(Customer).where(Customer.id == fixtures["customer"]))
             db.commit()
     print(
-        "PostgreSQL transport migration preserved old queued SSH/HTTPS hashes, "
-        "encrypted credentials and completed Windows evidence",
+        "PostgreSQL additive migrations preserved old queued SSH/HTTPS hashes, "
+        "encrypted credentials and completed HTTPS/HTTP Windows evidence",
         flush=True,
     )
+
+
+def seed_retained_http_history(engine, fixtures):
+    """Keep an existing explicit HTTP run committed before assessment tables exist."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("CCVM_AUDIT_VAULT_KEY", base64.b64encode(b"i" * 32).decode())
+        patch.setenv("CCVM_NETWORK_ALLOWED_CIDRS", "192.0.2.0/24")
+        with Session(engine) as db:
+            credential = create_credential(
+                CredentialCreate(
+                    customer_id=fixtures["customer"],
+                    name="Retained pre-assessment HTTP Windows credential",
+                    kind="winrm",
+                    username="EXAMPLE\\inventory",
+                    allowed_cidrs=["192.0.2.0/24"],
+                    password=SECRET,
+                ),
+                db,
+            )
+            audit = start_audit(
+                HostAuditCreate(
+                    customer_id=fixtures["customer"],
+                    credential_id=credential.id,
+                    target="192.0.2.24",
+                    winrm_transport="http_ntlm",
+                ),
+                db,
+            )
+            audit.job.status, audit.job.progress = "finished", 100
+            audit.job.message = "Retained synthetic HTTP Windows evidence"
+            audit.inventory = windows_evidence()
+            db.commit()
+            fixtures["audits"].append(audit.id)
+            fixtures["jobs"].append(audit.job_id)
+            fixtures["assets"].append(audit.asset_id)
+            fixtures["credentials"].append(credential.id)
+            fixtures.setdefault("transports", {})[audit.id] = "http_ntlm"
+            fixtures.setdefault("target_transports", {})[audit.target] = "http_ntlm"
 
 
 def seed_network_history(engine):
