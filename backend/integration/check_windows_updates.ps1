@@ -75,15 +75,15 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
                         'timeout', 'launch-failure', 'unknown-optional')) {
     & {
         param($collectorPath, $scenario)
-        $script:fixtureScenario = $scenario
-        $script:stopped = 0
-        $script:removed = 0
+        # The collector is a separate script scope. Share one mutable object
+        # through the call chain instead of writing its $script: variables.
+        $fixture = @{Scenario=$scenario; Stopped=0; Removed=0}
         function Start-Job {
             param([scriptblock]$ScriptBlock, [object[]]$ArgumentList)
             if ($ArgumentList.Count -ne 1 -or $ArgumentList[0] -ne $true) {
                 throw 'Production query unexpectedly changed to cached or custom source mode'
             }
-            if ($scenario -eq 'launch-failure') { throw 'private-account synthetic-secret' }
+            if ($fixture.Scenario -eq 'launch-failure') { throw 'private-account synthetic-secret' }
             function New-Object {
                 param([string]$ComObject)
                 if ($ComObject -eq 'Microsoft.Update.SystemInfo') {
@@ -92,7 +92,7 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
                 if ($ComObject -ne 'Microsoft.Update.Session') {
                     throw 'Unexpected COM provider'
                 }
-                $count = if ($script:fixtureScenario -eq 'truncated') {201} else {1}
+                $count = if ($fixture.Scenario -eq 'truncated') {201} else {1}
                 $rows = @()
                 foreach ($index in 1..$count) {
                     $row = [pscustomobject]@{
@@ -108,7 +108,7 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
                             Name='Localized fixture security category'; Type='UpdateClassification'
                         })
                     }
-                    if ($script:fixtureScenario -eq 'unknown-optional') {
+                    if ($fixture.Scenario -eq 'unknown-optional') {
                         $row.PSObject.Properties.Remove('BrowseOnly')
                     }
                     $rows += $row
@@ -127,23 +127,23 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
                         $criteria -ne "IsInstalled=0 and Type='Software' and IsHidden=0") {
                         throw 'Unexpected WUA source/options/criteria'
                     }
-                    if ($script:fixtureScenario -eq 'query-failure') {
+                    if ($fixture.Scenario -eq 'query-failure') {
                         throw 'private-account synthetic-secret source-url'
                     }
-                    $code = if ($script:fixtureScenario -eq 'partial') {3} else {2}
+                    $code = if ($fixture.Scenario -eq 'partial') {3} else {2}
                     return [pscustomobject]@{ResultCode=$code; Updates=$this.Updates}
                 }
                 $session = [pscustomobject]@{Searcher=$search}
                 $session | Add-Member ScriptMethod CreateUpdateSearcher {return $this.Searcher}
                 return $session
             }
-            $data = if ($scenario -eq 'timeout') {$null} else {& $ScriptBlock $true}
+            $data = if ($fixture.Scenario -eq 'timeout') {$null} else {& $ScriptBlock $true}
             return [pscustomobject]@{Data=$data}
         }
         function Wait-Job {
             param($Job, [int]$Timeout)
             if ($Timeout -ne 60) { throw 'Production WUA deadline changed' }
-            if ($scenario -ne 'timeout') { return $Job }
+            if ($fixture.Scenario -ne 'timeout') { return $Job }
         }
         function Receive-Job {
             [CmdletBinding()]
@@ -153,13 +153,13 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
         function Stop-Job {
             [CmdletBinding()]
             param($Job)
-            $script:stopped++
+            $fixture.Stopped++
         }
         function Remove-Job {
             [CmdletBinding()]
             param($Job, [switch]$Force)
             if (!$Force) { throw 'Server job must be removed' }
-            $script:removed++
+            $fixture.Removed++
         }
         $raw = & $collectorPath
         if ($raw -match 'private-account|synthetic-secret|source-url') {
@@ -171,7 +171,7 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
             $data.superseded -ne 'excluded') {
             throw 'Production query lost configured-source coverage boundaries'
         }
-        $expected = switch ($scenario) {
+        $expected = switch ($fixture.Scenario) {
             'partial' {'partial'}
             'truncated' {'partial'}
             'query-failure' {'unavailable'}
@@ -179,17 +179,18 @@ foreach ($scenario in @('complete', 'partial', 'truncated', 'query-failure',
             'launch-failure' {'unavailable'}
             default {'complete'}
         }
-        if ($data.status -ne $expected) { throw "Incorrect update search status: $scenario" }
-        if ($scenario -eq 'truncated' -and
+        if ($data.status -ne $expected) { throw "Incorrect update search status: $($fixture.Scenario)" }
+        if ($fixture.Scenario -eq 'truncated' -and
             ($data.total -ne 201 -or $data.items.Count -ne 200 -or !$data.truncated)) {
             throw 'Production WUA item cap or truncation evidence changed'
         }
-        if ($scenario -eq 'unknown-optional' -and $null -ne $data.items[0].is_optional) {
+        if ($fixture.Scenario -eq 'unknown-optional' -and $null -ne $data.items[0].is_optional) {
             throw 'Unknown optional status was converted into a required-update claim'
         }
-        if ($scenario -ne 'launch-failure' -and ($script:stopped -ne 1 -or $script:removed -ne 1)) {
+        if ($fixture.Scenario -ne 'launch-failure' -and
+            ($fixture.Stopped -ne 1 -or $fixture.Removed -ne 1)) {
             throw 'Production WUA server job was not cleaned up'
         }
-        Write-Output "Synthetic production WUA query passed: $scenario"
+        Write-Output "Synthetic production WUA query passed: $($fixture.Scenario)"
     } $collector $scenario
 }

@@ -1517,7 +1517,7 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             if overview_mode:
                 verify_overview_update(
                     source,
-                    OVERVIEW_RELEASE if windows_clients_mode else reviewed_target,
+                    OVERVIEW_RELEASE,
                     json.loads(journal.read_text()),
                 )
             if windows_clients_mode:
