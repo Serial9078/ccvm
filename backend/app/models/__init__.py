@@ -3,6 +3,7 @@ from app.models.customer import Customer
 from app.models.domain import Domain
 from app.models.finding import Finding
 from app.models.host import Host
+from app.models.host_assessment import HostAssessment, WindowsPatchCatalog
 from app.models.host_audit import AuditCredential, HostAudit
 from app.models.job import Job
 from app.models.network_scan import NetworkObservation, NetworkScan
@@ -24,6 +25,8 @@ __all__ = [
     "Host",
     "AuditCredential",
     "HostAudit",
+    "HostAssessment",
+    "WindowsPatchCatalog",
     "Job",
     "NetworkScan",
     "NetworkObservation",

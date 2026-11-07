@@ -2,9 +2,12 @@
 
 This milestone adds a separate operator-only workflow at `/host-audits`. It
 collects operating-system and installed-software evidence from one explicitly
-selected IP address. It does not yet calculate missing patches, correlate CVEs,
-run arbitrary commands, scan an entire subnet with credentials, or establish
-Tenable feature parity. The existing TCP discovery/audit pipeline is unchanged.
+selected IP address. A separate, operator-only assessment compares supported
+Windows Server builds with published Microsoft cumulative security-update
+baselines. It does not establish individual CVE applicability, assess third-party
+software vulnerabilities, install updates, run arbitrary commands, scan an
+entire subnet with credentials, or establish Tenable feature parity. The existing
+TCP discovery/audit pipeline is unchanged.
 
 ## Evidence and limits
 
@@ -39,7 +42,63 @@ Each section has an explicit coverage status. Unavailable, malformed, oversized
 or truncated evidence does not become a successful audit. Valid partial evidence
 is retained when a section is incomplete. A connection test authenticates and
 reads OS identity without enumerating packages or hotfixes. No findings are
-created or closed by this inventory milestone.
+created or closed by inventory or baseline assessment.
+
+## Windows Server security-update baseline
+
+The separate **Assess Windows patches** action evaluates already stored evidence;
+it does not authenticate to the host again or decrypt its credential. Catalogs
+and assessments are immutable, operator-only records. Their source hashes,
+evidence hash, engine version, evaluation date and coverage remain available in
+the assessment history. The legacy public findings and jobs endpoints receive
+no new host evidence from this workflow.
+
+The initial scope is AMD64 Windows Server 2016, 2019, 2022 and 2025, Standard or
+Datacenter, with exact Desktop Experience versus Server Core identity. A new
+collector records product type, edition, installation type and native
+architecture in addition to the OS build. Older evidence without these fields
+remains intact and asks for a new inventory. Unrecognized, Azure/hotpatch or
+conflicting product identities are not assessed.
+
+The catalog importer downloads the official MSRC CVRF update index and every
+published monthly document in the selected calendar window. The default is
+three months; one through twelve are supported. It sorts the index, includes
+early/out-of-band monthly releases and refreshes selected older documents, since
+Microsoft can revise them. Each source document is limited to 64 MiB. Downloads
+use verified HTTPS to fixed Microsoft endpoints, reject redirects and ignore
+environment proxies/netrc. A failed or incomplete download never replaces the
+last validated snapshot.
+
+Only standard Windows Server `Security Update` remediations with an affected
+product identity and a matching `FixedBuild` enter the normalized catalog.
+Hotpatch and other component/product fixes are outside this baseline. The engine
+compares numeric build tuples only within the exact product and servicing branch.
+It reports the latest standard baseline in the loaded window, related KBs, and
+Microsoft CVE references associated with that baseline. Those references are
+**not confirmed vulnerabilities**: optional component applicability and
+exploitability have not been checked, and a current remediation can reference a
+much older CVE. A missing `Get-HotFix` KB row is never treated as a missing patch.
+
+Both evidence and catalog retrieval expire after seven days. Coverage dates and
+missing identity/source data are explicit. A build at or above the selected
+baseline means only that no OS-build gap was found in this catalog scope; it does
+not mean the host is fully patched or vulnerability-free. Linux, third-party
+software, other Windows components and hotpatch coverage remain unassessed.
+
+After deploying, synchronize from the retained worker on the deployment host:
+
+```sh
+sudo docker exec ccvm-worker python -m app.services.windows_patch_sync --months 3
+```
+
+The command prints document/count progress and the resulting snapshot digest,
+never a target credential. It contacts Microsoft only; it does not scan the
+network or log into a host. Refresh before the catalog expires. Then collect a
+new Windows inventory and choose **Assess Windows patches**. Reassessing the same
+evidence and catalog is idempotent; previous inventory data is never overwritten.
+
+Microsoft documents the [CVRF API and official client](https://github.com/microsoft/MSRC-Microsoft-Security-Updates-API)
+and the [limited coverage of Get-HotFix](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-hotfix).
 
 ## Access and secret handling
 
@@ -101,9 +160,9 @@ production hosts. A reviewed deployment must:
    image and preserve scanner binary hashes; rebuilding floating scanner stages
    is not an equivalent deployment. Keep the existing network override and all
    its mounts and scope settings.
-3. Apply the additive migrations through `b7e2c9d1a630` in maintenance mode. They
+3. Apply the additive migrations through `c8f3a0e2b741` in maintenance mode. They
    create credential/inventory tables and add the per-run transport with an HTTPS
-   default. They do not queue scans or change existing
+   default, followed by two empty catalog/assessment tables. They do not queue scans or change existing
    observations/findings. Downgrade refuses to discard any credential/history.
 4. Serve the UI and API through a trusted HTTPS origin. Configure Uvicorn to trust
    forwarded protocol headers only from the actual trusted reverse proxy, block
@@ -219,6 +278,24 @@ unchanged ingress and idempotency. A separate loopback fixture uses a real NTLM
 handshake and encrypted WSMan exchanges through the isolated production client;
 its returned Windows evidence is synthetic. Native Windows collector coverage
 runs separately on the Windows runner.
+
+### Updating the verified inventory release for patch assessment
+
+`scripts/update-windows-patch-assessment.py --target <reviewed-merge-sha> --host <deployment-host>`
+checks the verified application update recorded in
+`.git/ccvm-host-inventory-update.json`. With `--apply`, it backs up PostgreSQL,
+preserves all existing table fingerprints, adds exactly two empty tables and
+publishes the reviewed collector, API and UI. `--apply --resume` continues its
+separate `.git/ccvm-windows-patch-deployment.json` journal. It retains the existing
+images, containers, keys and ingress marker from the original deployment.
+
+Deployment does not synchronize a catalog, create an assessment or authenticate
+to any target. Synchronize the official catalog separately using the command
+above. Native Docker CI exercises the old deployment, the preceding inventory
+update and this patch-assessment update in sequence, then checks protected TLS
+assessment requests, immutable evidence, unchanged jobs/findings, service resume
+and idempotency. Its catalog and host evidence are explicitly synthetic; source
+parsing and native Windows collection have separate checks.
 
 ### Retained gateway mount repair
 

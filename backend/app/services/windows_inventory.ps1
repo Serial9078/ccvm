@@ -3,6 +3,11 @@ $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
 $current = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+$nativeArchitecture = if ($env:PROCESSOR_ARCHITEW6432) {
+    [string]$env:PROCESSOR_ARCHITEW6432
+} else {
+    [string]$env:PROCESSOR_ARCHITECTURE
+}
 $software = @{status='not_requested'; source='registry-uninstall'; items=@()}
 $hotfixes = @{status='not_requested'; source='Get-HotFix'; items=@()}
 if ($ccvmMode -eq 'inventory') {
@@ -41,7 +46,11 @@ if ($ccvmMode -eq 'inventory') {
     schema_version=1
     os=@{family='Windows'; name=[string]$os.Caption; version=[string]$os.Version;
          kernel=([string]$os.BuildNumber + '.' + [string]$current.UBR);
-         architecture=[string]$os.OSArchitecture; hostname=[string]$os.CSName}
+         architecture=[string]$os.OSArchitecture; hostname=[string]$os.CSName;
+         product_type=[string]$os.ProductType; sku=[string]$os.OperatingSystemSKU;
+         installation_type=[string]$current.InstallationType;
+         edition_id=[string]$current.EditionID; display_version=[string]$current.DisplayVersion;
+         native_architecture=$nativeArchitecture}
     packages=$software
     hotfixes=$hotfixes
 } | ConvertTo-Json -Depth 6 -Compress

@@ -29,6 +29,10 @@ OLD_REVISION, REVISION = "a4c1d8e7f209", "b7e2c9d1a630"
 BRANCH = "sprint-1.0.2-feature-architecture"
 JOURNAL = "ccvm-host-inventory-update.json"
 DEPLOYMENT_JOURNAL = "ccvm-authenticated-deployment.json"
+BACKUP_PREFIX = "ccvm-host-inventory-before-"
+MIGRATION_LABEL = "additive transport migration"
+VERIFICATION_LABEL = "API, encrypted transport choices and preserved ingress"
+VERIFIED_LABEL = "optional encrypted HTTP inventory"
 ALLOWED = {
     "backend/app/models/host_audit.py",
     "backend/app/schemas/host_audit.py",
@@ -224,7 +228,7 @@ def prepare(original, runtime, operation, target, marker):
     }
     if marker is None:
         return record
-    backup = Path(tempfile.mkdtemp(prefix="ccvm-host-inventory-before-", dir=marker.parent))
+    backup = Path(tempfile.mkdtemp(prefix=BACKUP_PREFIX, dir=marker.parent))
     record["backup"] = str(backup)
     work = copy.deepcopy(operation)
     work.update(
@@ -367,15 +371,8 @@ def quiesce(original, runtime, work, record, marker):
     write_phase(original, marker, record, "quiesced")
 
 
-def verify(original, runtime, work, record):
-    validate_artifacts(record)
-    retained(original, runtime, work, record)
-    original.verify_runtime(runtime, work, runtime.legacy)
-    original.validate_state(read_state(original, runtime, work), REVISION, idle=False)
-    runtime.tls_probe(work)
-    with runtime.opener.open("http://127.0.0.1:8090/", timeout=5) as response:
-        if response.read() != (Path(work["built_frontend"]) / "index.html").read_bytes():
-            raise RuntimeError("Published frontend differs from the reviewed update")
+def verify_api(runtime):
+    """Feature-specific API contract, separated from retained runtime checks."""
     source = runtime.docker(
         "exec",
         "--workdir",
@@ -391,6 +388,34 @@ def verify(original, runtime, work, record):
     spec = json.loads(source)
     if spec.get("default") != "https" or set(spec.get("enum", [])) != {"https", "http_ntlm"}:
         raise RuntimeError("Published API does not expose the reviewed transport choices")
+
+
+def verify(original, runtime, work, record):
+    validate_artifacts(record)
+    retained(original, runtime, work, record)
+    original.verify_runtime(runtime, work, runtime.legacy)
+    original.validate_state(read_state(original, runtime, work), REVISION, idle=False)
+    runtime.tls_probe(work)
+    with runtime.opener.open("http://127.0.0.1:8090/", timeout=5) as response:
+        if response.read() != (Path(work["built_frontend"]) / "index.html").read_bytes():
+            raise RuntimeError("Published frontend differs from the reviewed update")
+    verify_api(runtime)
+
+
+def assert_migrated(original, runtime, work, record, current):
+    """Require the original transport migration's exact HTTPS backfill."""
+    defaults = runtime.helper(
+        work,
+        "from app.database.session import engine\n"
+        "with engine.connect() as c:\n"
+        " c.exec_driver_sql('SET TRANSACTION READ ONLY')\n"
+        " c.exec_driver_sql(\"SET LOCAL statement_timeout='5s'\")\n"
+        ' assert c.exec_driver_sql("SELECT count(*) FROM host_audits '
+        "WHERE winrm_transport IS NULL OR winrm_transport <> 'https'\").scalar_one()==0\n"
+        "print('retained-https')",
+    )
+    if defaults != "retained-https":
+        raise RuntimeError("Existing audits did not retain their HTTPS transport")
 
 
 def activate(original, runtime, operation, record, marker):
@@ -417,7 +442,7 @@ def activate(original, runtime, operation, record, marker):
             if current["transactions"]:
                 raise RuntimeError("Quiesced database changed; migration refused")
             write_phase(original, marker, record, "migrating")
-            print("Applying the additive transport migration...", flush=True)
+            print(f"Applying the {MIGRATION_LABEL}...", flush=True)
             runtime.helper(
                 work,
                 "from alembic import command\nfrom alembic.config import Config\n"
@@ -430,18 +455,7 @@ def activate(original, runtime, operation, record, marker):
         preserve_rows(record["before"], current)
         if current["transactions"]:
             raise RuntimeError("Unexpected transaction after inventory migration")
-        defaults = runtime.helper(
-            work,
-            "from app.database.session import engine\n"
-            "with engine.connect() as c:\n"
-            " c.exec_driver_sql('SET TRANSACTION READ ONLY')\n"
-            " c.exec_driver_sql(\"SET LOCAL statement_timeout='5s'\")\n"
-            ' assert c.exec_driver_sql("SELECT count(*) FROM host_audits '
-            "WHERE winrm_transport IS NULL OR winrm_transport <> 'https'\").scalar_one()==0\n"
-            "print('retained-https')",
-        )
-        if defaults != "retained-https":
-            raise RuntimeError("Existing audits did not retain their HTTPS transport")
+        assert_migrated(original, runtime, work, record, current)
         original.write_json(Path(record["attempt_dir"]) / "after.json", current)
         write_phase(original, marker, record, "migrated")
     if record["phase"] == "migrated":
@@ -477,12 +491,12 @@ def activate(original, runtime, operation, record, marker):
                 raise RuntimeError("Retained application container was replaced")
             if not container["State"]["Running"]:
                 runtime.docker("start", container["Id"])
-        print("Verifying API, encrypted transport choices and preserved ingress...", flush=True)
+        print(f"Verifying {VERIFICATION_LABEL}...", flush=True)
         verify(original, runtime, work, record)
         write_phase(original, marker, record, "verified")
     if record["phase"] != "verified":
         raise RuntimeError("Unknown retained inventory update phase")
-    print(f"VERIFIED: optional encrypted HTTP inventory at {record['target']}")
+    print(f"VERIFIED: {VERIFIED_LABEL} at {record['target']}")
     print(f"Private recovery material: {record['backup']}")
 
 
@@ -506,7 +520,7 @@ def validate_record(record, marker, target, host, base):
     }:
         raise RuntimeError("Unknown retained inventory update phase")
     backup = Path(record["backup"])
-    if backup.parent != marker.parent or not backup.name.startswith("ccvm-host-inventory-before-"):
+    if backup.parent != marker.parent or not backup.name.startswith(BACKUP_PREFIX):
         raise RuntimeError("Unexpected private inventory backup path")
     private_path(backup, directory=True)
     expected = backup / "release/backend"

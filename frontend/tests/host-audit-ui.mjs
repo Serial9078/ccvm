@@ -23,6 +23,105 @@ try {
   let rejectSave = false;
   let modes = [];
   const submissions = [];
+  const now = new Date().toISOString();
+  let catalog = {
+    id: 1,
+    source: "msrc-cvrf",
+    sha256: "a".repeat(64),
+    retrieved_at: now,
+    created_at: now,
+    coverage_start: "2026-09-01",
+    coverage_end: "2026-11-07",
+    document_ids: ["2026-Oct", "2026-Nov"],
+    entry_count: 3,
+    expired: false,
+  };
+  let assessmentStatus = "build_gap";
+  const assessments = [];
+  let assessmentRequests = 0;
+  function assess(run) {
+    const status = catalog ? assessmentStatus : "catalog_unavailable";
+    const available = status === "build_gap" || status === "meets_catalog_baseline";
+    const result = {
+      schema_version: 1,
+      engine_version: "fixture-engine-v1",
+      status,
+      reason:
+        status === "build_gap"
+          ? "The recorded OS build is below the published Microsoft update baseline."
+          : status === "identity_incomplete"
+            ? "Collect a new inventory to record the Windows installation type."
+            : status === "catalog_unavailable"
+              ? "Synchronize the Microsoft update catalog before assessing patches."
+              : "No applicable build gap in this fixture's catalog scope.",
+      evaluated_at: now,
+      valid_until: available ? new Date(Date.now() + 7 * 86400000).toISOString() : null,
+      evidence_collected_at: now,
+      catalog_retrieved_at: catalog?.retrieved_at ?? null,
+      installed_build: "10.0.20348.1",
+      product: available
+        ? {
+            id: "11923",
+            name: "Windows Server 2022",
+            year: "2022",
+            installation_type: "Server",
+            edition_id: "ServerStandard",
+          }
+        : null,
+      baseline_build: available ? "10.0.20348.9000" : null,
+      baseline_kbs: available ? ["KB9999999"] : [],
+      cve_references: available
+        ? [
+            {
+              cve: "CVE-2026-99999",
+              title: "Synthetic related advisory",
+              severity: "Important",
+              cvss_score: 7.0,
+              kbs: ["KB9999999"],
+              source_urls: [],
+              document_ids: ["2026-Oct"],
+            },
+          ]
+        : [],
+      cve_references_total: available ? 1 : 0,
+      cve_references_truncated: false,
+      coverage: {
+        scope: "windows_server_standard_cumulative_os_build",
+        status: available ? "evaluated" : "unavailable",
+        catalog_start: catalog?.coverage_start ?? null,
+        catalog_end: catalog?.coverage_end ?? null,
+        component_applicability: "not_checked",
+        third_party_software: "unavailable",
+        linux: "unavailable",
+        hotpatch: "unavailable",
+      },
+      limitations: ["Synthetic assessment metadata; no target authentication was performed."],
+      sources: available
+        ? [
+            {
+              document_id: "2026-Oct",
+              url: "https://api.msrc.microsoft.com/cvrf/v3.0/cvrf/2026-Oct",
+              sha256: "a".repeat(64),
+              current_release_date: now,
+              initial_release_date: now,
+            },
+          ]
+        : [],
+    };
+    return {
+      id: assessments.length + 1,
+      customer_id: 1,
+      asset_id: 1,
+      host_audit_id: run.id,
+      catalog_id: catalog?.id ?? null,
+      engine_version: result.engine_version,
+      evidence_sha256: "b".repeat(64),
+      status,
+      result,
+      evaluated_at: now,
+      expired: !available,
+    };
+  }
   const evidence = {
     os: {
       family: "Linux",
@@ -50,6 +149,30 @@ try {
       if (path === "/api/v1/customers")
         return respond([{ id: 1, name: "Lab customer", uuid: "synthetic-customer" }]);
       assert.equal(request.headers()["authorization"], `Bearer ${token}`);
+      if (path === "/api/v1/host-audits/patch-catalog") {
+        assert.equal(request.method(), "GET");
+        return respond(catalog);
+      }
+      if (/\/api\/v1\/host-audits\/\d+\/assess$/.test(path)) {
+        assert.equal(request.method(), "POST");
+        assert.deepEqual(request.postDataJSON(), {});
+        assessmentRequests++;
+        const run = runs.find((candidate) => candidate.id === Number(path.split("/").at(-2)));
+        assert.equal(run.mode, "inventory");
+        assert.equal(
+          credentials.find((credential) => credential.id === run.credential_id).kind,
+          "winrm",
+        );
+        const result = assess(run);
+        assessments.unshift(result);
+        return respond(result);
+      }
+      if (/\/api\/v1\/host-audits\/\d+\/assessments$/.test(path)) {
+        assert.equal(request.method(), "GET");
+        return respond(
+          assessments.filter((item) => item.host_audit_id === Number(path.split("/").at(-2))),
+        );
+      }
       if (path === "/api/v1/host-audits/credentials" && request.method() === "POST") {
         const payload = request.postDataJSON();
         assert.equal(payload.customer_id, 1);
@@ -189,6 +312,10 @@ try {
   await page.getByText("Fixture inventory finished", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Collect inventory", exact: true }).click();
   await page.getByRole("button", { name: "View evidence", exact: true }).first().waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: "Assess Windows patches", exact: true }).count(),
+    0,
+  );
   await page.getByRole("button", { name: "View evidence", exact: true }).first().click();
   await page.getByRole("dialog").getByText("fixture-package", { exact: true }).waitFor();
   assert.equal(await page.getByRole("dialog").getByText("1:2.0-3", { exact: true }).count(), 1);
@@ -264,6 +391,98 @@ try {
     .waitFor();
   await page.getByRole("dialog").getByText("Fixture Windows", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Close evidence", exact: true }).click();
+  const inventorySubmissions = submissions.length;
+  const retainedRuns = JSON.stringify(runs);
+  await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByText("Below Microsoft update baseline", { exact: true })
+    .waitFor();
+  await page.getByRole("dialog").getByText("10.0.20348.9000", { exact: true }).waitFor();
+  await page.getByRole("dialog").getByRole("link", { name: "KB9999999", exact: true }).waitFor();
+  await page
+    .getByRole("dialog")
+    .getByRole("link", { name: "CVE-2026-99999", exact: true })
+    .waitFor();
+  await page
+    .getByRole("dialog")
+    .getByText(
+      "References associated with the baseline update. These are not confirmed vulnerabilities on this host.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(submissions.length, inventorySubmissions);
+  assert.equal(JSON.stringify(runs), retainedRuns);
+  await page.screenshot({
+    path: "test-artifacts/authenticated-patch-assessment.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: "Close assessment", exact: true }).click();
+  assessmentStatus = "identity_incomplete";
+  await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByText("More OS identity evidence needed", { exact: true })
+    .waitFor();
+  await page
+    .getByRole("dialog")
+    .getByText("Collect a new inventory to record the Windows installation type.", { exact: true })
+    .waitFor();
+  await page.getByRole("button", { name: "Close assessment", exact: true }).click();
+  catalog = null;
+  await page.getByRole("button", { name: "Refresh catalog status", exact: true }).click();
+  await page
+    .getByText(
+      "No Microsoft update catalog has been synchronized. Patch assessments will report missing coverage.",
+      { exact: true },
+    )
+    .waitFor();
+  await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByText("Microsoft update catalog unavailable", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("dialog")
+      .getByText(
+        "This saved assessment has expired. Collect current inventory or synchronize the catalog, then assess again.",
+        { exact: true },
+      )
+      .count(),
+    0,
+  );
+  assert.equal(assessmentRequests, 3);
+  assert.equal(submissions.length, inventorySubmissions);
+  assert.equal(JSON.stringify(runs), retainedRuns);
+  await page.getByRole("button", { name: "Close assessment", exact: true }).click();
+  const expired = structuredClone(assessments.find((item) => item.status === "build_gap"));
+  expired.id = 4;
+  expired.status = "meets_catalog_baseline";
+  expired.result.status = expired.status;
+  expired.result.reason = "Historical build comparison retained for review.";
+  expired.expired = true;
+  expired.result.valid_until = new Date(Date.now() - 86400000).toISOString();
+  assessments.unshift(expired);
+  await page.getByRole("button", { name: "View assessments", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("combobox", { name: "Saved assessment", exact: true })
+    .waitFor();
+  await page
+    .getByRole("dialog")
+    .getByText("Meets catalog build baseline", { exact: true })
+    .waitFor();
+  await page
+    .getByRole("dialog")
+    .getByText(
+      "This saved assessment has expired. Collect current inventory or synchronize the catalog, then assess again.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(assessmentRequests, 3);
+  await page.getByRole("button", { name: "Close assessment", exact: true }).click();
   await connection.click();
   await page
     .getByRole("option", { name: "HTTPS / NTLM · verified certificate", exact: true })
@@ -302,7 +521,7 @@ try {
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
   assert.deepEqual(errors, []);
   console.log(
-    "Host audit UI passed: HTTPS, volatile token, encrypted credential request, failure secret clearing, pinned SSH and HTTPS/HTTP WinRM runs, explicit encrypted-HTTP selection, mode and port reset, transport evidence, revocation and lock",
+    "Host audit UI passed: volatile secrets, SSH and encrypted WinRM, Windows baseline assessment from saved evidence, explicit identity/catalog coverage gaps, expired assessment history and lock",
   );
 } finally {
   await browser.close();

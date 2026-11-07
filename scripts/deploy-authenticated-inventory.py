@@ -30,7 +30,7 @@ VERSION = "1.0.0"
 BASE = "06190ea161e68ffad6d9b653b2b3088fb194e056"
 FEATURE = "a58ac2a5386bbb2ce854aad0878ffa9527ea1dd6"
 BRANCH = "sprint-1.0.2-feature-architecture"
-OLD_REVISION, REVISION = "f93b70a4e628", "b7e2c9d1a630"
+OLD_REVISION, REVISION = "f93b70a4e628", "c8f3a0e2b741"
 OVERRIDE = "docker-compose.authenticated.yml"
 JOURNAL = "ccvm-authenticated-deployment.json"
 SECRET_DIRECTORY = "ccvm-audit-secrets"
@@ -266,10 +266,11 @@ def assert_preserved(before, after):
     if any(after["tables"].get(name) != value for name, value in before["tables"].items()):
         raise RuntimeError("Existing rows changed; retain the private database backup")
     extra = set(after["tables"]) - set(before["tables"])
-    if extra != {"audit_credentials", "host_audits"} or any(
-        after["tables"][name]["count"] for name in extra
-    ):
-        raise RuntimeError("Migration did not add exactly two empty inventory tables")
+    expected = {"audit_credentials", "host_audits"}
+    if after.get("revision") == "c8f3a0e2b741":
+        expected |= {"windows_patch_catalogs", "host_assessments"}
+    if extra != expected or any(after["tables"][name]["count"] for name in extra):
+        raise RuntimeError("Migration did not add exactly the expected empty inventory tables")
 
 
 class Runtime:

@@ -43,6 +43,83 @@ export interface HostAudit {
   inventory?: Inventory | null;
 }
 
+export interface PatchCatalog {
+  id: number;
+  source: string;
+  sha256: string;
+  retrieved_at: string;
+  created_at: string;
+  coverage_start: string;
+  coverage_end: string;
+  document_ids: string[];
+  entry_count: number;
+  expired: boolean;
+}
+
+export interface PatchAssessmentResult {
+  schema_version: number;
+  engine_version: string;
+  status: string;
+  reason: string;
+  evaluated_at: string;
+  valid_until: string | null;
+  evidence_collected_at: string | null;
+  catalog_retrieved_at: string | null;
+  installed_build: string | null;
+  product: {
+    id: string;
+    name: string;
+    year: string;
+    installation_type: string;
+    edition_id: string;
+  } | null;
+  baseline_build: string | null;
+  baseline_kbs: string[];
+  cve_references: {
+    cve: string;
+    title: string;
+    severity: string;
+    cvss_score?: number | null;
+    kbs: string[];
+    source_urls: string[];
+    document_ids: string[];
+  }[];
+  cve_references_total: number;
+  cve_references_truncated: boolean;
+  coverage: {
+    scope: string;
+    status: string;
+    catalog_start: string | null;
+    catalog_end: string | null;
+    component_applicability: string;
+    third_party_software: string;
+    linux: string;
+    hotpatch: string;
+  };
+  limitations: string[];
+  sources: {
+    document_id: string;
+    url: string;
+    sha256: string;
+    current_release_date: string;
+    initial_release_date: string;
+  }[];
+}
+
+export interface HostAssessment {
+  id: number;
+  customer_id: number;
+  asset_id: number;
+  host_audit_id: number;
+  catalog_id: number | null;
+  engine_version: string;
+  evidence_sha256: string;
+  status: string;
+  result: PatchAssessmentResult;
+  evaluated_at: string;
+  expired: boolean;
+}
+
 // Use transient component state, not query/mutation caches, localStorage or
 // sessionStorage. No token or credential appears in a URL or request log.
 export async function auditRequest<T>(
