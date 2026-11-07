@@ -26,6 +26,7 @@ TOKEN_NAMES = ("CCVM_AUDIT_OPERATOR_TOKEN", "CCVM_AUDIT_VAULT_KEY")
 PRE_TRANSPORT_RELEASE = "cb3b1486b3077fe1fac96925a7971235c07de7f0"
 HTTP_INVENTORY_RELEASE = "2d4c31446303c3851b9ebacb55c143596faef0dd"
 WINDOWS_PATCH_RELEASE = "f3c546e5200b9d7379e0981abef132ecda1e2b6a"
+SOFTWARE_RELEASE = "69706bff65dad6436af59aceec45fa325f01630e"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -814,17 +815,173 @@ print('Stored inventory and jobs/findings unchanged by operator-only assessment'
     )
 
 
+def verify_overview_update(source, target, operation):
+    """Keep populated histories intact and read the overview over actual TLS."""
+    snapshot = """import hashlib,json
+from sqlalchemy import inspect
+from app.database.session import engine
+def stable(value):
+    if isinstance(value,(memoryview,bytes,bytearray)):
+        return {'bytes_hex':bytes(value).hex()}
+    return str(value)
+with engine.connect() as connection:
+    connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+    result={}
+    for name in sorted(inspect(connection).get_table_names()):
+        quoted=engine.dialect.identifier_preparer.quote(name)
+        rows=[dict(row) for row in connection.exec_driver_sql('SELECT * FROM '+quoted).mappings()]
+        encoded=sorted(json.dumps(row,sort_keys=True,default=stable) for row in rows)
+        result[name]={'count':len(rows),'sha256':hashlib.sha256(
+            json.dumps(encoded,sort_keys=True).encode()).hexdigest()}
+    credential=connection.exec_driver_sql('SELECT customer_id FROM audit_credentials').one()
+    print(json.dumps({'tables':result,'customer':credential[0]}))
+"""
+    before = json.loads(docker("exec", "ccvm-worker", "python", "-c", snapshot))
+    assert before["tables"]["software_assessments"]["count"] == 1
+    assert before["tables"]["host_assessments"]["count"] == 1
+    paths = [
+        source / name
+        for name in (
+            "docker-compose.yml",
+            "docker-compose.authenticated.yml",
+            "frontend/default.conf",
+            ".git/ccvm-authenticated-deployment.json",
+            ".git/ccvm-host-inventory-update.json",
+            ".git/ccvm-windows-patch-deployment.json",
+            ".git/ccvm-software-assessment-deployment.json",
+        )
+    ]
+    paths += [
+        Path(operation["private"]) / name for name in ("vault.env", "operator.env", "gateway.conf")
+    ]
+    retained = {path: path.read_bytes() for path in paths}
+    names = (
+        "ccvm-backend",
+        "ccvm-worker",
+        "ccvm-frontend",
+        "ccvm-postgres",
+        "ccvm-audit-gateway",
+        "haproxy-edge",
+    )
+    identities = {name: inspect(name)["Id"] for name in names}
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = (REPOSITORY / "scripts/update-inventory-overview.py").read_bytes()
+    marker = source / ".git/ccvm-inventory-overview-deployment.json"
+
+    def update(*flags):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            data=script,
+            cwd=source,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if result.returncode and marker.is_file():
+            log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+            if log.is_file():
+                print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert result.returncode == 0
+
+    update()
+    assert not marker.exists()
+    update("--apply")
+    assert json.loads(docker("exec", "ccvm-worker", "python", "-c", snapshot)) == before
+    assert retained == {path: path.read_bytes() for path in paths}
+    assert identities == {name: inspect(name)["Id"] for name in names}
+    token = load_operator().read_env(Path(operation["private"]) / "operator.env")[
+        "CCVM_AUDIT_OPERATOR_TOKEN"
+    ]
+    client = """import http.client,json,socket,ssl,sys
+p=json.load(sys.stdin);context=ssl.create_default_context()
+def request(token=True):
+    raw=socket.create_connection(('127.0.0.1',p['port']),timeout=10)
+    raw.sendall(b'PROXY TCP4 192.0.2.1 127.0.0.1 12345 '+str(p['port']).encode()+b'\\r\\n')
+    with context.wrap_socket(raw,server_hostname=p['hostname']) as tls:
+        path='/api/v1/host-audits/overview?customer_id='+str(p['customer'])
+        headers=[f'GET {path} HTTP/1.1',f"Host: {p['hostname']}",'Connection: close']
+        if token:headers.append('Authorization: Bearer '+p['token'])
+        tls.sendall(('\\r\\n'.join(headers)+'\\r\\n\\r\\n').encode())
+        response=http.client.HTTPResponse(tls);response.begin()
+        assert response.getheader('Cache-Control')=='no-store'
+        return response.status,json.loads(response.read())
+assert request(False)[0]==401
+status,data=request();assert status==200 and data['customer_id']==p['customer']
+assert len(data['hosts'])==1
+host=data['hosts'][0]
+assert host['platform']=='windows_server' and host['target']=='192.0.2.11'
+assert host['inventory']['package_count']==2
+assert host['software_assessment']['status']=='version_matches_found'
+# The older OS assessment belongs to another inventory and cannot bless this one.
+assert host['windows_assessment'] is None
+print('Real TLS overview: operator guard, exact inventory basis, actionable software match')
+"""
+    print(
+        docker(
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            "container:haproxy-edge",
+            "--entrypoint",
+            "python",
+            operation["images"]["backend"],
+            "-I",
+            "-c",
+            client,
+            data=json.dumps(
+                {
+                    "port": operation["tls_port"],
+                    "hostname": operation["hostname"],
+                    "token": token,
+                    "customer": before["customer"],
+                }
+            ).encode(),
+        ),
+        flush=True,
+    )
+    assert json.loads(docker("exec", "ccvm-worker", "python", "-c", snapshot)) == before
+    record = json.loads(marker.read_text())
+    record["phase"] = "services"
+    load_operator().write_json(marker, record)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    update("--apply", "--resume")
+    assert json.loads(docker("exec", "ccvm-worker", "python", "-c", snapshot)) == before
+    assert retained == {path: path.read_bytes() for path in paths}
+    assert identities == {name: inspect(name)["Id"] for name in names}
+    print(
+        "VERIFIED: overview update, populated histories unchanged, no migration, resume and repeat",
+        flush=True,
+    )
+
+
 def main():
     if sys.argv[1:] not in (
         [],
         ["--host-inventory-update"],
         ["--windows-patch-update"],
         ["--software-assessment-update"],
+        ["--inventory-overview-update"],
     ):
         raise RuntimeError("Unknown disposable deployment fixture mode")
     update_mode = bool(sys.argv[1:])
-    patch_mode = sys.argv[1:] in (["--windows-patch-update"], ["--software-assessment-update"])
-    software_mode = sys.argv[1:] == ["--software-assessment-update"]
+    patch_mode = sys.argv[1:] in (
+        ["--windows-patch-update"],
+        ["--software-assessment-update"],
+        ["--inventory-overview-update"],
+    )
+    software_mode = sys.argv[1:] in (
+        ["--software-assessment-update"],
+        ["--inventory-overview-update"],
+    )
+    overview_mode = sys.argv[1:] == ["--inventory-overview-update"]
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
@@ -1033,7 +1190,9 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                     source, WINDOWS_PATCH_RELEASE, json.loads(journal.read_text())
                 )
             if software_mode:
-                verify_software_update(source, reviewed_target, json.loads(journal.read_text()))
+                verify_software_update(source, SOFTWARE_RELEASE, json.loads(journal.read_text()))
+            if overview_mode:
+                verify_overview_update(source, reviewed_target, json.loads(journal.read_text()))
         finally:
             with contextlib.suppress(Exception):
                 compose(

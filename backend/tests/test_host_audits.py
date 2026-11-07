@@ -1,7 +1,9 @@
 import base64
 import copy
+import gzip
 import hashlib
 import json
+import re
 import subprocess
 from types import SimpleNamespace
 
@@ -645,7 +647,11 @@ def test_winrm_transport_uses_https_validation_ntlm_and_a_fixed_collector(monkey
             assert shell == "shell" and executable == "powershell"
             assert kwargs["skip_cmd_shell"] is True
             assert "-NoProfile" in arguments and "-NonInteractive" in arguments
-            seen.append(base64.b64decode(arguments[-1]).decode("utf-16-le"))
+            bootstrap = base64.b64decode(arguments[-1], validate=True).decode("utf-16-le")
+            compressed = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", bootstrap)
+            assert compressed is not None
+            seen.append(gzip.decompress(base64.b64decode(compressed[1])).decode("utf-8"))
+            assert len(" ".join([executable, *arguments])) < 8000
             return "command"
 
         return SimpleNamespace(

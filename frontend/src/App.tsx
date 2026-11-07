@@ -54,6 +54,10 @@ export default function App() {
 
         <Route path="/networks" element={<Networks />} />
         <Route path="/host-audits" element={<HostAudits />} />
+        <Route path="/windows-servers" element={<HostAudits platform="windows-server" />} />
+        <Route path="/windows-clients" element={<HostAudits platform="windows-client" />} />
+        <Route path="/linux" element={<HostAudits platform="linux" />} />
+        <Route path="/vmware" element={<HostAudits platform="vmware" />} />
 
         <Route
           path="/pipelines"

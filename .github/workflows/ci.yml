@@ -207,6 +207,21 @@ jobs:
       - name: Preserve existing inventories and OS assessments through the software update
         run: python backend/integration/authenticated_deployment.py --software-assessment-update
 
+  inventory-overview-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Preserve populated software and OS history through the inventory overview update
+        run: python backend/integration/authenticated_deployment.py --inventory-overview-update
+
   software-advisory-source:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -242,6 +257,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Verify fixed read-only collector against native Windows OS and registry
         shell: powershell
         run: ./backend/integration/check_windows_inventory.ps1
