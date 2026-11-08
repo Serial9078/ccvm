@@ -1317,8 +1317,12 @@ with engine.connect() as connection:
     gateway = inspect("ccvm-audit-gateway")
     gateway_start = (gateway["State"]["StartedAt"], gateway["RestartCount"])
     socket_path = Path(operation["socket_dir"]) / "gateway.sock"
-    socket_before = socket_path.stat()
-    socket_identity = (socket_before.st_dev, socket_before.st_ino)
+
+    def shared_socket_identity():
+        # The protected root:HAProxy 2750 parent intentionally excludes the CI user.
+        return run("sudo", "-n", "stat", "--format=%d:%i", str(socket_path)).stdout.decode().strip()
+
+    socket_identity = shared_socket_identity()
     paths = [
         source / name
         for name in (
@@ -1376,8 +1380,7 @@ with engine.connect() as connection:
             current_gateway["State"]["StartedAt"],
             current_gateway["RestartCount"],
         ) == gateway_start
-        current_socket = socket_path.stat()
-        assert (current_socket.st_dev, current_socket.st_ino) == socket_identity
+        assert shared_socket_identity() == socket_identity
 
     # A deliberately running dummy row is never claimed by the queued-job worker.
     # Its only purpose is to prove that publication refuses active work.
