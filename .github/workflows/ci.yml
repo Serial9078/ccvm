@@ -237,6 +237,21 @@ jobs:
       - name: Preserve the populated overview release through client and platform coverage publication
         run: python backend/integration/authenticated_deployment.py --windows-clients-update
 
+  host-workspace-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish the workspace onto retained client evidence without replacing the gateway
+        run: python backend/integration/authenticated_deployment.py --host-workspace-update
+
   software-advisory-source:
     runs-on: ubuntu-latest
     timeout-minutes: 20
