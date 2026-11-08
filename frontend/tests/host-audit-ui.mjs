@@ -1636,6 +1636,8 @@ try {
   // Closing a status dialog only reads saved evidence. No scan or login starts.
   await statusDialog.getByRole("button", { name: "Host-Status schließen", exact: true }).click();
   await statusDialog.waitFor({ state: "hidden" });
+  // The host title clears immediately; wait for Modal's exit transition to restore the workspace.
+  await hostRow("192.0.2.20").waitFor();
   // One operational bucket per host makes the counts additive, and the cards are filters.
   const buckets = ["update-count", "unknown-count", "assessment-count", "baseline-count"];
   const bucketTotal = (
@@ -1675,6 +1677,7 @@ try {
   });
   await page.keyboard.press("Escape");
   await failedDetail.waitFor({ state: "hidden" });
+  await failedDetailButton.waitFor();
   await failedDetailButton.click();
   await failedDetail
     .getByRole("button", { name: "Verbindung & Inventur prüfen", exact: true })
@@ -1708,6 +1711,7 @@ try {
     .waitFor();
   await page.keyboard.press("Escape");
   await retainedDetail.waitFor({ state: "hidden" });
+  await hostRow("192.0.2.60").waitFor();
   await hostRow("192.0.2.60")
     .getByRole("button", { name: /Host öffnen/ })
     .click();
@@ -1727,6 +1731,7 @@ try {
   );
   await page.keyboard.press("Escape");
   await partialDetail.waitFor({ state: "hidden" });
+  await hostRow("192.0.2.60").waitFor();
 
   const requestsBeforeFiltering = apiCalls.filter((request) => request.method !== "GET").length;
   await overview.getByLabel("Host suchen", { exact: true }).fill("192.0.2.21");
@@ -1813,6 +1818,8 @@ try {
       await clientDetail.waitFor({ state: "hidden" });
       const queryForm = page.getByRole("dialog", { name: "Windows-Updates abfragen", exact: true });
       await queryForm.waitFor();
+      assert.equal(await page.getByRole("dialog").count(), 1,
+        "The inventory form replaces host details rather than stacking another active dialog");
       assert.equal(
         await queryForm.getByLabel("Target IP", { exact: true }).inputValue(),
         "192.0.2.30",
@@ -1852,6 +1859,8 @@ try {
         exact: true,
       });
       await updateDialog.getByText("Updates angeboten", { exact: true }).waitFor();
+      assert.equal(await page.getByRole("dialog").count(), 1,
+        "The assessment report replaces host details rather than stacking another active dialog");
       for (const text of [
         "Sicherheitsupdates: 1",
         "Qualitätsupdates: 1",
@@ -1883,6 +1892,7 @@ try {
       });
       await updateDialog.getByRole("button", { name: "Close assessment", exact: true }).click();
       await updateDialog.waitFor({ state: "hidden" });
+      await clientRow("192.0.2.30").waitFor();
       if (await clientDetail.isVisible()) {
         await clientDetail
           .getByRole("button", { name: "Host-Status schließen", exact: true })
@@ -2023,6 +2033,7 @@ try {
   });
   await page.keyboard.press("Escape");
   await mobileDetail.waitFor({ state: "hidden" });
+  await page.getByTestId("host-mobile-108").getByRole("button", { name: /Host öffnen/ }).waitFor();
   assert.deepEqual(errors, []);
   console.log(
     "Host audit UI passed: patch priorities and explicit fixes, scoped baselines, failed/stale/unknown coverage, separate platform routes, customer context, responsive navigation, volatile secrets, encrypted inventory and retained histories",
