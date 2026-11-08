@@ -1,4 +1,5 @@
 from app.models.asset import Asset
+from app.models.auth import AuthLoginLimit, AuthSession, AuthUser
 from app.models.customer import Customer
 from app.models.domain import Domain
 from app.models.finding import Finding
@@ -20,6 +21,9 @@ from app.models.url_security import UrlSecurity
 
 __all__ = [
     "Asset",
+    "AuthUser",
+    "AuthSession",
+    "AuthLoginLimit",
     "Customer",
     "Domain",
     "Finding",

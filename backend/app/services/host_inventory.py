@@ -18,6 +18,35 @@ ERRORS = {
         "SSH host key does not match the approved fingerprint; authentication was not attempted"
     ),
     "authentication_failed": "The target rejected authentication",
+    "network_timeout": (
+        "The network operation timed out; verify the service, firewall and VPN route"
+    ),
+    "response_timeout": (
+        "The target did not answer in time; verify WinRM/SSH service responsiveness"
+    ),
+    "connection_refused": (
+        "The target refused the connection; verify the selected port and listener"
+    ),
+    "network_unreachable": (
+        "The target network is unreachable; verify routing and the VPN connection"
+    ),
+    "connection_interrupted": "The connection was interrupted before inventory could be completed",
+    "connection_failed": (
+        "The connection could not be established; verify the service and network policy"
+    ),
+    "winrm_access_denied": "WinRM denied access; verify account permissions and endpoint policy",
+    "winrm_endpoint_unavailable": (
+        "The WinRM endpoint is unavailable; verify the port and /wsman listener"
+    ),
+    "winrm_http_error": (
+        "The WinRM endpoint returned an HTTP error; verify the service configuration"
+    ),
+    "winrm_service_fault": (
+        "WinRM returned a service fault; verify endpoint policy and service limits"
+    ),
+    "winrm_operation_timeout": (
+        "The WinRM service operation timed out before a result was available"
+    ),
     "tls_verification_failed": "WinRM TLS certificate validation failed",
     "message_encryption_required": "WinRM requires encrypted NTLM messages and responses",
     "invalid_private_key": "SSH private key or passphrase could not be read",

@@ -696,6 +696,7 @@ try {
     const respond = (json, status = 200) =>
       route.fulfill({ status, json, headers: { "Cache-Control": "no-store" } });
     if (path.startsWith("/api/v1/")) {
+      if (path === "/api/v1/auth/session") return respond({ mode: "legacy", authenticated: false });
       apiCalls.push({ path, method: request.method(), query: url.search });
       if (
         [
@@ -1968,10 +1969,11 @@ try {
   await page.evaluate(() =>
     window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
   );
-  await page.getByRole("button", { name: "Unlock host audits", exact: true }).waitFor();
+  await page.getByText("Sitzung wird geprüft …", { exact: true }).waitFor();
   await page.evaluate(() =>
     window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
   );
+  await page.getByRole("button", { name: "Unlock host audits", exact: true }).waitFor();
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
   assert.equal(await page.getByRole("button", { name: "View evidence", exact: true }).count(), 0);
   await page.reload();

@@ -5,6 +5,7 @@ parent enforces a wall-clock deadline and discards all raw transport errors.
 """
 
 import base64
+import errno
 import hashlib
 import hmac
 import importlib.util
@@ -17,12 +18,24 @@ import resource
 import signal
 import sys
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from time import monotonic
 
 import paramiko
 import requests
-from winrm.exceptions import InvalidCredentialsError
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    MaxRetryError,
+    NewConnectionError,
+    ReadTimeoutError,
+)
+from winrm.exceptions import (
+    InvalidCredentialsError,
+    WinRMOperationTimeoutError,
+    WinRMTransportError,
+    WSManFaultError,
+)
 from winrm.protocol import Protocol
 
 MAX_OUTPUT = 8 * 1024 * 1024
@@ -31,6 +44,114 @@ NTLM_ENCRYPTED_TYPE = 'protocol="application/HTTP-SPNEGO-session-encrypted"'
 
 class TransportFailure(Exception):
     pass
+
+
+FIXED_FAILURES = frozenset(
+    {
+        "host_key_mismatch",
+        "invalid_private_key",
+        "invalid_request",
+        "output_limit",
+        "redirect_rejected",
+        "message_encryption_required",
+        "collector_command_limit",
+        "remote_command_too_long",
+        "remote_powershell_parse_failed",
+        "remote_permission_denied",
+        "remote_command_unavailable",
+        "remote_command_failed",
+        "authentication_failed",
+        "winrm_access_denied",
+        "winrm_endpoint_unavailable",
+        "winrm_http_error",
+    }
+)
+
+
+def http_failure_code(status):
+    """Classify status only; never parse or return an HTTP error body."""
+    if status == 401:
+        return "authentication_failed"
+    if status == 403:
+        return "winrm_access_denied"
+    if status in {404, 405, 410}:
+        return "winrm_endpoint_unavailable"
+    return "winrm_http_error"
+
+
+def exception_chain(error):
+    """Bounded typed causes from requests/urllib3 and Paramiko; no string parsing."""
+    pending = [error]
+    seen = set()
+    while pending and len(seen) < 16:
+        current = pending.pop(0)
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        cause = current.__cause__
+        if cause is not None:
+            pending.append(cause)
+        elif not current.__suppress_context__:
+            pending.append(current.__context__)
+        pending.extend(value for value in current.args[:4] if isinstance(value, BaseException))
+        if isinstance(current, MaxRetryError):
+            pending.append(current.reason)
+        if isinstance(current, paramiko.ssh_exception.NoValidConnectionsError):
+            pending.extend(islice(current.errors.values(), 4))
+
+
+def transport_failure_code(error):
+    """Return only allowlisted diagnostics, even when upstream errors contain secrets."""
+    if isinstance(error, TransportFailure):
+        code = error.args[0] if len(error.args) == 1 else None
+        if isinstance(code, str) and code in FIXED_FAILURES:
+            return code
+        return "connection_or_collection_failed"
+    errors = tuple(exception_chain(error))
+    if any(isinstance(item, requests.exceptions.SSLError) for item in errors):
+        return "tls_verification_failed"
+    if any(
+        isinstance(item, (paramiko.AuthenticationException, InvalidCredentialsError))
+        for item in errors
+    ):
+        return "authentication_failed"
+    if any(isinstance(item, WSManFaultError) for item in errors):
+        return "winrm_service_fault"
+    for item in errors:
+        if isinstance(item, WinRMTransportError):
+            return http_failure_code(item.code)
+        if isinstance(item, requests.exceptions.HTTPError) and item.response is not None:
+            return http_failure_code(item.response.status_code)
+    # urllib3's NewConnectionError is ALSO a ConnectTimeoutError. Prefer the
+    # actual socket errno so refused/unroutable connections are not called timeouts.
+    for item in errors:
+        if isinstance(item, OSError):
+            if item.errno == errno.ECONNREFUSED:
+                return "connection_refused"
+            if item.errno in {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN}:
+                return "network_unreachable"
+            if item.errno in {errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE}:
+                return "connection_interrupted"
+    if any(
+        isinstance(item, (requests.exceptions.ReadTimeout, ReadTimeoutError)) for item in errors
+    ):
+        return "response_timeout"
+    if any(isinstance(item, WinRMOperationTimeoutError) for item in errors):
+        return "winrm_operation_timeout"
+    if any(
+        isinstance(item, (requests.exceptions.Timeout, TimeoutError))
+        or (isinstance(item, ConnectTimeoutError) and not isinstance(item, NewConnectionError))
+        or (isinstance(item, OSError) and item.errno == errno.ETIMEDOUT)
+        for item in errors
+    ):
+        return "network_timeout"
+    if any(
+        isinstance(item, (requests.exceptions.ConnectionError, NewConnectionError))
+        for item in errors
+    ):
+        return "connection_failed"
+    return "connection_or_collection_failed"
 
 
 class PinnedHostKey(paramiko.MissingHostKeyPolicy):
@@ -122,6 +243,10 @@ def restricted_session(session, endpoint, ca_bundle, require_encryption=False):
         if encrypted_message and NTLM_ENCRYPTED_TYPE not in response.headers.get(
             "Content-Type", ""
         ):
+            if response.status_code >= 400:
+                # Discard plaintext error bodies without accepting SOAP/evidence.
+                # An HTTP failure still identifies auth, endpoint or access errors.
+                raise TransportFailure(http_failure_code(response.status_code))
             raise TransportFailure("message_encryption_required")
         return response
 
@@ -345,15 +470,9 @@ def main():
         if len(output) > MAX_OUTPUT:
             raise TransportFailure("output_limit")
         sys.stdout.buffer.write(output)
-    except TransportFailure as error:
-        print(json.dumps({"error": str(error)}))
-    except (paramiko.AuthenticationException, InvalidCredentialsError):
-        print('{"error":"authentication_failed"}')
-    except requests.exceptions.SSLError:
-        print('{"error":"tls_verification_failed"}')
-    except Exception:
+    except Exception as error:
         # Never serialize exceptions, stdout/stderr, requests, or payloads.
-        print('{"error":"connection_or_collection_failed"}')
+        print(json.dumps({"error": transport_failure_code(error)}))
 
 
 if __name__ == "__main__":

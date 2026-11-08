@@ -80,6 +80,7 @@ try {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace("/api/v1", "");
     const respond = (json, status = 200) => route.fulfill({ status, json });
+    if (path === "/auth/session") return respond({ mode: "legacy", authenticated: false });
     if (path === "/customers") return respond([{ id: 1, uuid: "customer", name: "Lab customer" }]);
     if (path === "/network-scans/capabilities")
       return respond({

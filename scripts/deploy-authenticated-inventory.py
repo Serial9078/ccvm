@@ -223,7 +223,12 @@ def source_plan(root, target, *, resume=False):
     if any(
         name in PROTECTED
         or name.startswith("docker-compose")
-        or not name.startswith(("backend/", "frontend/", "scripts/", "docs/", ".github/", "README"))
+        or (
+            name != ".gitignore"
+            and not name.startswith(
+                ("backend/", "frontend/", "scripts/", "docs/", ".github/", "README")
+            )
+        )
         for name in changes
     ):
         raise RuntimeError("Target modifies protected or unrelated files")

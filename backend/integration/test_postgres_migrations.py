@@ -1163,6 +1163,116 @@ def authenticated_deployment_snapshot():
     return module, json.loads(output.getvalue())
 
 
+def assert_native_authentication(engine, url):
+    """Consume one OTP once under concurrent PG logins and retain auth on downgrade."""
+    import base64
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime
+    from threading import Barrier
+
+    from fastapi import HTTPException
+    from sqlalchemy.orm import Session, sessionmaker
+    from starlette.requests import Request
+
+    from app.models.auth import AuthLoginLimit, AuthSession, AuthUser
+    from app.services import auth_session
+
+    moment = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    secret = auth_session.generate_totp_secret()
+    origin = "https://ccvm-pg.test"
+
+    def request(method="POST", token=None):
+        headers = [(b"origin", origin.encode()), (b"x-ccvm-request", b"1")]
+        if token:
+            headers.append((b"cookie", f"{auth_session.COOKIE_NAME}={token}".encode()))
+        return Request(
+            {
+                "type": "http",
+                "method": method,
+                "scheme": "https",
+                "server": ("ccvm-pg.test", 443),
+                "client": ("192.0.2.99", 51000),
+                "path": "/api/v1/auth/login" if method == "POST" else "/api/v1/customers",
+                "query_string": b"",
+                "headers": headers,
+            }
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("CCVM_AUDIT_VAULT_KEY", base64.b64encode(b"t" * 32).decode())
+        patch.setattr(auth_session, "SessionLocal", sessionmaker(bind=engine))
+        patch.setattr(auth_session, "auth_policy", lambda: auth_session.AuthPolicy(origin))
+        patch.setattr(auth_session, "now", lambda: moment)
+        with Session(engine) as db:
+            assert db.query(AuthUser).count() == 0
+            user = auth_session.create_operator(
+                db, "pg-auth-fixture", "a synthetic long authentication phrase", secret
+            )
+            user_id = user.id
+            db.commit()
+        try:
+            barrier = Barrier(2)
+            code = auth_session.totp_code(secret)
+
+            def simultaneous_login():
+                barrier.wait(timeout=10)
+                try:
+                    return auth_session.authenticate(
+                        request(), "pg-auth-fixture", "a synthetic long authentication phrase", code
+                    )
+                except HTTPException as error:
+                    assert error.status_code == 401
+                    return None
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(simultaneous_login) for _ in range(2)]
+                results = [future.result(timeout=20) for future in futures]
+            accepted = [result for result in results if result is not None]
+            assert len(accepted) == 1, "An OTP must not create two sessions concurrently"
+            raw_token, principal = accepted[0]
+            with Session(engine) as db:
+                assert db.query(AuthSession).count() == 1
+                assert db.get(AuthUser, user_id).totp_last_step == int(moment.timestamp()) // 30
+                stored = db.query(AuthSession).one()
+                assert stored.token_hash == auth_session.digest(raw_token)
+                assert stored.csrf_hash == auth_session.digest(principal.csrf_token)
+                assert raw_token not in repr(vars(stored))
+                assert principal.csrf_token not in repr(vars(stored))
+                assert stored.created_at.tzinfo is not None
+                assert (
+                    db.scalar(sa.text("SELECT pg_typeof(totp_ciphertext)::text FROM auth_users"))
+                    == "bytea"
+                )
+                assert secret.encode() not in db.get(AuthUser, user_id).totp_ciphertext
+            assert auth_session.require_session(request("GET", raw_token)).user_id == user_id
+            auth_session.revoke_session(principal)
+            with pytest.raises(HTTPException) as failure:
+                auth_session.require_session(request("GET", raw_token))
+            assert failure.value.status_code == 401
+            with engine.connect() as connection:
+                before = all_data_rows(connection)
+            alembic_command(
+                url,
+                "downgrade",
+                "d6a4b8e2f901",
+                log_name="auth-retained-downgrade-refused",
+                expect_success=False,
+            )
+            with engine.connect() as connection:
+                assert all_data_rows(connection) == before
+                assert_schema_matches_models(connection)
+        finally:
+            with engine.begin() as connection:
+                connection.execute(sa.delete(AuthSession))
+                connection.execute(sa.delete(AuthUser))
+                connection.execute(sa.delete(AuthLoginLimit))
+    print(
+        "PostgreSQL authentication: concurrent OTP replay refused, opaque session revoked, "
+        "native ciphertext/timestamps verified and populated downgrade refused",
+        flush=True,
+    )
+
+
 def test_empty_postgresql_database_migrates_to_head():
     url = ci_database_url(os.environ)  # Guard runs before any connection or application import.
     for key in tuple(os.environ):
@@ -1295,7 +1405,18 @@ def test_empty_postgresql_database_migrates_to_head():
             existing_rows[name] = []
             without_network_fixture[name] = []
         alembic_command(
-            url, "upgrade", "head", log_name="upgrade-populated-patch-history-with-software-tables"
+            url,
+            "upgrade",
+            "d6a4b8e2f901",
+            log_name="upgrade-populated-patch-history-with-software-tables",
+        )
+        with engine.connect() as connection:
+            assert all_data_rows(connection) == existing_rows
+        for name in ("auth_users", "auth_sessions", "auth_login_limits"):
+            existing_rows[name] = []
+            without_network_fixture[name] = []
+        alembic_command(
+            url, "upgrade", "head", log_name="upgrade-retained-evidence-with-auth-tables"
         )
         alembic_command(url, "current", "--verbose")
         alembic_command(url, "heads", "--verbose")
@@ -1305,7 +1426,7 @@ def test_empty_postgresql_database_migrates_to_head():
             assert_schema_matches_models(connection)
             assert all_data_rows(connection) == existing_rows
         print(
-            "Software migration added exactly two empty tables and preserved populated "
+            "Software and authentication migrations added only their empty tables and preserved "
             "OS catalogs, assessments, HTTP evidence and every prior row",
             flush=True,
         )
@@ -1334,6 +1455,7 @@ def test_empty_postgresql_database_migrates_to_head():
         with engine.connect() as connection:
             assert set(MigrationContext.configure(connection).get_current_heads()) == expected_heads
             assert_schema_matches_models(connection)
+        assert_native_authentication(engine, url)
         assert_finding_downgrade_refuses_truncation(engine, url)
         assert_downgrade_preserves_long_urls(engine, url)
         assert_network_downgrade_preserves_evidence(engine, url)

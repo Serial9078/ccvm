@@ -1,10 +1,12 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.v1 import (
+    auth,
     customers,
     dashboard,
     discovery,
@@ -30,6 +32,7 @@ from app.routers import (
     assets,
     domains,
 )
+from app.services.auth_session import auth_enabled, require_same_origin, require_session
 
 app = FastAPI(
     title="CCVM API",
@@ -51,6 +54,7 @@ app.include_router(
     customers.router,
     prefix="/api/v1",
 )
+app.include_router(auth.router, prefix="/api/v1")
 app.include_router(
     assets.router,
     prefix="/api/v1",
@@ -121,7 +125,7 @@ app.include_router(
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, error: RequestValidationError):
-    if request.url.path.startswith("/api/v1/host-audits"):
+    if request.url.path.startswith(("/api/v1/host-audits", "/api/v1/auth")):
         # FastAPI normally echoes invalid input, including nested plaintext
         # secret fields. Do not include input/context/body on this boundary.
         return JSONResponse(
@@ -137,8 +141,27 @@ async def validation_error(request: Request, error: RequestValidationError):
 
 @app.middleware("http")
 async def private_host_audit_responses(request: Request, call_next):
-    response = await call_next(request)
-    if request.url.path.startswith("/api/v1/host-audits"):
+    path = request.url.path
+    is_api = path == "/api/v1" or path.startswith("/api/v1/")
+    try:
+        # Authentication applies at the API boundary, including legacy routes.
+        # Only the exact login/session routes may run without a session. Route
+        # dependencies still enforce the privileged credential boundary.
+        if is_api and auth_enabled():
+            if path == "/api/v1/auth/login":
+                # Reject login CSRF before parsing/validating a supplied body.
+                if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                    require_same_origin(request)
+            elif path != "/api/v1/auth/session":
+                await run_in_threadpool(require_session, request)
+        response = await call_next(request)
+    except HTTPException as error:
+        response = JSONResponse(
+            status_code=error.status_code,
+            content={"detail": error.detail},
+            headers=error.headers,
+        )
+    if is_api:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
     return response
