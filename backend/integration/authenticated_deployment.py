@@ -1708,7 +1708,7 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             if windows_clients_mode:
                 verify_windows_clients_update(
                     source,
-                    WINDOWS_CLIENTS_RELEASE if workspace_mode else reviewed_target,
+                    WINDOWS_CLIENTS_RELEASE,
                     json.loads(journal.read_text()),
                 )
             if workspace_mode:
