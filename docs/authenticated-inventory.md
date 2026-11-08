@@ -503,3 +503,37 @@ Primary Windows Update references:
 - [IUpdateSearcher::Search](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nf-wuapi-iupdatesearcher-search)
 - [WUA operation result codes](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/ne-wuapi-operationresultcode)
 - [Using WUA from a remote computer](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/using-wua-from-a-remote-computer)
+
+
+### Host workspace publication
+
+The host workspace separates systems, discovered devices, run history and data
+sources. Its four clickable, exclusive groups show update findings, inventory
+work, outstanding assessments and scoped checked results. Each host has a next
+action. Missing inventory shows connection/collection guidance; saved evidence
+has separate overview, system update, software and technical-detail tabs.
+Unsupported coverage and newer failed attempts remain visible. Client update
+offers stay neutral, and platform navigation resets the search/status filters.
+
+`scripts/update-host-workspace.py --target <reviewed-merge-sha> --host neptun`
+validates the verified Windows-clients publication and all five predecessor
+journals. Default preflight is read-only and refuses active jobs. `--apply`
+builds the reviewed frontend, checks a private PostgreSQL backup and preserves
+schema `d6a4b8e2f901`, every retained database row, credentials, scanner policy,
+runtime images and container identities. The gateway, shared socket, HAProxy
+configuration and client allowlist are retained. It neither migrates schema nor
+starts a scan, inventory or Windows update query.
+
+The new private journal is `.git/ccvm-host-workspace-deployment.json`, with
+recovery material in `.git/ccvm-host-workspace-before-*`. Repeat interrupted
+applications with `--apply --resume`; a verified repeat only checks the installed
+publication. Do not rerun the older Windows-clients updater with a new target or
+use a plain Compose command to publish this UI. After successful verification,
+refresh the browser to load the new frontend; the operator token stays local.
+
+The disposable Docker integration installs the actual Windows-clients release
+first and retains its populated client/server evidence. It tests active-work
+refusal, read-only preflight, exact row/artifact hashes, unchanged predecessor
+journals/secrets/configurations, gateway start/restart/socket identity,
+stopped-service resume and verified repeats. Browser tests separately exercise
+the actual UI with synthetic data on desktop and mobile.

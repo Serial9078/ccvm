@@ -5,6 +5,7 @@ URL, target hostname, image pin, credential or network from a production system.
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
@@ -28,6 +29,7 @@ HTTP_INVENTORY_RELEASE = "2d4c31446303c3851b9ebacb55c143596faef0dd"
 WINDOWS_PATCH_RELEASE = "f3c546e5200b9d7379e0981abef132ecda1e2b6a"
 SOFTWARE_RELEASE = "69706bff65dad6436af59aceec45fa325f01630e"
 OVERVIEW_RELEASE = "6c6474e27179998fe2d82815c0a826ca6de0a2e9"
+WINDOWS_CLIENTS_RELEASE = "175910ed72717385d2bf75bacf59894671db8251"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -1278,6 +1280,184 @@ print(json.dumps({'assessment':first['id']}))
     )
 
 
+def verify_host_workspace_update(source, target, operation):
+    """Publish the workspace onto populated client evidence without replacing ingress."""
+    snapshot = """import hashlib,json
+from sqlalchemy import inspect
+from app.database.session import engine
+def stable(value):
+    if isinstance(value,(memoryview,bytes,bytearray)):
+        return {'bytes_hex':bytes(value).hex()}
+    return str(value)
+with engine.connect() as connection:
+    connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+    result={}
+    for name in sorted(inspect(connection).get_table_names()):
+        quoted=engine.dialect.identifier_preparer.quote(name)
+        rows=[dict(row) for row in connection.exec_driver_sql('SELECT * FROM '+quoted).mappings()]
+        encoded=sorted(json.dumps(row,sort_keys=True,default=stable) for row in rows)
+        result[name]={'count':len(rows),'sha256':hashlib.sha256(
+            json.dumps(encoded,sort_keys=True).encode()).hexdigest()}
+    revision=connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar_one()
+    print(json.dumps({'tables':result,'revision':revision}))
+"""
+
+    def capture():
+        return json.loads(docker("exec", "ccvm-worker", "python", "-c", snapshot))
+
+    names = (
+        "ccvm-backend",
+        "ccvm-worker",
+        "ccvm-frontend",
+        "ccvm-postgres",
+        "ccvm-audit-gateway",
+        "haproxy-edge",
+    )
+    identities = {name: inspect(name)["Id"] for name in names}
+    gateway = inspect("ccvm-audit-gateway")
+    gateway_start = (gateway["State"]["StartedAt"], gateway["RestartCount"])
+    socket_path = Path(operation["socket_dir"]) / "gateway.sock"
+
+    def shared_socket_identity():
+        # The protected root:HAProxy 2750 parent intentionally excludes the CI user.
+        return run("sudo", "-n", "stat", "--format=%d:%i", str(socket_path)).stdout.decode().strip()
+
+    socket_identity = shared_socket_identity()
+    paths = [
+        source / name
+        for name in (
+            "docker-compose.yml",
+            "docker-compose.network.yml",
+            "docker-compose.authenticated.yml",
+            "fixture.env",
+            "frontend/default.conf",
+            ".git/ccvm-authenticated-deployment.json",
+            ".git/ccvm-host-inventory-update.json",
+            ".git/ccvm-windows-patch-deployment.json",
+            ".git/ccvm-software-assessment-deployment.json",
+            ".git/ccvm-inventory-overview-deployment.json",
+            ".git/ccvm-windows-clients-deployment.json",
+        )
+    ]
+    paths += [
+        Path(operation["private"]) / name for name in ("vault.env", "operator.env", "gateway.conf")
+    ]
+    paths += [Path(operation["edge_path"])]
+    paths += sorted(Path(operation["certificate_dir"]).glob("*.pem"))
+    retained = {path: path.read_bytes() for path in paths}
+    previous_head = run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip()
+    assert previous_head == WINDOWS_CLIENTS_RELEASE
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = run("git", "show", f"{target}:scripts/update-host-workspace.py", cwd=REPOSITORY).stdout
+    marker = source / ".git/ccvm-host-workspace-deployment.json"
+
+    def update(*flags, expected_success=True):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            data=script,
+            cwd=source,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if expected_success and result.returncode and marker.is_file():
+            log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+            if log.is_file():
+                print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert (result.returncode == 0) is expected_success
+
+    def retained_runtime():
+        assert retained == {path: path.read_bytes() for path in paths}
+        assert identities == {name: inspect(name)["Id"] for name in names}
+        current_gateway = inspect("ccvm-audit-gateway")
+        assert (
+            current_gateway["State"]["StartedAt"],
+            current_gateway["RestartCount"],
+        ) == gateway_start
+        assert shared_socket_identity() == socket_identity
+
+    # A deliberately running dummy row is never claimed by the queued-job worker.
+    # Its only purpose is to prove that publication refuses active work.
+    active_id = int(seed_inventory("""from app.database.session import SessionLocal
+from app.models.job import Job
+with SessionLocal() as db:
+    job=Job(plugin='dummy',status='running',progress=1,message='Synthetic active-work guard')
+    db.add(job);db.commit();print(job.id)
+"""))
+    active_before = capture()
+    update(expected_success=False)
+    assert not marker.exists()
+    assert capture() == active_before
+    retained_runtime()
+    seed_inventory("""from app.database.session import SessionLocal
+from app.models.job import Job
+with SessionLocal() as db:
+    job=db.get(Job,%d);job.status='finished';job.progress=100
+    job.message='Completed synthetic active-work guard';db.commit()
+print('Synthetic guard finished without executing a plugin')
+""" % active_id)
+    before = capture()
+    assert before["revision"] == "d6a4b8e2f901"
+    assert before["tables"]["host_assessments"]["count"] >= 2
+    assert before["tables"]["software_assessments"]["count"] >= 1
+    retained_assets = {
+        path.relative_to(source / "frontend/dist")
+        .as_posix(): hashlib.sha256(path.read_bytes())
+        .hexdigest()
+        for path in (source / "frontend/dist").rglob("*")
+        if path.is_file() and path.name != "index.html"
+    }
+
+    def unchanged():
+        assert capture() == before
+        retained_runtime()
+
+    update()
+    assert not marker.exists()
+    assert run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip() == previous_head
+    unchanged()
+    update("--apply")
+    unchanged()
+    record = json.loads(marker.read_text())
+    assert record["version"] == "1.0.0" and record["phase"] == "verified"
+    assert record["base"] == previous_head and record["target"] == target
+    assert run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip() == target
+    installed = {
+        path.relative_to(source / "frontend/dist")
+        .as_posix(): hashlib.sha256(path.read_bytes())
+        .hexdigest()
+        for path in (source / "frontend/dist").rglob("*")
+        if path.is_file()
+    }
+    # Old hashed assets deliberately remain available to already-open browsers.
+    assert record["artifacts"]["frontend/dist"].items() <= installed.items()
+    assert retained_assets.items() <= installed.items()
+    record["phase"] = "services"
+    load_operator().write_json(marker, record)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    unchanged()
+    verified_journal = marker.read_bytes()
+    update("--apply", "--resume")
+    update()
+    unchanged()
+    assert marker.read_bytes() == verified_journal
+    old_application(operation["images"]["backend"])
+    print(
+        "VERIFIED: workspace UI publication, active-work refusal, retained populated evidence, "
+        "all prior journals/configs/secrets, unchanged gateway/socket, "
+        "verified frontend artifacts, "
+        "stopped-service resume and idempotent repeat",
+        flush=True,
+    )
+
+
 def main():
     if sys.argv[1:] not in (
         [],
@@ -1286,6 +1466,7 @@ def main():
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
+        ["--host-workspace-update"],
     ):
         raise RuntimeError("Unknown disposable deployment fixture mode")
     update_mode = bool(sys.argv[1:])
@@ -1294,17 +1475,24 @@ def main():
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
+        ["--host-workspace-update"],
     )
     software_mode = sys.argv[1:] in (
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
+        ["--host-workspace-update"],
     )
     overview_mode = sys.argv[1:] in (
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
+        ["--host-workspace-update"],
     )
-    windows_clients_mode = sys.argv[1:] == ["--windows-clients-update"]
+    windows_clients_mode = sys.argv[1:] in (
+        ["--windows-clients-update"],
+        ["--host-workspace-update"],
+    )
+    workspace_mode = sys.argv[1:] == ["--host-workspace-update"]
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
@@ -1522,6 +1710,12 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                 )
             if windows_clients_mode:
                 verify_windows_clients_update(
+                    source,
+                    WINDOWS_CLIENTS_RELEASE,
+                    json.loads(journal.read_text()),
+                )
+            if workspace_mode:
+                verify_host_workspace_update(
                     source, reviewed_target, json.loads(journal.read_text())
                 )
         finally:
