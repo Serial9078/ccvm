@@ -1754,6 +1754,10 @@ try {
     fullPage: true,
     animations: "disabled",
   });
+  // A search from another platform must not silently hide systems after navigation.
+  // The first route below must restore the Windows Server row despite this empty selection.
+  await overview.getByLabel("Host suchen", { exact: true }).fill("no-system-matches-this-search");
+  await overview.getByText("Keine Systeme in dieser Auswahl", { exact: true }).waitFor();
   for (const [label, path, shown, hidden] of [
     ["Windows Server", "/windows-servers", "192.0.2.20", "192.0.2.30"],
     ["Windows Clients", "/windows-clients", "192.0.2.30", "192.0.2.20"],

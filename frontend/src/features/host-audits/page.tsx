@@ -454,6 +454,7 @@ function AuditPanel({
         aria-labelledby="workspace-systems"
       >
         <HostOverviewPanel
+          key={platform}
           overview={overview}
           platform={platform}
           loading={!overviewLoaded}
