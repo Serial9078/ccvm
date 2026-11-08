@@ -1981,7 +1981,7 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
             if workspace_mode:
                 verify_host_workspace_update(
                     source,
-                    HOST_WORKSPACE_RELEASE if secure_login_mode else reviewed_target,
+                    HOST_WORKSPACE_RELEASE,
                     json.loads(journal.read_text()),
                 )
             if secure_login_mode:
