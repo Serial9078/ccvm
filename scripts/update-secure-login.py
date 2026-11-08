@@ -34,6 +34,7 @@ NEW_TABLES = {"auth_users", "auth_sessions", "auth_login_limits"}
 ALLOWED = {
     ".gitignore",
     "scripts/update-secure-login.py",
+    "scripts/deploy-authenticated-inventory.py",
     "scripts/tests/test_update_secure_login.py",
     "backend/integration/authenticated_deployment.py",
     "backend/app/auth_admin.py",

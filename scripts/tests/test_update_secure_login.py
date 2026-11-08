@@ -270,6 +270,25 @@ class SourceContract(unittest.TestCase):
     def test_secure_login_source_and_frontend_are_explicitly_allowed(self):
         self.previous.source_plan(self.root, self.target(), self.base)
 
+    def test_fresh_deployment_accepts_the_exact_gitignore_filename_only(self):
+        target = self.target(".gitignore")
+        with (
+            patch.object(original, "BASE", self.base),
+            patch.object(original, "FEATURE", self.base),
+        ):
+            before, changed = original.source_plan(self.root, target)
+        self.assertEqual(before, self.base)
+        self.assertIn(".gitignore", changed)
+        for path in (".gitignore-extra", "docker-compose.authenticated.yml", ".env"):
+            target = self.target(path)
+            with (
+                self.subTest(path=path),
+                patch.object(original, "BASE", self.base),
+                patch.object(original, "FEATURE", self.base),
+                self.assertRaisesRegex(RuntimeError, "protected or unrelated"),
+            ):
+                original.source_plan(self.root, target)
+
     def test_unrelated_application_dependencies_scanners_secrets_and_ingress_are_refused(self):
         for name in (
             "backend/requirements.txt",

@@ -137,6 +137,8 @@ await context.route(`${origin}/**`, async (route) => {
           : { ...request.postDataJSON(), id: 3, uuid: "three" },
       );
     if (path === "/api/v1/host-audits/overview") return respond(overview(customer));
+    if (["/api/v1/host-audits/patch-catalog", "/api/v1/host-audits/software-catalog"].includes(path))
+      return respond(null);
     if (path === "/api/v1/host-audits/credentials")
       return respond([
         {
@@ -158,7 +160,8 @@ await context.route(`${origin}/**`, async (route) => {
         });
       return respond([]);
     }
-    throw new Error(`Unmocked private API ${request.method()} ${path}`);
+    errors.push(`Unmocked private API ${request.method()} ${path}`);
+    return respond({ detail: "Unexpected API call in the browser fixture" }, 500);
   }
   const file = path === "/" || !extname(path) ? "index.html" : path.slice(1);
   const contentType = file.endsWith(".js")
@@ -182,6 +185,9 @@ const login = async (code = "123456") => {
 try {
   await page.goto(`${origin}/host-audits?customer_id=1`);
   await page.getByRole("heading", { name: "Bei CCVM anmelden" }).waitFor();
+  await page.getByRole("button", { name: "Anmelden", exact: true }).waitFor();
+  await mkdir("test-artifacts", { recursive: true });
+  await page.screenshot({ path: "test-artifacts/secure-login-desktop.png", fullPage: true });
   assert.equal(privateCalls, 0, "No private route loads before session verification and login");
   assert.equal(await page.getByLabel("Operator token", { exact: true }).count(), 0);
   await login("000000");
@@ -298,6 +304,10 @@ try {
   console.log(
     "Authentication UI passed: MFA form, HttpOnly cookie restore, CSRF on both API clients, customer isolation, stale/private-view clearing, expiry, cross-tab logout, fail-closed errors and mobile layout",
   );
+} catch (failure) {
+  await mkdir("test-artifacts", { recursive: true });
+  await page.screenshot({ path: "test-artifacts/secure-login-failure.png", fullPage: true }).catch(() => {});
+  throw failure;
 } finally {
   await browser.close();
 }
