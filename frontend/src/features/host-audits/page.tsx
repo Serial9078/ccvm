@@ -28,6 +28,7 @@ import {
 } from "@mui/material";
 import { useCustomers } from "../customers/hooks";
 import { auditRequest, canUseAuditApi } from "./api";
+import { useAuth } from "../../shared/auth/context";
 import type {
   Credential,
   AuditMode,
@@ -143,6 +144,7 @@ function AuditPanel({
   lock: () => void;
   platform: HostPlatformFilter;
 }) {
+  const auth = useAuth();
   const [workspaceTab, setWorkspaceTab] = useState("systems");
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [runs, setRuns] = useState<HostAudit[]>([]);
@@ -379,11 +381,9 @@ function AuditPanel({
         <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
           <Box sx={{ width: 7, height: 7, bgcolor: "success.main", borderRadius: "50%" }} />
           <Typography variant="body2" color="text.secondary">
-            Operatorzugang aktiv
+            {auth.session?.mode === "local" ? "Angemeldet" : "Operatorzugang aktiv"}
           </Typography>
-          <Button size="small" startIcon={<LockOutlinedIcon />} onClick={lock}>
-            Sperren
-          </Button>
+          {auth.session?.mode !== "local" && <Button size="small" startIcon={<LockOutlinedIcon />} onClick={lock}>Sperren</Button>}
         </Stack>
         <Box sx={{ flexGrow: 1 }} />
         <Button
@@ -1218,6 +1218,8 @@ function AuditPanel({
 }
 
 export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter }) {
+  const auth = useAuth();
+  const normalLogin = auth.session?.mode === "local" && auth.session.authenticated;
   const [query, setQuery] = useSearchParams();
   const queryValue = query.get("customer_id") ?? "";
   const queryCustomer = /^[1-9][0-9]{0,9}$/.test(queryValue) ? queryValue : "";
@@ -1229,6 +1231,13 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
   const [busy, setBusy] = useState(false);
   const secure = canUseAuditApi();
   const sessionGeneration = useRef(0);
+  useEffect(() => {
+    if (normalLogin && !customer && customers.length === 1) {
+      const selected = String(customers[0].id);
+      setCustomer(selected);
+      setQuery({ customer_id: selected }, { replace: true });
+    }
+  }, [normalLogin, customer, customers, setQuery]);
   useEffect(() => {
     if (queryCustomer && queryCustomer !== customer) {
       sessionGeneration.current++;
@@ -1269,6 +1278,10 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
       setBusy(false);
     }
   };
+  const activeCustomer = queryCustomer || customer;
+  const activeSession = normalLogin
+    ? (activeCustomer ? { token: `cookie-session-${auth.generation}`, customerId: Number(activeCustomer) } : null)
+    : session;
   return (
     <Stack spacing={3}>
       <Box>
@@ -1283,23 +1296,33 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
                 : "Was muss aktualisiert werden? Welches System braucht zuerst eine Prüfung?"}
         </Typography>
       </Box>
-      {session ? (
+      {normalLogin && (
+        <TextField select label="Kunde" value={activeCustomer} sx={{ maxWidth: 360 }} onChange={(event) => {
+          setCustomer(event.target.value);
+          setQuery(event.target.value ? { customer_id: event.target.value } : {}, { replace: true });
+        }}>
+          {customers.map((entry) => <MenuItem key={entry.id} value={String(entry.id)}>{entry.name}</MenuItem>)}
+        </TextField>
+      )}
+      {activeSession ? (
         <>
           <Typography variant="h6">
-            {customers.find((c) => c.id === session.customerId)?.name ??
-              `Customer #${session.customerId}`}
+            {customers.find((c) => c.id === activeSession.customerId)?.name ??
+              `Customer #${activeSession.customerId}`}
           </Typography>
           <AuditPanel
-            token={session.token}
-            customerId={session.customerId}
+            key={`${auth.generation}:${activeSession.customerId}`}
+            token={activeSession.token}
+            customerId={activeSession.customerId}
             platform={platform}
             lock={() => {
+              if (normalLogin) { void auth.logout(); return; }
               setSession(null);
               setInput("");
             }}
           />
         </>
-      ) : (
+      ) : normalLogin ? <Alert severity="info">Wähle einen Kunden, um die Systeme anzuzeigen.</Alert> : (
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ mb: 2 }}>
             Operator access

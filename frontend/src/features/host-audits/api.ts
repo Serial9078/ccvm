@@ -1,6 +1,7 @@
 import { apiBaseUrl } from "../../shared/api/config";
 import type { PipelineJob } from "../pipelines/api";
 import { secureAuditAccess } from "./security";
+import { apiSession, invalidateApiSession, sessionRequestHeaders } from "../../shared/auth/session";
 export { secureAuditAccess } from "./security";
 
 export function canUseAuditApi(): boolean {
@@ -275,19 +276,26 @@ export async function auditRequest<T>(
 ): Promise<T> {
   if (!secureAuditAccess(window.location, apiBaseUrl))
     throw new Error("Use HTTPS and the same-origin API proxy for host audits.");
+  const session = apiSession();
+  if (!session) throw new Error("Die Sitzung wird geprüft. Bitte erneut versuchen.");
+  const method = body === undefined ? "GET" : "POST";
   const response = await fetch(`${apiBaseUrl}/host-audits${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(session.mode === "legacy" ? { Authorization: `Bearer ${token}` } : sessionRequestHeaders(method, session)),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
     redirect: "error",
-    credentials: "omit",
+    credentials: session.mode === "legacy" ? "omit" : "same-origin",
     signal: signal
       ? AbortSignal.any([signal, AbortSignal.timeout(30000)])
       : AbortSignal.timeout(30000),
   });
   const result = await response.json();
   if (!response.ok) {
+    if (response.status === 401) invalidateApiSession(session);
     const detail = result.detail;
     throw new Error(
       typeof detail === "string"

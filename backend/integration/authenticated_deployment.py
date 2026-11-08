@@ -30,6 +30,7 @@ WINDOWS_PATCH_RELEASE = "f3c546e5200b9d7379e0981abef132ecda1e2b6a"
 SOFTWARE_RELEASE = "69706bff65dad6436af59aceec45fa325f01630e"
 OVERVIEW_RELEASE = "6c6474e27179998fe2d82815c0a826ca6de0a2e9"
 WINDOWS_CLIENTS_RELEASE = "175910ed72717385d2bf75bacf59894671db8251"
+HOST_WORKSPACE_RELEASE = "41f3071d877521da8b9d80e80408a40245835eeb"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -1458,6 +1459,263 @@ print('Synthetic guard finished without executing a plugin')
     )
 
 
+def verify_secure_login_update(source, target, operation):
+    """Add sessions onto populated retained evidence and test actual TLS cookies."""
+    import base64
+    import secrets
+
+    names = (
+        "ccvm-backend",
+        "ccvm-worker",
+        "ccvm-frontend",
+        "ccvm-postgres",
+        "ccvm-audit-gateway",
+        "haproxy-edge",
+    )
+    identities = {name: inspect(name)["Id"] for name in names}
+    previous_head = run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip()
+    assert previous_head == HOST_WORKSPACE_RELEASE
+    paths = [
+        source / path
+        for path in (
+            "docker-compose.yml",
+            "docker-compose.network.yml",
+            "docker-compose.authenticated.yml",
+            "frontend/default.conf",
+            ".git/ccvm-authenticated-deployment.json",
+            ".git/ccvm-host-inventory-update.json",
+            ".git/ccvm-windows-patch-deployment.json",
+            ".git/ccvm-software-assessment-deployment.json",
+            ".git/ccvm-inventory-overview-deployment.json",
+            ".git/ccvm-windows-clients-deployment.json",
+            ".git/ccvm-host-workspace-deployment.json",
+        )
+    ]
+    paths += [
+        Path(operation["private"]) / name for name in ("vault.env", "operator.env", "gateway.conf")
+    ]
+    paths += [Path(operation["edge_path"])]
+    retained = {path: path.read_bytes() for path in paths}
+    gateway = inspect("ccvm-audit-gateway")
+    gateway_start = (gateway["State"]["StartedAt"], gateway["RestartCount"])
+    socket_path = str(Path(operation["socket_dir"]) / "gateway.sock")
+    socket_identity = run("sudo", "-n", "stat", "--format=%d:%i", socket_path).stdout
+
+    snapshot = """import hashlib,json
+from sqlalchemy import inspect
+from app.database.session import engine
+with engine.connect() as c:
+ c.exec_driver_sql('SET TRANSACTION READ ONLY')
+ tables={}
+ for name in inspect(c).get_table_names():
+  if name=='alembic_version':continue
+  quoted=engine.dialect.identifier_preparer.quote(name)
+  rows=[dict(row) for row in c.exec_driver_sql('SELECT * FROM '+quoted).mappings()]
+  def encode(value):
+   return bytes(value).hex() if isinstance(value,(bytes,bytearray,memoryview)) else str(value)
+  encoded=sorted(json.dumps(row,sort_keys=True,default=encode) for row in rows)
+  tables[name]={'count':len(rows),'sha256':hashlib.sha256(json.dumps(encoded).encode()).hexdigest()}
+ revision=c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar_one()
+ print(json.dumps({'tables':tables,'revision':revision}))
+"""
+
+    def capture():
+        return json.loads(docker("exec", "ccvm-backend", "python", "-c", snapshot))
+
+    def retained_runtime():
+        assert retained == {path: path.read_bytes() for path in paths}
+        assert identities == {name: inspect(name)["Id"] for name in names}
+        current = inspect("ccvm-audit-gateway")
+        assert (current["State"]["StartedAt"], current["RestartCount"]) == gateway_start
+        assert run("sudo", "-n", "stat", "--format=%d:%i", socket_path).stdout == socket_identity
+
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = run("git", "show", f"{target}:scripts/update-secure-login.py", cwd=REPOSITORY).stdout
+    marker = source / ".git/ccvm-secure-login-deployment.json"
+
+    def update(*flags):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            cwd=source,
+            data=script,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if result.returncode and marker.is_file():
+            log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+            if log.is_file():
+                print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert result.returncode == 0
+
+    before = capture()
+    update()
+    assert not marker.exists() and capture() == before
+    retained_runtime()
+    update("--apply")
+    record = json.loads(marker.read_text())
+    assert record["phase"] == "verified" and record["base"] == HOST_WORKSPACE_RELEASE
+    migrated = capture()
+    assert migrated["revision"] == "e7b5c9d2a401"
+    assert before["tables"].items() <= migrated["tables"].items()
+    new_tables = {"auth_users", "auth_sessions", "auth_login_limits"}
+    assert set(migrated["tables"]) - set(before["tables"]) == new_tables
+    assert all(migrated["tables"][name]["count"] == 0 for name in new_tables)
+    retained_runtime()
+    # Exercise retained stopped-service resume before an account is activated.
+    record["phase"] = "services"
+    load_operator().write_json(marker, record)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    assert capture() == migrated
+    retained_runtime()
+    username, password = "deployment-check", secrets.token_urlsafe(32)
+    secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+    origin = "https://" + operation["hostname"]
+    seed = """import json,sys
+from app.database.session import SessionLocal
+from app.services.auth_session import create_operator
+from app.auth_admin import write_policy
+p=json.load(sys.stdin)
+with SessionLocal() as db:
+ create_operator(db,p['username'],p['password'],p['secret']);db.commit()
+write_policy(p['origin'])
+print('Synthetic local account and MFA policy activated')
+"""
+    docker(
+        "exec",
+        "-i",
+        "--workdir",
+        "/app",
+        "ccvm-backend",
+        "python",
+        "-c",
+        seed,
+        data=json.dumps(
+            {"username": username, "password": password, "secret": secret, "origin": origin}
+        ).encode(),
+    )
+    try:
+        checks = r"""
+import base64,hashlib,hmac,http.client,json,socket,ssl,struct,sys,time
+from http.cookies import SimpleCookie
+p=json.load(sys.stdin);ctx=ssl.create_default_context()
+def request(path,method='GET',body=None,cookie=None,csrf=None,origin=None,token=None):
+ raw=socket.create_connection(('127.0.0.1',p['port']),timeout=8)
+ raw.sendall(f"PROXY TCP4 192.0.2.1 127.0.0.1 12345 {p['port']}\r\n".encode())
+ with ctx.wrap_socket(raw,server_hostname=p['hostname']) as tls:
+  data=b'' if body is None else json.dumps(body).encode()
+  headers=[f'{method} {path} HTTP/1.1',f"Host: {p['hostname']}",'Connection: close']
+  if method!='GET':
+   headers+=['Content-Type: application/json',f'Content-Length: {len(data)}','X-CCVM-Request: 1']
+  if cookie:headers.append('Cookie: '+cookie)
+  if csrf:headers.append('X-CSRF-Token: '+csrf)
+  if origin:headers.append('Origin: '+origin)
+  if token:headers.append('Authorization: Bearer '+token)
+  tls.sendall(('\r\n'.join(headers)+'\r\n\r\n').encode()+data)
+  reply=http.client.HTTPResponse(tls);reply.begin()
+  content=reply.read(2*1024*1024)
+  if path.startswith('/api/v1'):assert reply.getheader('Cache-Control')=='no-store'
+  assert reply.getheader('X-CCVM-Route')==p['marker']
+  headers={key.lower():value for key,value in reply.getheaders()}
+  return reply.status,headers,json.loads(content) if content else None
+def otp(secret):
+ key=base64.b32decode(secret+'='*((-len(secret))%8));step=int(time.time())//30
+ digest=hmac.new(key,struct.pack('>Q',step),hashlib.sha1).digest();offset=digest[-1]&15
+ return f'{(struct.unpack(">I",digest[offset:offset+4])[0]&0x7fffffff)%1000000:06d}'
+assert request('/api/v1/auth/session')[2]=={'mode':'local','authenticated':False}
+paths=('/api/v1/customers','/api/v1/network-scans/capabilities',
+       '/api/v1/host-audits?customer_id=1')
+for path in paths:
+ assert request(path)[0]==401
+ assert request(path,token=p['old_token'])[0]==401
+payload={'username':p['username'],'password':p['password'],'code':otp(p['secret'])}
+assert request('/api/v1/auth/login','POST',payload,origin='https://sibling.example.test')[0]==403
+status,headers,data=request('/api/v1/auth/login','POST',payload,origin=p['origin'])
+assert status==200 and data['authenticated'] and data['user']['username']==p['username']
+jar=SimpleCookie();jar.load(headers['set-cookie']);item=jar['__Host-ccvm_session']
+assert item['secure'] and item['httponly'] and item['samesite'].lower()=='strict'
+assert item['path']=='/' and not item['domain']
+cookie='__Host-ccvm_session='+item.value;csrf=data['csrf_token']
+restored=request('/api/v1/auth/session',cookie=cookie)[2]
+assert restored['authenticated'] and restored['csrf_token']==csrf
+assert request('/api/v1/customers',cookie=cookie)[0]==200
+assert request('/api/v1/auth/logout','POST',cookie=cookie,origin=p['origin'])[0]==403
+assert request('/api/v1/auth/logout','POST',cookie=cookie,csrf=csrf,origin='https://sibling.example.test')[0]==403
+assert request('/api/v1/customers',cookie=cookie)[0]==200
+assert request('/api/v1/auth/logout','POST',cookie=cookie,csrf=csrf,origin=p['origin'])[0]==204
+assert request('/api/v1/customers',cookie=cookie)[0]==401
+assert request('/api/v1/auth/session',cookie=cookie)[2]['authenticated'] is False
+print(json.dumps({'login':True,'mfa':True,'cookie':True,'restore':True,'csrf':True,'logout':True,'legacy_bypass_rejected':True}))
+"""
+        token = dict(
+            line.split("=", 1)
+            for line in (Path(operation["private"]) / "operator.env").read_text().splitlines()
+        )["CCVM_AUDIT_OPERATOR_TOKEN"]
+        payload = {
+            "hostname": operation["hostname"],
+            "port": operation["tls_port"],
+            "marker": operation["target"][:12],
+            "origin": origin,
+            "username": username,
+            "password": password,
+            "secret": secret,
+            "old_token": token,
+        }
+        verified = json.loads(
+            docker(
+                "run",
+                "-i",
+                "--rm",
+                "--pull=never",
+                "--network",
+                "container:haproxy-edge",
+                "--entrypoint",
+                "python",
+                operation["images"]["backend"],
+                "-I",
+                "-c",
+                checks,
+                data=json.dumps(payload).encode(),
+            )
+        )
+        assert all(verified.values()) and len(verified) == 7
+        authenticated = capture()
+        assert authenticated["tables"]["auth_users"]["count"] == 1
+        assert before["tables"].items() <= authenticated["tables"].items()
+        policy_path = source / "backend/.ccvm-auth/auth-policy.json"
+        policy_bytes = run("sudo", "-n", "cat", str(policy_path)).stdout
+        verified_journal = marker.read_bytes()
+        update("--apply", "--resume")
+        update()
+        assert capture() == authenticated
+        assert run("sudo", "-n", "cat", str(policy_path)).stdout == policy_bytes
+        assert marker.read_bytes() == verified_journal
+        retained_runtime()
+        print(
+            "VERIFIED: additive login rollout, retained evidence/runtime, TLS password+MFA login, "
+            "secure cookie restore, CSRF and sibling-origin rejection, logout, no token bypass, "
+            "post-bootstrap idempotency",
+            flush=True,
+        )
+    finally:
+        # Only this disposable fixture owns this synthetic root-created directory.
+        run(
+            "sudo",
+            "-n",
+            "chown",
+            "-R",
+            f"{os.getuid()}:{os.getgid()}",
+            str(source / "backend/.ccvm-auth"),
+        )
+
+
 def main():
     if sys.argv[1:] not in (
         [],
@@ -1467,6 +1725,7 @@ def main():
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
         ["--host-workspace-update"],
+        ["--secure-login-update"],
     ):
         raise RuntimeError("Unknown disposable deployment fixture mode")
     update_mode = bool(sys.argv[1:])
@@ -1476,23 +1735,28 @@ def main():
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
         ["--host-workspace-update"],
+        ["--secure-login-update"],
     )
     software_mode = sys.argv[1:] in (
         ["--software-assessment-update"],
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
         ["--host-workspace-update"],
+        ["--secure-login-update"],
     )
     overview_mode = sys.argv[1:] in (
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
         ["--host-workspace-update"],
+        ["--secure-login-update"],
     )
     windows_clients_mode = sys.argv[1:] in (
         ["--windows-clients-update"],
         ["--host-workspace-update"],
+        ["--secure-login-update"],
     )
-    workspace_mode = sys.argv[1:] == ["--host-workspace-update"]
+    workspace_mode = sys.argv[1:] in (["--host-workspace-update"], ["--secure-login-update"])
+    secure_login_mode = sys.argv[1:] == ["--secure-login-update"]
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
@@ -1716,8 +1980,12 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                 )
             if workspace_mode:
                 verify_host_workspace_update(
-                    source, reviewed_target, json.loads(journal.read_text())
+                    source,
+                    HOST_WORKSPACE_RELEASE if secure_login_mode else reviewed_target,
+                    json.loads(journal.read_text()),
                 )
+            if secure_login_mode:
+                verify_secure_login_update(source, reviewed_target, json.loads(journal.read_text()))
         finally:
             with contextlib.suppress(Exception):
                 compose(

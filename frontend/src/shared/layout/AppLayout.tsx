@@ -22,6 +22,7 @@ import TerminalIcon from "@mui/icons-material/Terminal";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import {
   Box,
+  Button,
   Chip,
   Drawer,
   IconButton,
@@ -36,6 +37,7 @@ import {
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { customerNavigationSearch, navigationGroups } from "./navigation";
 import { cloudcollabBrand as brand } from "../theme/theme";
+import { useAuth } from "../auth/context";
 
 const icons = {
   domain: <DomainIcon fontSize="small" />,
@@ -58,6 +60,7 @@ const icons = {
 };
 
 export function AppLayout() {
+  const auth = useAuth();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const theme = useTheme();
   const desktop = useMediaQuery(theme.breakpoints.up("md"));
@@ -168,6 +171,11 @@ export function AppLayout() {
             </Box>
           </Box>
         </Box>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+        {auth.session?.mode === "local" && auth.session.authenticated && <>
+          <Typography variant="body2" sx={{ display: { xs: "none", sm: "block" } }}>{auth.session.user.username}</Typography>
+          <Button variant="outlined" size="small" onClick={() => void auth.logout()}>Abmelden</Button>
+        </>}
         <Chip
           label="Web & Infrastruktur"
           color="primary"
@@ -178,6 +186,7 @@ export function AppLayout() {
             bgcolor: brand.surface, borderColor: "#444", color: brand.white,
           }}
         />
+        </Box>
       </Box>
       <Box sx={{ display: "flex", alignItems: "flex-start" }}>
         <Box

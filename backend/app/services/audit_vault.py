@@ -1,7 +1,7 @@
-"""Small, deliberately separate operator boundary for the credentialed feature.
+"""Credential vault and privileged inventory access.
 
-The existing application has no user authentication. These endpoints require TLS
-and a separately provisioned operator token; this is not application-wide RBAC.
+Activated installations use the application's operator session. The original
+TLS/Bearer boundary remains available only before local account activation.
 """
 
 import base64
@@ -43,6 +43,15 @@ def operator_token():
 
 
 def require_operator(request: Request, authorization: str | None = Header(default=None)):
+    from app.services.auth_session import auth_enabled, require_session
+
+    if auth_enabled():
+        session = require_session(request)
+        try:
+            vault_key()
+        except ValueError as error:
+            raise HTTPException(status_code=503, detail="Host audits are not configured") from error
+        return session
     # Uvicorn may accept Forwarded headers only from explicitly trusted proxies.
     # Never inspect X-Forwarded-Proto here: a client could supply it directly.
     if request.url.scheme != "https":

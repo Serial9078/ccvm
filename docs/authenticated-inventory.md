@@ -537,3 +537,8 @@ refusal, read-only preflight, exact row/artifact hashes, unchanged predecessor
 journals/secrets/configurations, gateway start/restart/socket identity,
 stopped-service resume and verified repeats. Browser tests separately exercise
 the actual UI with synthetic data on desktop and mobile.
+## Normale Anmeldung
+
+Die sichere lokale Anmeldung mit Passwort, verpflichtendem Authenticator und erhaltenen
+Sitzungen ist unter [Sichere lokale Anmeldung](secure-login.md) beschrieben. Die Aktivierung
+schützt auch die bisherigen APIs und ersetzt den Operator-Token im Browser.

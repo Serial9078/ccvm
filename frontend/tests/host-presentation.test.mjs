@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hostPresentation } from "../src/features/host-audits/host-presentation.ts";
+import { hostPresentation, collectionFailure } from "../src/features/host-audits/host-presentation.ts";
+
+test("fixed transport failures show a specific next step without guessing unknown failures", () => {
+  assert.equal(collectionFailure("The target rejected authentication").label, "Zugangsdaten prüfen");
+  assert.equal(collectionFailure("The network operation timed out; verify the service, firewall and VPN route").label, "VPN & Firewall prüfen");
+  assert.equal(collectionFailure("WinRM denied access; verify account permissions and endpoint policy").label, "Berechtigungen prüfen");
+  assert.equal(collectionFailure("Unclassified failure"), null);
+});
 
 function assessment(status) {
   return {
