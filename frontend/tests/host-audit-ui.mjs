@@ -906,13 +906,22 @@ try {
       await page.getByRole("button", { name: "Inventur schließen", exact: true }).click();
     await page.getByTestId("inventory-form-dialog").waitFor({ state: "hidden" });
   }
+  async function workspaceTab(name) {
+    await page.getByRole("tab", { name: new RegExp(`^${name}`) }).click();
+  }
   async function openHistory() {
+    await workspaceTab("Prüfverlauf");
     const heading = page.getByRole("button", { name: /Verlauf und technische Details/ });
     if ((await heading.getAttribute("aria-expanded")) !== "true") await heading.click();
   }
   async function openCatalogs() {
+    await workspaceTab("Datenquellen");
     const heading = page.getByRole("button", { name: /Kataloge und Prüfumfang/ });
     if ((await heading.getAttribute("aria-expanded")) !== "true") await heading.click();
+  }
+  async function historyAction(name) {
+    await openHistory();
+    await page.getByRole("button", { name, exact: true }).click();
   }
   await page.goto(`${origin}/host-audits?customer_id=1`);
   await page.getByRole("heading", { name: "Host-Übersicht", exact: true }).waitFor();
@@ -972,7 +981,10 @@ try {
   await page.getByLabel("Password", { exact: true }).fill(password);
   rejectSave = true;
   await page.getByRole("button", { name: "Save credential", exact: true }).click();
-  await page.getByRole("dialog",{name:"Add encrypted credential",exact:true}).getByText("Fixture save rejected", { exact: true }).waitFor();
+  await page
+    .getByRole("dialog", { name: "Add encrypted credential", exact: true })
+    .getByText("Fixture save rejected", { exact: true })
+    .waitFor();
   assert.equal(await page.getByLabel("Password", { exact: true }).inputValue(), "");
   rejectSave = false;
   await page.getByLabel("Password", { exact: true }).fill(password);
@@ -1091,7 +1103,7 @@ try {
   await openCatalogs();
   const inventorySubmissions = submissions.length;
   const retainedRuns = JSON.stringify(runs);
-  await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
+  await historyAction("Assess Windows patches");
   await page
     .getByRole("dialog")
     .getByText("Below Microsoft update baseline", { exact: true })
@@ -1118,7 +1130,7 @@ try {
   });
   await page.getByRole("button", { name: "Close assessment", exact: true }).click();
   assessmentStatus = "identity_incomplete";
-  await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
+  await historyAction("Assess Windows patches");
   await page
     .getByRole("dialog")
     .getByText("More OS identity evidence needed", { exact: true })
@@ -1129,6 +1141,7 @@ try {
     .waitFor();
   await page.getByRole("button", { name: "Close assessment", exact: true }).click();
   catalog = null;
+  await openCatalogs();
   await page.getByRole("button", { name: "Refresh catalog status", exact: true }).click();
   await page
     .getByText(
@@ -1136,7 +1149,7 @@ try {
       { exact: true },
     )
     .waitFor();
-  await page.getByRole("button", { name: "Assess Windows patches", exact: true }).click();
+  await historyAction("Assess Windows patches");
   await page
     .getByRole("dialog")
     .getByText("Microsoft update catalog unavailable", { exact: true })
@@ -1163,7 +1176,7 @@ try {
   expired.expired = true;
   expired.result.valid_until = new Date(Date.now() - 86400000).toISOString();
   assessments.unshift(expired);
-  await page.getByRole("button", { name: "View assessments", exact: true }).click();
+  await historyAction("View assessments");
   await page
     .getByRole("dialog")
     .getByRole("combobox", { name: "Saved assessment", exact: true })
@@ -1181,7 +1194,7 @@ try {
     .waitFor();
   assert.equal(assessmentRequests, 3);
   await page.getByRole("button", { name: "Close assessment", exact: true }).click();
-  await page.getByRole("button", { name: "Assess installed software", exact: true }).click();
+  await historyAction("Assess installed software");
   const softwareDialog = page.getByRole("dialog");
   await softwareDialog.getByText("Affected version ranges matched", { exact: true }).waitFor();
   await softwareDialog
@@ -1206,7 +1219,7 @@ try {
   });
   await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
   softwareStatus = "no_matches_in_checked_ranges";
-  await page.getByRole("button", { name: "Assess installed software", exact: true }).click();
+  await historyAction("Assess installed software");
   await softwareDialog
     .getByText("No match in the checked advisory ranges", { exact: true })
     .waitFor();
@@ -1214,6 +1227,7 @@ try {
   assert.equal(await softwareDialog.locator(".MuiChip-colorSuccess").count(), 0);
   await page.getByRole("button", { name: "Close software assessment", exact: true }).click();
   softwareCatalog = null;
+  await openCatalogs();
   await page.getByRole("button", { name: "Refresh software catalog status", exact: true }).click();
   await page
     .getByText(
@@ -1221,7 +1235,7 @@ try {
       { exact: true },
     )
     .waitFor();
-  await page.getByRole("button", { name: "Assess installed software", exact: true }).click();
+  await historyAction("Assess installed software");
   await softwareDialog
     .getByText("Software advisory catalog unavailable", { exact: true })
     .waitFor();
@@ -1242,7 +1256,7 @@ try {
   expiredSoftware.expired = true;
   expiredSoftware.result.valid_until = new Date(Date.now() - 86400000).toISOString();
   softwareAssessments.unshift(expiredSoftware);
-  await page.getByRole("button", { name: "View software assessments", exact: true }).click();
+  await historyAction("View software assessments");
   await softwareDialog
     .getByRole("combobox", { name: "Saved software assessment", exact: true })
     .waitFor();
@@ -1282,6 +1296,7 @@ try {
     0,
   );
   assert.equal(apiCalls.filter((call) => call.path.endsWith("/discovered")).length, 0);
+  await openCatalogs();
   const capabilityPanel = page.getByTestId("capabilities-panel");
   await capabilityPanel
     .getByRole("button", { name: "Prüfumfang nach Plattform", exact: true })
@@ -1320,6 +1335,7 @@ try {
   await capabilityPanel
     .getByRole("button", { name: "Prüfumfang nach Plattform", exact: true })
     .click();
+  await workspaceTab("Erkannte Geräte");
   const discoveryPanel = page.getByTestId("discovered-devices-panel");
   await discoveryPanel.getByRole("button", { name: "Erkannte Geräte", exact: true }).click();
   const deviceTable = page.getByRole("table", { name: "Erkannte Netzwerkgeräte", exact: true });
@@ -1539,6 +1555,13 @@ try {
   unclassified.software_assessment = null;
   unclassified.latest_run.status = "failed";
   unclassified.issues = ["latest_collection_failed"];
+  const partialHost = sampleHost(113, "192.0.2.60", "windows_server", "meets_catalog_baseline");
+  partialHost.latest_run.status = "failed";
+  partialHost.latest_run.message = "Fixture partial inventory";
+  partialHost.inventory.package_status = "partial";
+  partialHost.windows_assessment = null;
+  partialHost.software_assessment = null;
+  partialHost.issues = ["latest_collection_failed", "inventory_partial"];
   runs.unshift({
     ...structuredClone(runs[0]),
     id: 6,
@@ -1564,7 +1587,9 @@ try {
     timeoutClient,
     linuxHost,
     unclassified,
+    partialHost,
   ];
+  await workspaceTab("Systeme");
   await page.getByRole("button", { name: "Status aktualisieren", exact: true }).click();
   const overview = page.getByTestId("host-overview");
   const hostRow = (ip) => overview.getByRole("row").filter({ hasText: ip });
@@ -1576,46 +1601,140 @@ try {
     const button = failedRun.getByRole("button", { name, exact: true });
     assert.ok((await button.count()) === 0 || (await button.isDisabled()));
   }
-  // Fold technical history again: decision cards and current host status are the default surface.
-  await page.getByRole("button", { name: /Verlauf und technische Details/ }).click();
-  await page.getByRole("button", { name: /Kataloge und Prüfumfang/ }).click();
+  // Switch back to decisions; technical histories and catalogs live in separate tabs.
+  await workspaceTab("Systeme");
 
-  await hostRow("192.0.2.20").getByText("Windows-Update nötig", { exact: true }).waitFor();
+  await hostRow("192.0.2.20").getByText("Update nötig", { exact: true }).waitFor();
   await hostRow("192.0.2.20").getByText("KB9999999", { exact: true }).waitFor();
-  await hostRow("192.0.2.20")
-    .getByText("Microsoft Edge 150.0.1000.1 → 150.0.1000.2", { exact: true })
-    .waitFor();
+  await hostRow("192.0.2.20").getByText("1 Versionen prüfen", { exact: true }).waitFor();
   assert.equal(
     (await overview.innerText()).includes("977"),
     false,
     "Related advisory references must not become patch or vulnerability counters",
   );
-  await hostRow("192.0.2.21").getByText("OS-Baseline erfüllt", { exact: true }).waitFor();
+  await hostRow("192.0.2.21").getByText("Build-Baseline erfüllt", { exact: true }).waitFor();
   await hostRow("192.0.2.21")
     .getByText("Kein Treffer in geprüften Regeln", { exact: true })
     .waitFor();
   assert.equal(await hostRow("192.0.2.22").locator(".MuiChip-colorSuccess").count(), 0);
   assert.equal(await hostRow("192.0.2.23").locator(".MuiChip-colorSuccess").count(), 0);
-  await hostRow("192.0.2.23").getByText("Neuester Lauf fehlgeschlagen", { exact: true }).waitFor();
+  await hostRow("192.0.2.23")
+    .getByText("Neuester Versuch fehlgeschlagen", { exact: true })
+    .waitFor();
   assert.equal(await hostRow("192.0.2.24").locator(".MuiChip-colorSuccess").count(), 0);
   assert.equal(await hostRow("192.0.2.50").locator(".MuiChip-colorSuccess").count(), 0);
-  await hostRow("192.0.2.20").getByRole("button", { name: "Details", exact: true }).click();
+  await hostRow("192.0.2.20")
+    .getByRole("button", { name: /Host öffnen/ })
+    .click();
   const statusDialog = page.getByRole("dialog", { name: "Host-Status · 192.0.2.20", exact: true });
   await statusDialog.waitFor();
+  await statusDialog.getByRole("tab", { name: "Software", exact: true }).click();
   await statusDialog.getByText("Microsoft Edge", { exact: true }).waitFor();
   await statusDialog
     .getByText("Microsoft Edge 150.0.1000.1 → 150.0.1000.2", { exact: true })
     .waitFor();
   // Closing a status dialog only reads saved evidence. No scan or login starts.
-  await statusDialog.getByRole("button", { name: /schließen/i }).click();
+  await statusDialog.getByRole("button", { name: "Host-Status schließen", exact: true }).click();
   await statusDialog.waitFor({ state: "hidden" });
+  // One operational bucket per host makes the counts additive, and the cards are filters.
+  const buckets = ["update-count", "unknown-count", "assessment-count", "baseline-count"];
+  const bucketTotal = (
+    await Promise.all(
+      buckets.map(async (id) => Number(await overview.getByTestId(id).locator("h3").innerText())),
+    )
+  ).reduce((sum, count) => sum + count, 0);
+  assert.equal(bucketTotal, (await overview.getByRole("row").count()) - 1);
+  await overview.getByTestId("update-count").click();
+  assert.equal(await overview.getByTestId("update-count").getAttribute("aria-pressed"), "true");
+  await hostRow("192.0.2.20").waitFor();
+  assert.equal(await hostRow("192.0.2.23").count(), 0);
+  await overview.getByTestId("update-count").click();
+  assert.equal(await overview.getByTestId("update-count").getAttribute("aria-pressed"), "false");
+
+  // A failed first inventory explains the next step instead of displaying empty assessments.
+  const beforeRepair = apiCalls.filter((request) => request.method !== "GET").length;
+  const failedDetailButton = hostRow("192.0.2.50").getByRole("button", { name: /Host öffnen/ });
+  await failedDetailButton.focus();
+  await page.keyboard.press("Enter");
+  const failedDetail = page.getByRole("dialog", { name: "Host-Status · 192.0.2.50", exact: true });
+  await failedDetail.waitFor();
+  assert.equal(await failedDetail.getByTestId("host-next-action").count(), 1);
+  await failedDetail
+    .getByTestId("host-next-action")
+    .getByText("Verbindung prüfen", { exact: true })
+    .waitFor();
+  assert.equal(await failedDetail.getByRole("tab", { name: "Software", exact: true }).count(), 0);
+  assert.equal(
+    await failedDetail.getByRole("button", { name: "Windows jetzt bewerten", exact: true }).count(),
+    0,
+  );
+  await page.screenshot({
+    path: "test-artifacts/host-next-step-desktop.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.keyboard.press("Escape");
+  await failedDetail.waitFor({ state: "hidden" });
+  await failedDetailButton.click();
+  await failedDetail
+    .getByRole("button", { name: "Verbindung & Inventur prüfen", exact: true })
+    .click();
+  await failedDetail.waitFor({ state: "hidden" });
+  const repairForm = page.getByTestId("inventory-form-dialog");
+  await repairForm.waitFor();
+  assert.equal(
+    await repairForm.getByLabel("Target IP", { exact: true }).inputValue(),
+    "192.0.2.50",
+  );
+  assert.equal(
+    apiCalls.filter((request) => request.method !== "GET").length,
+    beforeRepair,
+    "Opening a recovery form only prepares the host; it must not authenticate or submit an inventory",
+  );
+  await closeInventory();
+  await hostRow("192.0.2.23")
+    .getByRole("button", { name: /Host öffnen/ })
+    .click();
+  const retainedDetail = page.getByRole("dialog", {
+    name: "Host-Status · 192.0.2.23",
+    exact: true,
+  });
+  await retainedDetail.getByRole("tab", { name: "Prüfdetails", exact: true }).click();
+  await retainedDetail
+    .getByText(
+      "Diese Daten stammen aus einer früheren Erfassung; der neueste Versuch war nicht erfolgreich.",
+      { exact: false },
+    )
+    .waitFor();
+  await page.keyboard.press("Escape");
+  await retainedDetail.waitFor({ state: "hidden" });
+  await hostRow("192.0.2.60")
+    .getByRole("button", { name: /Host öffnen/ })
+    .click();
+  const partialDetail = page.getByRole("dialog", { name: "Host-Status · 192.0.2.60", exact: true });
+  await partialDetail.getByRole("tab", { name: "Prüfdetails", exact: true }).click();
+  await partialDetail
+    .getByText(
+      "Der fehlgeschlagene Lauf hat Teilinformationen gespeichert. Die Erfassung wurde nicht erfolgreich abgeschlossen.",
+      { exact: false },
+    )
+    .waitFor();
+  assert.equal(
+    await partialDetail
+      .getByText("Diese Daten stammen aus einer früheren Erfassung", { exact: false })
+      .count(),
+    0,
+  );
+  await page.keyboard.press("Escape");
+  await partialDetail.waitFor({ state: "hidden" });
+
   const requestsBeforeFiltering = apiCalls.filter((request) => request.method !== "GET").length;
   await overview.getByLabel("Host suchen", { exact: true }).fill("192.0.2.21");
   await hostRow("192.0.2.21").waitFor();
   assert.equal(await overview.getByRole("row").count(), 2);
   await overview.getByLabel("Host suchen", { exact: true }).fill("");
   await overview.getByRole("combobox", { name: "Statusfilter", exact: true }).click();
-  await page.getByRole("option", { name: "Ungeprüft / Fehler", exact: true }).click();
+  await page.getByRole("option", { name: "Inventur nötig", exact: true }).click();
   assert.equal(
     await hostRow("192.0.2.20").count(),
     0,
@@ -1623,7 +1742,7 @@ try {
   );
   await hostRow("192.0.2.23").waitFor();
   await overview.getByRole("combobox", { name: "Statusfilter", exact: true }).click();
-  await page.getByRole("option", { name: "Alle Status", exact: true }).click();
+  await page.getByRole("option", { name: "Alle Systeme", exact: true }).click();
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({
     path: "test-artifacts/host-patch-overview.png",
@@ -1650,7 +1769,7 @@ try {
       const clientRow = (ip) =>
         clientOverview.getByRole("row").filter({ has: page.getByText(ip, { exact: true }) });
       await clientRow("192.0.2.30")
-        .getByText("Updateabfrage erforderlich", { exact: true })
+        .getByText("Windows-Updateabfrage nötig", { exact: true })
         .waitFor();
       await clientRow("192.0.2.31").getByText("Keine Updateangebote", { exact: true }).waitFor();
       for (const ip of ["192.0.2.30", "192.0.2.31", "192.0.2.32", "192.0.2.33", "192.0.2.34"]) {
@@ -1663,24 +1782,32 @@ try {
       await clientRow("192.0.2.32")
         .getByText("Updateabfrage unvollständig", { exact: true })
         .waitFor();
-      await clientRow("192.0.2.33").getByText("Updateabfrage veraltet", { exact: true }).waitFor();
+      await clientRow("192.0.2.33")
+        .getByText("Windows-Updateabfrage nötig", { exact: true })
+        .waitFor();
+      await clientRow("192.0.2.33").getByText("Stand nicht aktuell", { exact: true }).waitFor();
       await clientRow("192.0.2.34")
-        .getByText("Neuester Lauf fehlgeschlagen", { exact: true })
+        .getByText("Neuester Versuch fehlgeschlagen", { exact: true })
         .waitFor();
       await clientRow("192.0.2.34").getByText("Fixture Windows 11", { exact: true }).waitFor();
-      await clientRow("192.0.2.30").getByRole("button", { name: "Details", exact: true }).click();
+      await clientRow("192.0.2.30")
+        .getByRole("button", { name: /Host öffnen/ })
+        .click();
       let clientDetail = page.getByRole("dialog", {
         name: "Host-Status · 192.0.2.30",
         exact: true,
       });
+      await clientDetail.getByRole("tab", { name: "Systemupdates", exact: true }).click();
       assert.equal(
         await clientDetail
+          .getByRole("tabpanel")
           .getByRole("button", { name: "Windows jetzt bewerten", exact: true })
           .isDisabled(),
         true,
       );
       const beforeQuery = apiCalls.filter((call) => call.method !== "GET").length;
       await clientDetail
+        .getByTestId("host-next-action")
         .getByRole("button", { name: "Windows-Updates abfragen", exact: true })
         .click();
       await clientDetail.waitFor({ state: "hidden" });
@@ -1711,9 +1838,13 @@ try {
       assert.equal(submissions.at(-1).mode, "windows_updates");
       assert.equal(submissions.at(-1).winrm_transport, "http_ntlm");
       assert.equal(submissions.at(-1).target, "192.0.2.30");
-      await clientRow("192.0.2.30").getByRole("button", { name: "Details", exact: true }).click();
+      await clientRow("192.0.2.30")
+        .getByRole("button", { name: /Host öffnen/ })
+        .click();
       clientDetail = page.getByRole("dialog", { name: "Host-Status · 192.0.2.30", exact: true });
+      await clientDetail.getByRole("tab", { name: "Systemupdates", exact: true }).click();
       await clientDetail
+        .getByRole("tabpanel")
         .getByRole("button", { name: "Windows jetzt bewerten", exact: true })
         .click();
       const updateDialog = page.getByRole("dialog", {
@@ -1774,10 +1905,9 @@ try {
     );
   }
   await page
-    .getByText(
-      "Für VMware ist noch keine authentifizierte Inventur oder Patchbewertung angebunden.",
-      { exact: false },
-    )
+    .getByText("VMware: Netzwerkdienste können erkannt werden. Authentifizierte Inventur und", {
+      exact: false,
+    })
     .waitFor();
   assert.equal(
     apiCalls.filter((request) => request.method !== "GET").length,
@@ -1803,7 +1933,7 @@ try {
   // in a public route, browser storage or customer query string.
   await page.getByLabel("Operator token", { exact: true }).fill(token);
   await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
-  await page.getByText("Operator access unlocked", { exact: true }).waitFor();
+  await page.getByText("Operatorzugang aktiv", { exact: true }).waitFor();
   assert.deepEqual(modes, [
     "connection",
     "inventory",
@@ -1815,12 +1945,12 @@ try {
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
   assert.equal((await page.content()).includes(token), false);
   assert.equal((await page.content()).includes(password), false);
-  await page.getByRole("button", { name: "Lock and clear session", exact: true }).click();
+  await page.getByRole("button", { name: "Sperren", exact: true }).click();
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
   assert.equal(await page.getByRole("button", { name: "View evidence", exact: true }).count(), 0);
   await page.getByLabel("Operator token", { exact: true }).fill(token);
   await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
-  await page.getByText("Operator access unlocked", { exact: true }).waitFor();
+  await page.getByText("Operatorzugang aktiv", { exact: true }).waitFor();
   await page.evaluate(() =>
     window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
   );
@@ -1854,11 +1984,7 @@ try {
   assert.equal(await page.getByLabel("Operator token", { exact: true }).inputValue(), "");
   await page.getByLabel("Operator token", { exact: true }).fill(token);
   await page.getByRole("button", { name: "Unlock host audits", exact: true }).click();
-  await page
-    .getByTestId("host-overview")
-    .getByRole("row")
-    .filter({ hasText: "192.0.2.20" })
-    .waitFor();
+  await page.getByTestId("host-mobile-101").waitFor();
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
   assert.equal((await page.content()).includes(token), false);
   assert.ok(
@@ -1870,6 +1996,33 @@ try {
     fullPage: true,
     animations: "disabled",
   });
+  await page.getByRole("button", { name: "Navigation öffnen", exact: true }).click();
+  await mobileNavigation.getByRole("link", { name: "Host-Inventur", exact: true }).click();
+  await page.getByTestId("host-mobile-108").waitFor();
+  await page
+    .getByTestId("host-mobile-108")
+    .getByRole("button", { name: /Host öffnen/ })
+    .click();
+  const mobileDetail = page.getByRole("dialog", { name: "Host-Status · 192.0.2.50", exact: true });
+  await mobileDetail
+    .getByRole("button", { name: "Verbindung & Inventur prüfen", exact: true })
+    .waitFor();
+  assert.equal(await mobileDetail.getByTestId("host-next-action").count(), 1);
+  const mobileRect = await mobileDetail.boundingBox();
+  assert.ok(
+    mobileRect && mobileRect.x >= 0 && mobileRect.x + mobileRect.width <= 391,
+    "Host details must fit a mobile viewport",
+  );
+  assert.ok(
+    await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
+  );
+  await page.screenshot({
+    path: "test-artifacts/host-next-step-mobile.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.keyboard.press("Escape");
+  await mobileDetail.waitFor({ state: "hidden" });
   assert.deepEqual(errors, []);
   console.log(
     "Host audit UI passed: patch priorities and explicit fixes, scoped baselines, failed/stale/unknown coverage, separate platform routes, customer context, responsive navigation, volatile secrets, encrypted inventory and retained histories",

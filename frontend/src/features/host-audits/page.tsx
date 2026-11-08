@@ -22,6 +22,8 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tab,
+  Tabs,
   Typography,
 } from "@mui/material";
 import { useCustomers } from "../customers/hooks";
@@ -43,6 +45,10 @@ import { HostStatusDialog } from "./host-status-dialog";
 import { CapabilitiesPanel } from "./capabilities-panel";
 import { DiscoveredDevicesPanel } from "./discovered-devices";
 import type { HostOverview, HostPlatformFilter, OverviewHost } from "./overview-state";
+import type { HostAction } from "./host-presentation";
+import AddIcon from "@mui/icons-material/Add";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 
 const emptyCredential = {
   name: "",
@@ -137,6 +143,7 @@ function AuditPanel({
   lock: () => void;
   platform: HostPlatformFilter;
 }) {
+  const [workspaceTab, setWorkspaceTab] = useState("systems");
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [runs, setRuns] = useState<HostAudit[]>([]);
   const [overview, setOverview] = useState<HostOverview | null>(null);
@@ -172,6 +179,7 @@ function AuditPanel({
     setForm(emptyCredential);
   };
   useEffect(() => {
+    setWorkspaceTab("systems");
     setCollectOpen(false);
     setUpdateQueryConfirm(false);
     setCollectionMode("inventory");
@@ -331,15 +339,57 @@ function AuditPanel({
     setOverviewDetail(null);
     setCollectOpen(true);
   };
+  const hostAction = (host: OverviewHost, next: HostAction) => {
+    if (next === "collect" || next === "queryWindows") {
+      prepareHostCollection(host, next === "queryWindows" ? "windows_updates" : undefined);
+      return;
+    }
+    if (!host.inventory) return;
+    setOverviewDetail(null);
+    if (next === "assessWindows") void assessWindows(host.inventory.id);
+    if (next === "assessSoftware") void assessSoftware(host.inventory.id);
+    if (next === "openWindows")
+      void action(async () =>
+        setAssessmentView({
+          target: host.target,
+          assessments: await auditRequest<HostAssessment[]>(
+            token,
+            `/${host.inventory!.id}/assessments`,
+          ),
+        }),
+      );
+    if (next === "openSoftware")
+      void action(async () =>
+        setSoftwareView({
+          target: host.target,
+          assessments: await auditRequest<SoftwareAssessment[]>(
+            token,
+            `/${host.inventory!.id}/software-assessments`,
+          ),
+        }),
+      );
+  };
   return (
-    <Stack spacing={3}>
-      <Stack direction="row" spacing={2} sx={{ alignItems: "center", flexWrap: "wrap" }}>
-        <Chip color="success" variant="outlined" label="Operator access unlocked" />
-        <Button onClick={lock}>Lock and clear session</Button>
+    <Stack spacing={2.5}>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={1.5}
+        sx={{ alignItems: { sm: "center" } }}
+      >
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          <Box sx={{ width: 7, height: 7, bgcolor: "success.main", borderRadius: "50%" }} />
+          <Typography variant="body2" color="text.secondary">
+            Operatorzugang aktiv
+          </Typography>
+          <Button size="small" startIcon={<LockOutlinedIcon />} onClick={lock}>
+            Sperren
+          </Button>
+        </Stack>
         <Box sx={{ flexGrow: 1 }} />
         <Button
           variant="contained"
-          disabled={platform === "vmware"}
+          startIcon={<AddIcon />}
+          disabled={busy || platform === "vmware"}
           onClick={() => {
             setCollectionMode("inventory");
             setCollectOpen(true);
@@ -360,32 +410,79 @@ function AuditPanel({
             Windows-Updates abfragen
           </Button>
         )}
-        <Button disabled={busy} onClick={() => void action(async () => {})}>
+        <Button
+          startIcon={<RefreshIcon />}
+          disabled={busy}
+          onClick={() => void action(async () => {})}
+        >
           Status aktualisieren
         </Button>
       </Stack>
       {error && !createOpen && !revoke && <Alert severity="error">{error}</Alert>}
-      <HostOverviewPanel
-        overview={overview}
-        platform={platform}
-        loading={!overviewLoaded}
-        onDetail={setOverviewDetail}
-      />
-      <DiscoveredDevicesPanel
-        token={token}
-        customerId={customerId}
-        onInventory={(address) => {
-          setTarget(address);
-          setCredentialId("");
-          setPort("");
-          setFingerprint("");
-          setWinrmTransport("https");
-          setCollectionMode("inventory");
-          setUpdateQueryConfirm(false);
-          setCollectOpen(true);
-        }}
-      />
-      <CapabilitiesPanel token={token} />
+      <Tabs
+        value={workspaceTab}
+        onChange={(_, value) => setWorkspaceTab(value)}
+        variant="scrollable"
+        scrollButtons="auto"
+        aria-label="Host-Arbeitsbereich"
+        sx={{ borderBottom: "1px solid", borderColor: "divider", minHeight: 48 }}
+      >
+        <Tab label="Systeme" value="systems" id="workspace-systems" aria-controls="panel-systems" />
+        <Tab
+          label="Erkannte Geräte"
+          value="devices"
+          id="workspace-devices"
+          aria-controls="panel-devices"
+        />
+        <Tab
+          label="Prüfverlauf"
+          value="history"
+          id="workspace-history"
+          aria-controls="panel-history"
+        />
+        <Tab
+          label="Datenquellen"
+          value="sources"
+          id="workspace-sources"
+          aria-controls="panel-sources"
+        />
+      </Tabs>
+      <Box
+        role="tabpanel"
+        hidden={workspaceTab !== "systems"}
+        id="panel-systems"
+        aria-labelledby="workspace-systems"
+      >
+        <HostOverviewPanel
+          overview={overview}
+          platform={platform}
+          loading={!overviewLoaded}
+          onDetail={setOverviewDetail}
+          onAction={hostAction}
+          busy={busy}
+        />
+      </Box>
+      <Box
+        role="tabpanel"
+        hidden={workspaceTab !== "devices"}
+        id="panel-devices"
+        aria-labelledby="workspace-devices"
+      >
+        <DiscoveredDevicesPanel
+          token={token}
+          customerId={customerId}
+          onInventory={(address) => {
+            setTarget(address);
+            setCredentialId("");
+            setPort("");
+            setFingerprint("");
+            setWinrmTransport("https");
+            setCollectionMode("inventory");
+            setUpdateQueryConfirm(false);
+            setCollectOpen(true);
+          }}
+        />
+      </Box>
       <Dialog
         open={collectOpen}
         onClose={() => {
@@ -410,7 +507,7 @@ function AuditPanel({
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             {collectionMode === "windows_updates"
               ? "Windows-Inventur und explizite Onlineabfrage der am Gerät konfigurierten Windows Update-/WSUS-Quelle."
-              : "Read-only host inventory"}
+              : "Betriebssystem und installierte Software erfassen. Die Inventur liest Daten und installiert keine Updates."}
           </Typography>
           {collectionMode === "windows_updates" && (
             <Alert severity="info" sx={{ mb: 2 }}>
@@ -591,221 +688,239 @@ function AuditPanel({
           </Button>
         </DialogActions>
       </Dialog>
-      <Accordion data-testid="catalog-panel" disableGutters>
-        <AccordionSummary>
-          <Typography>Kataloge und Prüfumfang</Typography>
-        </AccordionSummary>
-        <AccordionDetails>
-          <Stack spacing={2}>
-            <PatchCatalogPanel token={token} />
-            <SoftwareCatalogPanel token={token} />
-            <Alert severity="info">
-              Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows: OS
-              build, machine-wide uninstall registry and Get-HotFix. Completed Windows inventories
-              can be assessed against Microsoft OS build baselines and the listed software advisory
-              ranges. Software coverage is limited to supported product rules. Linux patch
-              assessment and per-user software are not included.
-            </Alert>
-          </Stack>
-        </AccordionDetails>
-      </Accordion>
-      <Accordion data-testid="history-panel" disableGutters>
-        <AccordionSummary>
-          <Typography>Verlauf und technische Details · {visibleRuns.length} Läufe</Typography>
-        </AccordionSummary>
-        <AccordionDetails>
-          <Stack spacing={2}>
-            {!visibleRuns.length && (
-              <Typography color="text.secondary">
-                Noch keine Inventurläufe in diesem Bereich.
-              </Typography>
-            )}
-            {visibleRuns.map((run) => (
-              <Paper key={run.id} data-testid={`run-card-${run.id}`} sx={{ p: 3 }}>
-                <Stack
-                  direction="row"
-                  sx={{ justifyContent: "space-between", alignItems: "center", gap: 2 }}
-                >
-                  <Box>
-                    <Typography variant="h6">
-                      {run.target}:{run.port}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {run.mode === "connection"
-                        ? "Connection test"
-                        : run.mode === "windows_updates"
-                          ? "Windows-Updateabfrage mit Inventur"
-                          : "Host inventory"}{" "}
-                      · {new Date(run.created_at).toLocaleString()}
-                    </Typography>
-                    {credentials.find((credential) => credential.id === run.credential_id)?.kind ===
-                      "winrm" && (
-                      <Typography variant="body2" color="text.secondary">
-                        {winrmLabel(run.winrm_transport)}
+      <Box
+        role="tabpanel"
+        hidden={workspaceTab !== "sources"}
+        id="panel-sources"
+        aria-labelledby="workspace-sources"
+      >
+        <Stack spacing={2}>
+          <CapabilitiesPanel token={token} />
+          <Accordion data-testid="catalog-panel" disableGutters>
+            <AccordionSummary>
+              <Typography>Kataloge und Prüfumfang</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Stack spacing={2}>
+                <PatchCatalogPanel token={token} />
+                <SoftwareCatalogPanel token={token} />
+                <Alert severity="info">
+                  Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows:
+                  OS build, machine-wide uninstall registry and Get-HotFix. Completed Windows
+                  inventories can be assessed against Microsoft OS build baselines and the listed
+                  software advisory ranges. Software coverage is limited to supported product rules.
+                  Linux patch assessment and per-user software are not included.
+                </Alert>
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+        </Stack>
+      </Box>
+      <Box
+        role="tabpanel"
+        hidden={workspaceTab !== "history"}
+        id="panel-history"
+        aria-labelledby="workspace-history"
+      >
+        <Accordion data-testid="history-panel" disableGutters defaultExpanded>
+          <AccordionSummary>
+            <Typography>Verlauf und technische Details · {visibleRuns.length} Läufe</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Stack spacing={2}>
+              {!visibleRuns.length && (
+                <Typography color="text.secondary">
+                  Noch keine Inventurläufe in diesem Bereich.
+                </Typography>
+              )}
+              {visibleRuns.map((run) => (
+                <Paper key={run.id} data-testid={`run-card-${run.id}`} sx={{ p: 3 }}>
+                  <Stack
+                    direction="row"
+                    sx={{ justifyContent: "space-between", alignItems: "center", gap: 2 }}
+                  >
+                    <Box>
+                      <Typography variant="h6">
+                        {run.target}:{run.port}
                       </Typography>
-                    )}
-                  </Box>
-                  <Chip
-                    label={run.job.status.toUpperCase()}
-                    color={
-                      run.job.status === "finished"
-                        ? "success"
-                        : run.job.status === "failed"
-                          ? "error"
-                          : "default"
-                    }
-                  />
-                </Stack>
-                <Typography sx={{ my: 2 }}>{run.job.message}</Typography>
-                {["queued", "running"].includes(run.job.status) ? (
-                  <>
-                    <LinearProgress
-                      variant={run.job.status === "queued" ? "determinate" : "indeterminate"}
-                      value={0}
-                    />
-                    <Button
-                      color="warning"
-                      disabled={busy || run.cancel_requested}
-                      sx={{ mt: 1 }}
-                      onClick={() =>
-                        action(async () => {
-                          await auditRequest(token, `/${run.id}/cancel`, {});
-                        })
-                      }
-                    >
-                      {run.cancel_requested ? "Cancelling…" : "Cancel run"}
-                    </Button>
-                  </>
-                ) : (
-                  <Stack direction="row" useFlexGap sx={{ gap: 1, flexWrap: "wrap" }}>
-                    <Button
-                      disabled={busy}
-                      onClick={() =>
-                        action(async () =>
-                          setDetail(await auditRequest<HostAudit>(token, `/${run.id}`)),
-                        )
-                      }
-                    >
-                      View evidence
-                    </Button>
-                    {["inventory", "windows_updates"].includes(run.mode) &&
-                      ["finished", "failed"].includes(run.job.status) &&
-                      credentials.find((credential) => credential.id === run.credential_id)
+                      <Typography variant="body2" color="text.secondary">
+                        {run.mode === "connection"
+                          ? "Connection test"
+                          : run.mode === "windows_updates"
+                            ? "Windows-Updateabfrage mit Inventur"
+                            : "Host inventory"}{" "}
+                        · {new Date(run.created_at).toLocaleString()}
+                      </Typography>
+                      {credentials.find((credential) => credential.id === run.credential_id)
                         ?.kind === "winrm" && (
-                        <>
-                          <Button
-                            disabled={
-                              busy ||
-                              (run.job.status === "failed" &&
-                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
-                                !(detail?.id === run.id && detail.inventory))
-                            }
-                            onClick={() =>
-                              action(async () => {
-                                const assessment = await auditRequest<SoftwareAssessment>(
-                                  token,
-                                  `/${run.id}/assess-software`,
-                                  {},
-                                );
-                                const saved = await auditRequest<SoftwareAssessment[]>(
-                                  token,
-                                  `/${run.id}/software-assessments`,
-                                );
-                                setSoftwareView({
-                                  target: run.target,
-                                  assessments: [
-                                    assessment,
-                                    ...saved.filter((item) => item.id !== assessment.id),
-                                  ],
-                                });
-                              })
-                            }
-                          >
-                            Assess installed software
-                          </Button>
-                          <Button
-                            disabled={
-                              busy ||
-                              (run.job.status === "failed" &&
-                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
-                                !(detail?.id === run.id && detail.inventory))
-                            }
-                            onClick={() =>
-                              action(async () => {
-                                const saved = await auditRequest<SoftwareAssessment[]>(
-                                  token,
-                                  `/${run.id}/software-assessments`,
-                                );
-                                setSoftwareView({ target: run.target, assessments: saved });
-                              })
-                            }
-                          >
-                            View software assessments
-                          </Button>
-                          <Button
-                            disabled={
-                              busy ||
-                              (overview?.hosts.find((host) => host.target === run.target)
-                                ?.platform === "windows_client" &&
-                                !overview?.hosts.some(
-                                  (host) =>
-                                    host.inventory?.id === run.id && freshWindowsUpdateQuery(host),
-                                )) ||
-                              (run.job.status === "failed" &&
-                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
-                                !(detail?.id === run.id && detail.inventory))
-                            }
-                            onClick={() =>
-                              action(async () => {
-                                const assessment = await auditRequest<HostAssessment>(
-                                  token,
-                                  `/${run.id}/assess`,
-                                  {},
-                                );
-                                const saved = await auditRequest<HostAssessment[]>(
-                                  token,
-                                  `/${run.id}/assessments`,
-                                );
-                                setAssessmentView({
-                                  target: run.target,
-                                  assessments: [
-                                    assessment,
-                                    ...saved.filter((item) => item.id !== assessment.id),
-                                  ],
-                                });
-                              })
-                            }
-                          >
-                            Assess Windows patches
-                          </Button>
-                          <Button
-                            disabled={
-                              busy ||
-                              (run.job.status === "failed" &&
-                                !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
-                                !(detail?.id === run.id && detail.inventory))
-                            }
-                            onClick={() =>
-                              action(async () => {
-                                const saved = await auditRequest<HostAssessment[]>(
-                                  token,
-                                  `/${run.id}/assessments`,
-                                );
-                                setAssessmentView({ target: run.target, assessments: saved });
-                              })
-                            }
-                          >
-                            View assessments
-                          </Button>
-                        </>
+                        <Typography variant="body2" color="text.secondary">
+                          {winrmLabel(run.winrm_transport)}
+                        </Typography>
                       )}
+                    </Box>
+                    <Chip
+                      label={run.job.status.toUpperCase()}
+                      color={
+                        run.job.status === "finished"
+                          ? "success"
+                          : run.job.status === "failed"
+                            ? "error"
+                            : "default"
+                      }
+                    />
                   </Stack>
-                )}
-              </Paper>
-            ))}
-          </Stack>
-        </AccordionDetails>
-      </Accordion>
+                  <Typography sx={{ my: 2 }}>{run.job.message}</Typography>
+                  {["queued", "running"].includes(run.job.status) ? (
+                    <>
+                      <LinearProgress
+                        variant={run.job.status === "queued" ? "determinate" : "indeterminate"}
+                        value={0}
+                      />
+                      <Button
+                        color="warning"
+                        disabled={busy || run.cancel_requested}
+                        sx={{ mt: 1 }}
+                        onClick={() =>
+                          action(async () => {
+                            await auditRequest(token, `/${run.id}/cancel`, {});
+                          })
+                        }
+                      >
+                        {run.cancel_requested ? "Cancelling…" : "Cancel run"}
+                      </Button>
+                    </>
+                  ) : (
+                    <Stack direction="row" useFlexGap sx={{ gap: 1, flexWrap: "wrap" }}>
+                      <Button
+                        disabled={busy}
+                        onClick={() =>
+                          action(async () =>
+                            setDetail(await auditRequest<HostAudit>(token, `/${run.id}`)),
+                          )
+                        }
+                      >
+                        View evidence
+                      </Button>
+                      {["inventory", "windows_updates"].includes(run.mode) &&
+                        ["finished", "failed"].includes(run.job.status) &&
+                        credentials.find((credential) => credential.id === run.credential_id)
+                          ?.kind === "winrm" && (
+                          <>
+                            <Button
+                              disabled={
+                                busy ||
+                                (run.job.status === "failed" &&
+                                  !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                  !(detail?.id === run.id && detail.inventory))
+                              }
+                              onClick={() =>
+                                action(async () => {
+                                  const assessment = await auditRequest<SoftwareAssessment>(
+                                    token,
+                                    `/${run.id}/assess-software`,
+                                    {},
+                                  );
+                                  const saved = await auditRequest<SoftwareAssessment[]>(
+                                    token,
+                                    `/${run.id}/software-assessments`,
+                                  );
+                                  setSoftwareView({
+                                    target: run.target,
+                                    assessments: [
+                                      assessment,
+                                      ...saved.filter((item) => item.id !== assessment.id),
+                                    ],
+                                  });
+                                })
+                              }
+                            >
+                              Assess installed software
+                            </Button>
+                            <Button
+                              disabled={
+                                busy ||
+                                (run.job.status === "failed" &&
+                                  !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                  !(detail?.id === run.id && detail.inventory))
+                              }
+                              onClick={() =>
+                                action(async () => {
+                                  const saved = await auditRequest<SoftwareAssessment[]>(
+                                    token,
+                                    `/${run.id}/software-assessments`,
+                                  );
+                                  setSoftwareView({ target: run.target, assessments: saved });
+                                })
+                              }
+                            >
+                              View software assessments
+                            </Button>
+                            <Button
+                              disabled={
+                                busy ||
+                                (overview?.hosts.find((host) => host.target === run.target)
+                                  ?.platform === "windows_client" &&
+                                  !overview?.hosts.some(
+                                    (host) =>
+                                      host.inventory?.id === run.id &&
+                                      freshWindowsUpdateQuery(host),
+                                  )) ||
+                                (run.job.status === "failed" &&
+                                  !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                  !(detail?.id === run.id && detail.inventory))
+                              }
+                              onClick={() =>
+                                action(async () => {
+                                  const assessment = await auditRequest<HostAssessment>(
+                                    token,
+                                    `/${run.id}/assess`,
+                                    {},
+                                  );
+                                  const saved = await auditRequest<HostAssessment[]>(
+                                    token,
+                                    `/${run.id}/assessments`,
+                                  );
+                                  setAssessmentView({
+                                    target: run.target,
+                                    assessments: [
+                                      assessment,
+                                      ...saved.filter((item) => item.id !== assessment.id),
+                                    ],
+                                  });
+                                })
+                              }
+                            >
+                              Assess Windows patches
+                            </Button>
+                            <Button
+                              disabled={
+                                busy ||
+                                (run.job.status === "failed" &&
+                                  !overview?.hosts.some((host) => host.inventory?.id === run.id) &&
+                                  !(detail?.id === run.id && detail.inventory))
+                              }
+                              onClick={() =>
+                                action(async () => {
+                                  const saved = await auditRequest<HostAssessment[]>(
+                                    token,
+                                    `/${run.id}/assessments`,
+                                  );
+                                  setAssessmentView({ target: run.target, assessments: saved });
+                                })
+                              }
+                            >
+                              View assessments
+                            </Button>
+                          </>
+                        )}
+                    </Stack>
+                  )}
+                </Paper>
+              ))}
+            </Stack>
+          </AccordionDetails>
+        </Accordion>
+      </Box>
       <HostStatusDialog
         host={overviewDetail}
         busy={busy}
@@ -1164,7 +1279,7 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
               ? "OS- und Paketinventur sowie offene Prüfungen auf einen Blick."
               : platform === "vmware"
                 ? "Erkannte Dienste und noch offene VMware-Prüfabdeckung auf einen Blick."
-                : "Updatebedarf, geprüfte OS-Baseline und offene Abdeckung auf einen Blick."}
+                : "Was muss aktualisiert werden? Welches System braucht zuerst eine Prüfung?"}
         </Typography>
       </Box>
       {session ? (

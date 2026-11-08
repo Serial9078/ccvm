@@ -5,6 +5,8 @@ import {
   Box,
   Button,
   Chip,
+  ButtonBase,
+  InputAdornment,
   MenuItem,
   Paper,
   Stack,
@@ -27,32 +29,11 @@ import {
   updateStatusLabels,
 } from "./overview-state";
 import type { OverviewHost, HostOverview, HostPlatformFilter } from "./overview-state";
+import SearchIcon from "@mui/icons-material/Search";
+import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
+import { hostPresentation } from "./host-presentation";
+import type { HostAction } from "./host-presentation";
 
-const issueLabels: Record<string, string> = {
-  latest_collection_failed: "Neueste Inventur fehlgeschlagen",
-  collection_pending: "Inventur läuft oder wartet",
-  inventory_partial: "Inventur unvollständig",
-  inventory_stale: "Inventur veraltet",
-  windows_assessment_missing: "Windows-Bewertung fehlt",
-  software_assessment_missing: "Software-Bewertung fehlt",
-  windows_assessment_stale: "Windows-Bewertung veraltet",
-  software_assessment_stale: "Software-Bewertung veraltet",
-  latest_connection_failed: "Neuester Verbindungstest fehlgeschlagen",
-  inventory_missing: "Noch keine verwertbare Inventur",
-  windows_client_patch_coverage_unavailable: "Windows-Client-OS noch nicht abgedeckt",
-  windows_update_query_required: "Online-Updateabfrage erforderlich",
-  windows_update_query_incomplete: "Online-Updateabfrage unvollständig",
-  windows_update_query_stale: "Online-Updateabfrage veraltet",
-  windows_client_update_query_required: "Online-Updateabfrage erforderlich",
-  update_query_required: "Online-Updateabfrage erforderlich",
-  update_query_incomplete: "Online-Updateabfrage unvollständig",
-  stale_evidence: "Online-Updateabfrage veraltet",
-  patch_assessment_unsupported: "Patchbewertung dieser Plattform noch nicht verfügbar",
-  inventory_identity_incomplete: "Plattformzuordnung unvollständig",
-  software_details_truncated: "Software-Detailanzeige gekürzt",
-  windows_catalog_changed: "Windows-Katalog wurde erneuert",
-  software_catalog_changed: "Software-Katalog wurde erneuert",
-};
 export function WindowsStatus({ host }: { host: OverviewHost }) {
   const assessment = host.windows_assessment;
   const state = hostState(host);
@@ -208,16 +189,125 @@ export function SoftwareStatus({ host }: { host: OverviewHost }) {
   );
 }
 
+const groups = [
+  {
+    id: "updates",
+    testId: "update-count",
+    label: "Updatebedarf",
+    hint: "Aktuelle Update- oder Software-Befunde",
+    color: "error.main",
+  },
+  {
+    id: "collection",
+    testId: "unknown-count",
+    label: "Inventur nötig",
+    hint: "Verbindung, fehlende oder veraltete Daten",
+    color: "warning.main",
+  },
+  {
+    id: "assessment",
+    testId: "assessment-count",
+    label: "Bewertung offen",
+    hint: "Bewertung fehlt oder Prüfumfang begrenzt",
+    color: "info.main",
+  },
+  {
+    id: "checked",
+    testId: "baseline-count",
+    label: "Geprüfter Stand",
+    hint: "Ergebnisse vorhanden · nur geprüfter Umfang",
+    color: "info.main",
+  },
+] as const;
+const groupFor = (host: OverviewHost) => {
+  const status = hostPresentation(host).status;
+  return status === "unsupported" ? "assessment" : status;
+};
+
+function CompactSystemStatus({ host }: { host: OverviewHost }) {
+  const assessment = host.windows_assessment;
+  const state = hostState(host);
+  const fresh = current(assessment) && !state.collectionIssue;
+  const label = !host.inventory
+    ? "Noch nicht geprüft"
+    : !assessment
+      ? ["windows_client", "windows_server"].includes(host.platform)
+        ? "Bewertung fehlt"
+        : "Noch nicht unterstützt"
+      : !fresh
+        ? "Stand nicht aktuell"
+        : host.platform === "windows_client"
+          ? updateStatusLabels[assessment.status] || "Abfrage unvollständig"
+          : state.needsWindows
+            ? "Update nötig"
+            : state.baseline
+              ? "Build-Baseline erfüllt"
+              : "Nicht bewertet";
+  return (
+    <Stack spacing={0.5}>
+      <Typography
+        variant="body2"
+        sx={{ fontWeight: 600 }}
+        color={state.needsWindows ? "error.main" : state.baseline ? "success.main" : "text.primary"}
+      >
+        {label}
+      </Typography>
+      {fresh && assessment?.result.baseline_kbs?.length ? (
+        <Typography variant="caption" color="text.secondary">
+          {assessment.result.baseline_kbs.join(", ")}
+        </Typography>
+      ) : null}
+      {host.platform === "windows_client" &&
+        assessment?.result.windows_updates?.reboot_required && (
+          <Typography variant="caption" color="warning.main">
+            Neustart ausstehend
+          </Typography>
+        )}
+    </Stack>
+  );
+}
+function CompactSoftwareStatus({ host }: { host: OverviewHost }) {
+  const assessment = host.software_assessment;
+  const fresh = current(assessment);
+  const summary = assessment?.result.summary;
+  return (
+    <Stack spacing={0.5}>
+      <Typography
+        variant="body2"
+        sx={{ fontWeight: 600 }}
+        color={fresh && summary?.cve_matches ? "error.main" : "text.primary"}
+      >
+        {!host.inventory
+          ? "Noch nicht geprüft"
+          : !fresh
+            ? "Bewertung offen"
+            : summary?.cve_matches
+              ? `${summary.matched_product_versions} Versionen prüfen`
+              : "Kein Treffer in geprüften Regeln"}
+      </Typography>
+      {fresh && summary && (
+        <Typography variant="caption" color="text.secondary">
+          {summary.assessed_entries} geprüft · {summary.unassessed_entries} ungeprüft
+        </Typography>
+      )}
+    </Stack>
+  );
+}
+
 export function HostOverviewPanel({
   overview,
   platform,
   loading,
   onDetail,
+  onAction,
+  busy = false,
 }: {
   overview: HostOverview | null;
   platform: HostPlatformFilter;
   loading: boolean;
   onDetail: (host: OverviewHost) => void;
+  onAction: (host: OverviewHost, action: HostAction) => void;
+  busy?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
@@ -226,102 +316,174 @@ export function HostOverviewPanel({
     [overview, platform],
   );
   const rows = hosts
-    .filter((host) => {
-      const state = hostState(host);
-      return (
-        (filter === "all" ||
-          (filter === "updates" && state.attention) ||
-          (filter === "unknown" && state.unknown) ||
-          (filter === "baseline" && state.baseline)) &&
+    .filter(
+      (host) =>
+        (filter === "all" || groupFor(host) === filter) &&
         [host.target, host.inventory?.os.hostname, host.inventory?.os.name].some((text) =>
           text?.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
-        )
-      );
-    })
-    .sort((left, right) => {
-      const a = hostState(left);
-      const b = hostState(right);
-      return (
-        Number(b.attention) - Number(a.attention) ||
-        Number(b.unknown) - Number(a.unknown) ||
-        left.target.localeCompare(right.target)
-      );
-    });
-  return (
-    <Stack spacing={2} data-testid="host-overview">
-      <Box
-        sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(3, 1fr)" }, gap: 2 }}
-      >
-        {[
-          {
-            id: "update-count",
-            label: platform === "windows-client" ? "Updatebedarf prüfen" : "Updatebedarf",
-            value: hosts.filter((host) => hostState(host).attention).length,
-            color: "error.main",
-            hint:
-              platform === "windows-client"
-                ? "Nicht optionale Sicherheits-/Qualitätsangebote oder Software-Befunde"
-                : "Hosts mit aktuellem Build- oder Software-Befund",
-          },
-          {
-            id: "baseline-count",
-            label: platform === "windows-client" ? "Keine Updateangebote" : "OS-Baseline erfüllt",
-            value: hosts.filter((host) =>
-              platform === "windows-client"
-                ? current(host.windows_assessment) &&
-                  !hostState(host).collectionIssue &&
-                  host.windows_assessment?.status === "no_update_offers"
-                : hostState(host).baseline,
-            ).length,
-            color: platform === "windows-client" ? "info.main" : "success.main",
-            hint:
-              platform === "windows-client"
-                ? "Quelle bietet nichts an · keine vollständige Patchfreigabe"
-                : "Windows-OS-Build; keine Entwarnung für alle Programme",
-          },
-          {
-            id: "unknown-count",
-            label: "Ungeprüft / Fehler",
-            value: hosts.filter((host) => hostState(host).unknown).length,
-            color: "warning.main",
-            hint: "Fehlende, veraltete oder unvollständige Abdeckung",
-          },
-        ].map((card) => (
-          <Paper
-            key={card.label}
-            data-testid={card.id}
-            sx={{ p: 2.5, borderTop: 3, borderColor: card.color }}
+        ),
+    )
+    .sort(
+      (a, b) =>
+        groups.findIndex((group) => group.id === groupFor(a)) -
+          groups.findIndex((group) => group.id === groupFor(b)) || a.target.localeCompare(b.target),
+    );
+  const actionButton = (host: OverviewHost) => {
+    const state = hostPresentation(host);
+    return (
+      <Stack spacing={0.5} sx={{ alignItems: { xs: "stretch", md: "flex-start" } }}>
+        {state.action && (
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={busy}
+            endIcon={<ArrowForwardIcon fontSize="small" />}
+            onClick={() => onAction(host, state.action!)}
           >
-            <Typography variant="body2" color="text.secondary">
-              {card.label}
-            </Typography>
-            <Typography variant="h3" sx={{ my: 0.5 }}>
-              {card.value}
+            {state.actionLabel}
+          </Button>
+        )}
+        <Button
+          size="small"
+          aria-label={`Host öffnen: ${host.target}`}
+          onClick={() => onDetail(host)}
+          sx={{ justifyContent: "flex-start" }}
+        >
+          Details
+        </Button>
+      </Stack>
+    );
+  };
+  const hostIdentity = (host: OverviewHost) => (
+    <Stack spacing={0.35}>
+      <Button
+        onClick={() => onDetail(host)}
+        sx={{
+          p: 0,
+          minWidth: 0,
+          justifyContent: "flex-start",
+          alignSelf: "flex-start",
+          fontSize: 15,
+        }}
+      >
+        {host.inventory?.os.hostname || host.target}
+      </Button>
+      {host.inventory?.os.hostname && (
+        <Typography variant="body2" color="text.secondary">
+          {host.target}
+        </Typography>
+      )}
+      <Typography variant="caption" color="text.secondary">
+        {host.inventory?.os.name || "Plattform noch nicht erkannt"}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {host.inventory ? `Inventur: ${date(host.inventory.completed_at)}` : "Keine Inventurdaten"}
+      </Typography>
+    </Stack>
+  );
+  const hostResult = (host: OverviewHost) => {
+    const state = hostPresentation(host);
+    return (
+      <Stack spacing={0.75}>
+        <Chip
+          size="small"
+          variant="outlined"
+          color={state.tone}
+          label={state.label}
+          sx={{
+            alignSelf: "flex-start",
+            maxWidth: "100%",
+            height: "auto",
+            minHeight: 26,
+            "& .MuiChip-label": { whiteSpace: "normal", py: 0.35 },
+          }}
+        />
+        <Typography variant="caption" color="text.secondary">
+          {host.latest_run.status === "failed"
+            ? "Neuester Versuch fehlgeschlagen"
+            : state.status === "updates"
+              ? "Aktuelle Befunde vorhanden"
+              : state.status === "collection"
+                ? "Daten erfassen oder erneuern"
+                : state.status === "checked"
+                  ? "Gilt nur für den geprüften Umfang"
+                  : "Prüfumfang und nächste Schritte ansehen"}
+        </Typography>
+      </Stack>
+    );
+  };
+  return (
+    <Stack spacing={2.5} data-testid="host-overview">
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "repeat(2, 1fr)", lg: "repeat(4, 1fr)" },
+          gap: 1.5,
+        }}
+      >
+        {groups.map((group) => (
+          <ButtonBase
+            key={group.id}
+            data-testid={group.testId}
+            aria-pressed={filter === group.id}
+            onClick={() => setFilter(filter === group.id ? "all" : group.id)}
+            sx={{
+              textAlign: "left",
+              display: "block",
+              p: { xs: 2, md: 2.5 },
+              border: "1px solid",
+              borderColor: filter === group.id ? group.color : "divider",
+              borderRadius: 2,
+              bgcolor: filter === group.id ? "action.selected" : "background.paper",
+              "&:hover": { bgcolor: "action.hover", borderColor: group.color },
+              "&:focus-visible": { outline: "2px solid #00ff41", outlineOffset: 3 },
+            }}
+          >
+            <Stack
+              direction="row"
+              sx={{ alignItems: "center", justifyContent: "space-between", gap: 1 }}
+            >
+              <Typography variant="body2" sx={{ fontWeight: 650 }}>
+                {group.label}
+              </Typography>
+              <Box sx={{ width: 7, height: 7, borderRadius: "50%", bgcolor: group.color }} />
+            </Stack>
+            <Typography variant="h3" sx={{ fontSize: { xs: 30, md: 36 }, my: 1 }}>
+              {hosts.filter((host) => groupFor(host) === group.id).length}
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              {card.hint}
+              {group.hint}
             </Typography>
-          </Paper>
+          </ButtonBase>
         ))}
       </Box>
-      <Paper sx={{ p: { xs: 2, md: 3 } }}>
-        <Stack spacing={2}>
+      <Paper sx={{ overflow: "hidden" }}>
+        <Stack spacing={2} sx={{ p: { xs: 2, md: 2.5 } }}>
           <Stack
-            direction={{ xs: "column", sm: "row" }}
+            direction={{ xs: "column", lg: "row" }}
             sx={{ justifyContent: "space-between", gap: 2 }}
           >
             <Box>
-              <Typography variant="h6">Patch- und Inventurstatus</Typography>
+              <Typography variant="h6">Systeme und Handlungsbedarf</Typography>
               <Typography variant="body2" color="text.secondary">
-                {hosts.length} Hosts · nach Handlungsbedarf sortiert
+                {rows.length} von {hosts.length} Systemen · nach nächstem Arbeitsschritt sortiert
               </Typography>
             </Box>
-            <Stack direction="row" spacing={1}>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
               <TextField
                 size="small"
                 label="Host suchen"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
+                slotProps={{
+                  input: {
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon fontSize="small" />
+                      </InputAdornment>
+                    ),
+                  },
+                }}
               />
               <TextField
                 size="small"
@@ -329,49 +491,38 @@ export function HostOverviewPanel({
                 label="Statusfilter"
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
-                sx={{ minWidth: 170 }}
+                sx={{ minWidth: 180 }}
               >
-                <MenuItem value="all">Alle Status</MenuItem>
-                <MenuItem value="updates">
-                  {platform === "windows-client" ? "Updateangebote prüfen" : "Updatebedarf"}
-                </MenuItem>
-                <MenuItem value="unknown">Ungeprüft / Fehler</MenuItem>
-                {platform !== "windows-client" && (
-                  <MenuItem value="baseline">OS-Baseline erfüllt</MenuItem>
-                )}
+                <MenuItem value="all">Alle Systeme</MenuItem>
+                {groups.map((group) => (
+                  <MenuItem key={group.id} value={group.id}>
+                    {group.label}
+                  </MenuItem>
+                ))}
               </TextField>
             </Stack>
           </Stack>
           {platform === "vmware" && (
             <Alert severity="info">
-              Für VMware ist noch keine authentifizierte Inventur oder Patchbewertung angebunden.
-              Netzwerkbeobachtungen ersetzen keine ESXi- oder vCenter-Buildprüfung.
-            </Alert>
-          )}
-          {platform === "windows-client" && (
-            <Alert severity="info">
-              Windows-Clients: explizite Onlineabfrage der am Gerät konfigurierten Windows Update-
-              oder WSUS-Quelle. Sicherheits-, Qualitäts-, Funktions- und Definitionsangebote
-              getrennt prüfen. Es werden keine Updates installiert. Die Softwareprüfung bleibt
-              separat.
+              VMware: Netzwerkdienste können erkannt werden. Authentifizierte Inventur und
+              Buildprüfung sind noch nicht angebunden.
             </Alert>
           )}
           {platform === "linux" && (
             <Alert severity="info">
-              Linux-Inventuren liefern OS-, Kernel- und Paketstände. Ein Abgleich mit
-              distributionsspezifischen Sicherheitsupdates ist noch nicht verfügbar.
+              Linux: OS-, Kernel- und Paketstände werden erfasst. Distributionsspezifische
+              Patchbewertungen sind noch nicht verfügbar.
             </Alert>
           )}
           {overview?.hosts_truncated && (
             <Alert severity="warning">
-              Die Übersicht zeigt höchstens {overview.limit} von {overview.hosts_total} Hosts.
-              Weitere Hosts sind in dieser Ansicht noch nicht abgedeckt.
+              {overview.limit} von {overview.hosts_total} Hosts geladen. Weitere Hosts sind hier
+              noch nicht abgedeckt.
             </Alert>
           )}
-          {overview && overview.issues.length > 0 && (
+          {!!overview?.issues.length && (
             <Alert severity="warning">
-              Mindestens ein Katalog ist nicht verfügbar oder nicht auswertbar. Die betroffenen
-              Bewertungen gelten nicht als aktuell.
+              Ein Katalog ist nicht auswertbar. Betroffene Bewertungen sind nicht aktuell.
             </Alert>
           )}
           {platform !== "all" &&
@@ -388,109 +539,117 @@ export function HostOverviewPanel({
                   </Button>
                 }
               >
-                {overview.hosts.filter((host) => host.platform === "unclassified").length} Hosts
-                sind noch keiner Plattform zugeordnet. Sie bleiben in der allgemeinen Host-Übersicht
-                sichtbar.
+                {overview.hosts.filter((host) => host.platform === "unclassified").length} Systeme
+                haben noch keine Plattformzuordnung.
               </Alert>
             )}
           {!overview ? (
             <Typography color="text.secondary">
-              {loading ? "Host-Status wird geladen…" : "Host-Status noch nicht verfügbar."}
+              {loading ? "Systeme werden geladen…" : "Host-Status noch nicht verfügbar."}
             </Typography>
           ) : !rows.length ? (
-            <Typography color="text.secondary">
-              {hosts.length
-                ? "Keine Hosts passen zum Filter."
-                : "Für diesen Bereich ist noch keine passende Inventur vorhanden."}
-            </Typography>
+            <Box sx={{ py: 4, textAlign: "center" }}>
+              <Typography sx={{ fontWeight: 650 }}>
+                {hosts.length
+                  ? "Keine Systeme in dieser Auswahl"
+                  : "Noch keine Inventur in diesem Bereich"}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                {hosts.length
+                  ? "Einen anderen Status wählen oder die Suche zurücksetzen."
+                  : "Eine Inventur starten oder erkannte Geräte übernehmen."}
+              </Typography>
+              {hosts.length > 0 && (
+                <Button
+                  sx={{ mt: 1 }}
+                  onClick={() => {
+                    setSearch("");
+                    setFilter("all");
+                  }}
+                >
+                  Alle Systeme anzeigen
+                </Button>
+              )}
+            </Box>
           ) : (
-            <TableContainer>
-              <Table size="small" aria-label="Patchstatus der Hosts">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Host / Betriebssystem</TableCell>
-                    <TableCell>OS-Patchstatus</TableCell>
-                    <TableCell>Installierte Software</TableCell>
-                    <TableCell>Letzte Inventur</TableCell>
-                    <TableCell />
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {rows.map((host) => {
-                    const state = hostState(host);
-                    return (
+            <>
+              <TableContainer sx={{ display: { xs: "none", md: "block" } }}>
+                <Table aria-label="Patchstatus der Hosts" size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ width: "22%" }}>System</TableCell>
+                      <TableCell sx={{ width: "28%" }}>Handlungsbedarf</TableCell>
+                      <TableCell>Systemupdates</TableCell>
+                      <TableCell>Software</TableCell>
+                      <TableCell>Nächster Schritt</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {rows.map((host) => (
                       <TableRow
+                        hover
                         key={host.asset_id}
                         data-testid={`host-row-${host.asset_id}`}
-                        sx={{
-                          verticalAlign: "top",
-                          bgcolor: state.attention ? "rgba(239, 68, 68, .05)" : undefined,
-                        }}
+                        sx={{ verticalAlign: "top", "& td": { py: 2 } }}
                       >
+                        <TableCell>{hostIdentity(host)}</TableCell>
+                        <TableCell>{hostResult(host)}</TableCell>
                         <TableCell>
-                          <Typography sx={{ fontWeight: 700 }}>
-                            {host.inventory?.os.hostname || host.target}
-                          </Typography>
-                          <Typography variant="body2">{host.target}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {host.inventory?.os.name || "Plattform noch nicht bestimmt"}
-                          </Typography>
+                          <CompactSystemStatus host={host} />
                         </TableCell>
                         <TableCell>
-                          <WindowsStatus host={host} />
+                          <CompactSoftwareStatus host={host} />
                         </TableCell>
-                        <TableCell>
-                          <SoftwareStatus host={host} />
-                        </TableCell>
-                        <TableCell>
-                          <Typography variant="body2">
-                            {date(host.inventory?.completed_at)}
-                          </Typography>
-                          {host.latest_run.status === "failed" && (
-                            <Chip
-                              size="small"
-                              color="warning"
-                              label="Neuester Lauf fehlgeschlagen"
-                              sx={{ mt: 1 }}
-                            />
-                          )}
-                          {["queued", "running"].includes(host.latest_run.status) && (
-                            <Chip size="small" label="Prüfung läuft / wartet" sx={{ mt: 1 }} />
-                          )}
-                          {!!host.inventory && (
-                            <Typography
-                              variant="caption"
-                              sx={{ display: "block" }}
-                              color="text.secondary"
-                            >
-                              {host.inventory.package_count} Software-Einträge
-                            </Typography>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Button size="small" onClick={() => onDetail(host)}>
-                            Details
-                          </Button>
-                        </TableCell>
+                        <TableCell>{actionButton(host)}</TableCell>
                       </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </TableContainer>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              <Stack spacing={1.5} sx={{ display: { md: "none" } }}>
+                {rows.map((host) => (
+                  <Paper
+                    variant="outlined"
+                    key={host.asset_id}
+                    data-testid={`host-mobile-${host.asset_id}`}
+                    sx={{ p: 2 }}
+                  >
+                    <Stack spacing={2}>
+                      {hostIdentity(host)}
+                      {hostResult(host)}
+                      <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+                        <Box>
+                          <Typography variant="overline">Systemupdates</Typography>
+                          <CompactSystemStatus host={host} />
+                        </Box>
+                        <Box>
+                          <Typography variant="overline">Software</Typography>
+                          <CompactSoftwareStatus host={host} />
+                        </Box>
+                      </Box>
+                      {actionButton(host)}
+                    </Stack>
+                  </Paper>
+                ))}
+              </Stack>
+            </>
           )}
-          <Typography variant="caption" color="text.secondary">
-            Die Kennzahlen beschreiben getrennte Aspekte und können denselben Host enthalten. Grün
-            bestätigt ausschließlich die geprüfte OS-Baseline. Fehlende Regeln, Software und
-            Plattformen bleiben ungeprüft.
-          </Typography>
         </Stack>
+        <Box
+          sx={{
+            px: { xs: 2, md: 2.5 },
+            py: 1.5,
+            borderTop: "1px solid",
+            borderColor: "divider",
+            bgcolor: "background.default",
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            Jedes System zählt in genau einer Gruppe. „Geprüfter Stand“ gilt nur für die geprüfte
+            OS-Baseline bzw. Updatequelle und Software-Regeln; ungeprüfte Komponenten bleiben offen.
+          </Typography>
+        </Box>
       </Paper>
     </Stack>
   );
-}
-
-export function HostIssueList({ host }: { host: OverviewHost }) {
-  const known = host.issues.map((issue) => issueLabels[issue]).filter(Boolean);
-  return <>{known.length > 0 && <Alert severity="warning">{known.join(" · ")}</Alert>}</>;
 }
