@@ -1631,7 +1631,7 @@ try {
   await statusDialog.getByRole("tab", { name: "Software", exact: true }).click();
   await statusDialog.getByText("Microsoft Edge", { exact: true }).waitFor();
   await statusDialog
-    .getByText("Microsoft Edge 150.0.1000.1 → 150.0.1000.2", { exact: true })
+    .getByText("Installiert: 150.0.1000.1 · Zielversion: 150.0.1000.2", { exact: true })
     .waitFor();
   // Closing a status dialog only reads saved evidence. No scan or login starts.
   await statusDialog.getByRole("button", { name: "Host-Status schließen", exact: true }).click();
@@ -2029,11 +2029,12 @@ try {
   );
 } catch (error) {
   await mkdir("test-artifacts", { recursive: true });
+  // Retain the last observed UI for diagnosis; this is not a passing-state screenshot.
   await page?.screenshot({
-    path: "test-artifacts/host-audit-failure.png",
+    path: "test-artifacts/host-workspace-last-state.png",
     fullPage: true,
     animations: "disabled",
-  });
+  }).catch(() => {});
   console.error(
     await page?.locator(".MuiMenu-root").evaluateAll((elements) =>
       elements.map((element) => ({

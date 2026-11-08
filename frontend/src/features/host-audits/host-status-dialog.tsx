@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import CloseIcon from "@mui/icons-material/Close";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -111,6 +111,7 @@ export function HostStatusDialog({
   queryWindows: (host: OverviewHost) => void;
 }) {
   const [tab, setTab] = useState("overview");
+  const titleId = useId();
   useEffect(() => setTab("overview"), [host?.asset_id]);
   const windows = host && ["windows_server", "windows_client"].includes(host.platform);
   const presentation = host ? hostPresentation(host) : null;
@@ -140,7 +141,7 @@ export function HostStatusDialog({
     <Dialog
       open={host !== null}
       onClose={close}
-      aria-label={`Host-Status · ${host?.target ?? ""}`}
+      aria-labelledby={titleId}
       maxWidth="md"
       fullWidth
       slotProps={{
@@ -153,7 +154,24 @@ export function HostStatusDialog({
         },
       }}
     >
-      <DialogTitle component="div" sx={{ px: { xs: 2, sm: 3 }, py: 2 }}>
+      <DialogTitle id={`${titleId}-heading`} component="div" sx={{ px: { xs: 2, sm: 3 }, py: 2 }}>
+        <Box
+          component="span"
+          id={titleId}
+          sx={{
+            position: "absolute",
+            width: 1,
+            height: 1,
+            p: 0,
+            m: -1,
+            overflow: "hidden",
+            clip: "rect(0, 0, 0, 0)",
+            whiteSpace: "nowrap",
+            border: 0,
+          }}
+        >
+          {`Host-Status · ${host?.target ?? ""}`}
+        </Box>
         <Stack
           direction="row"
           sx={{ justifyContent: "space-between", alignItems: "flex-start", gap: 2 }}

@@ -330,17 +330,27 @@ export function HostOverviewPanel({
     );
   const actionButton = (host: OverviewHost) => {
     const state = hostPresentation(host);
+    const shortAction = {
+      collect: host.latest_run.status === "failed" ? "Verbindung prüfen" : "Inventur prüfen",
+      queryWindows: "Updateabfrage",
+      assessWindows: "OS bewerten",
+      assessSoftware: "Software prüfen",
+      openWindows: "Updates ansehen",
+      openSoftware: "Befunde ansehen",
+    };
     return (
       <Stack spacing={0.5} sx={{ alignItems: { xs: "stretch", md: "flex-start" } }}>
         {state.action && (
           <Button
             size="small"
             variant="outlined"
+            aria-label={state.actionLabel}
             disabled={busy}
             endIcon={<ArrowForwardIcon fontSize="small" />}
             onClick={() => onAction(host, state.action!)}
+            sx={{ whiteSpace: "nowrap", fontSize: 12, px: 1.25 }}
           >
-            {state.actionLabel}
+            {shortAction[state.action]}
           </Button>
         )}
         <Button
@@ -573,15 +583,15 @@ export function HostOverviewPanel({
             </Box>
           ) : (
             <>
-              <TableContainer sx={{ display: { xs: "none", md: "block" } }}>
+              <TableContainer sx={{ display: { xs: "none", lg: "block" } }}>
                 <Table aria-label="Patchstatus der Hosts" size="small">
                   <TableHead>
                     <TableRow>
-                      <TableCell sx={{ width: "22%" }}>System</TableCell>
-                      <TableCell sx={{ width: "28%" }}>Handlungsbedarf</TableCell>
-                      <TableCell>Systemupdates</TableCell>
-                      <TableCell>Software</TableCell>
-                      <TableCell>Nächster Schritt</TableCell>
+                      <TableCell sx={{ width: "21%" }}>System</TableCell>
+                      <TableCell sx={{ width: "25%" }}>Handlungsbedarf</TableCell>
+                      <TableCell sx={{ width: "18%" }}>Systemupdates</TableCell>
+                      <TableCell sx={{ width: "18%" }}>Software</TableCell>
+                      <TableCell sx={{ width: "18%" }}>Nächster Schritt</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -606,7 +616,7 @@ export function HostOverviewPanel({
                   </TableBody>
                 </Table>
               </TableContainer>
-              <Stack spacing={1.5} sx={{ display: { md: "none" } }}>
+              <Stack spacing={1.5} sx={{ display: { lg: "none" } }}>
                 {rows.map((host) => (
                   <Paper
                     variant="outlined"
