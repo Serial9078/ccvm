@@ -7,13 +7,14 @@ never be adapted into an operator/deployment command. Service/configuration and
 account-enabled states are restored; the runner is destroyed after this job.
 """
 
-import base64
+import hashlib
 import json
 import os
 import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from time import monotonic
@@ -22,6 +23,40 @@ BACKEND = Path(__file__).resolve().parents[1]
 ENDPOINT = "http://127.0.0.1:5985/wsman"
 SEALED = 'protocol="application/HTTP-SPNEGO-session-encrypted"'
 PHASE = "guard"
+
+READ_INPUT = r"""
+$ErrorActionPreference = 'Stop'
+$stream = [Console]::OpenStandardInput()
+$encoding = [Text.UTF8Encoding]::new($false, $true)
+$reader = [IO.StreamReader]::new($stream, $encoding, $false, 4096, $true)
+try { $rawInput = $reader.ReadToEnd() }
+finally { $reader.Dispose() }
+if ($rawInput.Length -eq 0 -or $rawInput.Length -gt 65536) {
+    throw 'Disposable fixture input is missing or too large'
+}
+$inputData = $rawInput | ConvertFrom-Json
+if ($null -eq $inputData -or $inputData -isnot [pscustomobject]) {
+    throw 'Disposable fixture input must be an object'
+}
+"""
+
+STDIN_PROBE = "$ErrorActionPreference='Stop';try {\n" + READ_INPUT + r"""
+if ($inputData.password -isnot [string] -or $inputData.password.Length -lt 32) {
+    throw 'Disposable fixture input property is missing'
+}
+$bytes = [Text.Encoding]::UTF8.GetBytes($rawInput)
+$sha = [Security.Cryptography.SHA256]::Create()
+try { $digest = [BitConverter]::ToString($sha.ComputeHash($bytes)) }
+finally { $sha.Dispose() }
+@{bytes=$bytes.Length;sha256=$digest.Replace('-','').ToLowerInvariant()} |
+    ConvertTo-Json -Compress
+} catch {
+    @{status='failed';setup_stage='input';hresult=[int64]$_.Exception.HResult;
+      script_line=[int]$_.InvocationInfo.ScriptLineNumber;setting_index=0;
+      cleanup_failed=$false} | ConvertTo-Json -Compress
+    exit 1
+}
+"""
 
 RESTORE = r"""
 function Restore-CcvmFixture($state) {
@@ -61,17 +96,26 @@ function Restore-CcvmFixture($state) {
 }
 """
 
-SETUP = RESTORE + r"""
+SETUP = (
+    RESTORE
+    + r"""
 $ErrorActionPreference = 'Stop'
-$inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $state = @{Settings=@();CreatedListener=$false;AccountSid=$null;AccountEnabled=$false;
            ServiceCaptured=$false}
 $complete = $false
 $failure = $null
 $cleanupFailed = $false
-$stage = 'service_state'
+$stage = 'input'
 $settingIndex = 0
 try {
+"""
+    + READ_INPUT
+    + r"""
+    if ($inputData.password -isnot [string] -or
+        $inputData.password.Length -lt 32 -or $inputData.password.Length -gt 128) {
+        throw 'Disposable fixture password input is missing or invalid'
+    }
+    $stage = 'service_state'
     $service = Get-Service -Name WinRM
     $state.ServiceWasRunning = $service.Status -eq 'Running'
     $state.ServiceCaptured = $true
@@ -143,6 +187,7 @@ if ($null -ne $failure) {
     exit 1
 }
 """
+)
 
 CHECK = r"""
 $ErrorActionPreference = 'Stop'
@@ -177,6 +222,7 @@ def setup_diagnostics(output):
         return {}
     fields = {"status", "setup_stage", "hresult", "script_line", "setting_index", "cleanup_failed"}
     stages = {
+        "input",
         "service_state",
         "service_start",
         "read_settings",
@@ -222,21 +268,35 @@ def hosted_windows_only():
 def powershell(source, payload=None):
     hosted_windows_only()
     executable = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    result = subprocess.run(
-        [
-            str(executable),
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-EncodedCommand",
-            base64.b64encode(source.encode("utf-16-le")).decode("ascii"),
-        ],
-        input=json.dumps(payload or {}).encode("utf-8"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        timeout=90,
-        check=False,
-    )
+    data = json.dumps(payload or {}).encode("utf-8")
+    if len(data) > 65536:
+        raise NativeCheckError("Disposable Windows fixture input is too large")
+    # The file contains only static fixture code. Credentials and cleanup state
+    # are supplied separately over stdin and never written to this file.
+    with tempfile.TemporaryDirectory(
+        prefix="ccvm-native-ps-", dir=os.environ["RUNNER_TEMP"]
+    ) as work:
+        script = Path(work) / "fixture.ps1"
+        script.write_text(source, encoding="utf-8-sig")
+        result = subprocess.run(
+            [
+                str(executable),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-InputFormat",
+                "Text",
+                "-OutputFormat",
+                "Text",
+                "-File",
+                str(script),
+            ],
+            input=data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=90,
+            check=False,
+        )
     if len(result.stdout) > 65536:
         raise NativeCheckError("Disposable Windows fixture command failed")
     if result.returncode:
@@ -247,6 +307,16 @@ def powershell(source, payload=None):
         return json.loads(result.stdout.decode("utf-8-sig"))
     except (UnicodeError, ValueError):
         raise NativeCheckError("Disposable Windows fixture returned invalid metadata") from None
+
+
+def verify_stdin_channel():
+    """Prove the real PS input path before service or account changes are allowed."""
+    payload = {"password": "Input9!" + secrets.token_urlsafe(36)}
+    expected = json.dumps(payload).encode("utf-8")
+    result = powershell(STDIN_PROBE, payload)
+    if result != {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}:
+        raise NativeCheckError("Disposable PowerShell input handshake failed")
+    print("PowerShell stdin JSON handshake verified before Windows fixture changes")
 
 
 def protocol_session(username, password):
@@ -338,6 +408,8 @@ def main():
     fixture, session, primary = None, None, None
     password = "Ccvm9!" + secrets.token_urlsafe(36)
     try:
+        PHASE = "stdin_probe"
+        verify_stdin_channel()
         PHASE = "setup"
         fixture = powershell(SETUP, {"password": password})
         PHASE = "security_before"
@@ -382,12 +454,16 @@ def main():
                 cleanup_failed = True
         if fixture is not None:
             try:
-                powershell(
-                    RESTORE + "\n$ErrorActionPreference='Stop';"
-                    "$s=[Console]::In.ReadToEnd()|ConvertFrom-Json;Restore-CcvmFixture $s;"
+                restored = powershell(
+                    RESTORE + READ_INPUT + "\nif (-not $inputData.ServiceCaptured -or "
+                    "-not $inputData.AccountSid -or @($inputData.Settings).Count -ne 4) "
+                    "{throw 'Disposable cleanup input is incomplete'};"
+                    "Restore-CcvmFixture $inputData;"
                     "@{restored=$true}|ConvertTo-Json -Compress",
                     fixture,
                 )
+                if restored != {"restored": True}:
+                    cleanup_failed = True
             except Exception:
                 cleanup_failed = True
         if cleanup_failed and primary is None:
