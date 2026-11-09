@@ -138,7 +138,7 @@ def _inventories(db, customer_id, asset_ids):
         .filter(
             HostAudit.customer_id == customer_id,
             HostAudit.asset_id.in_(asset_ids),
-            HostAudit.mode.in_(("inventory", "windows_updates")),
+            HostAudit.mode.in_(("inventory", "windows_updates", "cim_inventory")),
             HostAudit.completed_at.is_not(None),
             HostAudit.inventory.is_not(None),
             HostAudit.job.has(status="finished") | HostAudit.job.has(status="failed"),
@@ -214,6 +214,7 @@ def _inventory(audit):
         "mode": audit.mode,
         "completed_at": audit.completed_at,
         "os": os_data,
+        "collection_method": "cim" if audit.mode == "cim_inventory" else None,
     }
     for label, prefix in (("packages", "package"), ("hotfixes", "hotfix")):
         section = data.get(label, {})
@@ -644,7 +645,7 @@ def overview(
         elif latest_run.job.status == "failed":
             host_issues.append(
                 "latest_collection_failed"
-                if latest_run.mode in {"inventory", "windows_updates"}
+                if latest_run.mode in {"inventory", "windows_updates", "cim_inventory"}
                 else "latest_connection_failed"
             )
         platform = _platform(inventory["os"]) if inventory else "unclassified"
@@ -664,7 +665,7 @@ def overview(
                 CLIENT_ENGINE if platform == "windows_client" else WINDOWS_ENGINE,
                 now,
             )
-            if inventory
+            if inventory and retained.mode != "cim_inventory"
             else None
         )
         apps = (
@@ -676,9 +677,11 @@ def overview(
                 now,
                 software=True,
             )
-            if inventory
+            if inventory and retained.mode != "cim_inventory"
             else None
         )
+        if inventory and retained.mode == "cim_inventory":
+            host_issues.append("cim_inventory_limited")
         if platform in {"windows_server", "windows_client"}:
             if patch is None:
                 host_issues.append("windows_assessment_missing")

@@ -23,13 +23,16 @@ export interface InventorySection {
   items: Record<string, string>[];
 }
 export interface Inventory {
+  mode?: AuditMode;
+  collection_method?: "cim" | "winrs" | "ssh";
   os: Record<string, string>;
   packages: InventorySection;
   hotfixes: InventorySection;
   windows_updates?: WindowsUpdateEvidence | null;
 }
 export type WinrmTransport = "https" | "http_ntlm";
-export type AuditMode = "connection" | "inventory" | "windows_updates";
+export type AuditMode =
+  "connection" | "inventory" | "windows_updates" | "cim_connection" | "cim_inventory";
 
 export type WindowsUpdateClassification =
   "security" | "quality" | "feature" | "definition" | "other";
@@ -283,7 +286,9 @@ export async function auditRequest<T>(
     method,
     headers: {
       "Content-Type": "application/json",
-      ...(session.mode === "legacy" ? { Authorization: `Bearer ${token}` } : sessionRequestHeaders(method, session)),
+      ...(session.mode === "legacy"
+        ? { Authorization: `Bearer ${token}` }
+        : sessionRequestHeaders(method, session)),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",

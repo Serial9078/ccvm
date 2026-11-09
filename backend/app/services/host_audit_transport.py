@@ -64,6 +64,8 @@ FIXED_FAILURES = frozenset(
         "winrm_access_denied",
         "winrm_endpoint_unavailable",
         "winrm_http_error",
+        "cim_invalid_response",
+        "cim_incomplete_response",
     }
 )
 
@@ -431,6 +433,37 @@ def winrm_collect(payload):
                     raise
 
 
+def cim_collect(payload):
+    """Use only reviewed WMI enumeration; never fall back to a shell."""
+    started = monotonic()
+    if payload.get("kind") != "winrm" or payload.get("mode") not in {
+        "cim_connection",
+        "cim_inventory",
+    }:
+        raise TransportFailure("invalid_request")
+    path = Path(__file__).with_name("windows_cim.py")
+    spec = importlib.util.spec_from_file_location("ccvm_windows_cim", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    protocol, endpoint = winrm_protocol(payload)
+    http = winrm_session(protocol.transport, endpoint, payload.get("ca_bundle"))
+    try:
+        try:
+            return module.collect(
+                protocol,
+                endpoint,
+                payload["mode"],
+                deadline=started + (40 if payload["mode"] == "cim_connection" else 165),
+            )
+        except module.CimError as error:
+            raise TransportFailure(error.code) from None
+    finally:
+        try:
+            http.close()
+        except Exception:
+            pass
+
+
 def unavailable_windows_updates(error_code):
     return {
         "schema_version": 1,
@@ -464,8 +497,11 @@ def main():
         # Independent wall-clock enforcement still stops remote authentication
         # if the parent is blocked while checking database cancellation state.
         signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
-        signal.alarm(45 if payload["mode"] == "connection" else 180)
-        data = winrm_collect(payload) if payload["kind"] == "winrm" else ssh_collect(payload)
+        signal.alarm(45 if payload["mode"] in {"connection", "cim_connection"} else 180)
+        if payload["mode"] in {"cim_connection", "cim_inventory"}:
+            data = cim_collect(payload)
+        else:
+            data = winrm_collect(payload) if payload["kind"] == "winrm" else ssh_collect(payload)
         output = json.dumps({"inventory": data}, ensure_ascii=True).encode()
         if len(output) > MAX_OUTPUT:
             raise TransportFailure("output_limit")

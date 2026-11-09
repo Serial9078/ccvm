@@ -6,6 +6,7 @@ import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
+  Alert,
   Box,
   Button,
   Chip,
@@ -22,7 +23,14 @@ import {
   Typography,
 } from "@mui/material";
 import { WindowsStatus, SoftwareStatus } from "./overview";
-import { current, date, freshWindowsUpdateQuery, softwareFix } from "./overview-state";
+import {
+  current,
+  date,
+  freshWindowsUpdateQuery,
+  hasCimInventory,
+  softwareFix,
+} from "./overview-state";
+import { isCimMode } from "./collection-state";
 import { hostPresentation } from "./host-presentation";
 import type { OverviewHost } from "./overview-state";
 
@@ -46,6 +54,7 @@ function RunDetails({ host }: { host: OverviewHost }) {
     ["Letzter Versuch", date(run.completed_at ?? run.created_at)],
     ["Ergebnis", statusLabels[run.status] ?? run.status],
     ["Ziel", `${host.target}:${run.port}`],
+    ["Erfassung", isCimMode(run.mode) ? "CIM · ohne Remote-Shell" : "SSH / WinRS"],
     ["Letzte Inventur", date(host.inventory?.completed_at)],
   ];
   return (
@@ -75,8 +84,9 @@ function RunDetails({ host }: { host: OverviewHost }) {
       </Box>
       {host.inventory && (
         <Typography variant="body2" color="text.secondary">
-          Gespeicherte Inventur: {host.inventory.package_count} Software-Einträge ·{" "}
-          {host.inventory.hotfix_count} Hotfix-Einträge.
+          {hasCimInventory(host)
+            ? `CIM-Basisinventur: ${host.inventory.hotfix_count} gespeicherte Hotfix-Einträge. Software wurde nicht erfasst; der Patchstatus bleibt ungeprüft.`
+            : `Gespeicherte Inventur: ${host.inventory.package_count} Software-Einträge · ${host.inventory.hotfix_count} Hotfix-Einträge.`}
           {run.status === "failed" &&
             (run.id === host.inventory.id
               ? " Der fehlgeschlagene Lauf hat Teilinformationen gespeichert. Die Erfassung wurde nicht erfolgreich abgeschlossen."
@@ -130,8 +140,11 @@ export function HostStatusDialog({
     openSoftware,
   };
   const title = host?.inventory?.os.hostname || host?.target;
+  const cim = hasCimInventory(host);
   const canAssessWindows = Boolean(
-    host?.inventory && (host.platform !== "windows_client" || freshWindowsUpdateQuery(host)),
+    host?.inventory &&
+    !cim &&
+    (host.platform !== "windows_client" || freshWindowsUpdateQuery(host)),
   );
   const affected = current(host?.software_assessment ?? null)
     ? (host?.software_assessment?.result.products.filter((product) => product.matches_total > 0) ??
@@ -251,7 +264,7 @@ export function HostStatusDialog({
                         ],
                         [
                           "Inventur erfassen",
-                          "Nach erfolgreichem Verbindungstest Betriebssystem und installierte Software auslesen.",
+                          "Nach erfolgreichem Verbindungstest Betriebssystem und die Daten der gewählten Erfassungsmethode auslesen.",
                         ],
                         [
                           "Ergebnisse bewerten",
@@ -342,6 +355,14 @@ export function HostStatusDialog({
                         {host.inventory.os.name || platformLabels[host.platform]} · Inventur vom{" "}
                         {date(host.inventory.completed_at)}
                       </Typography>
+                      {cim && (
+                        <Alert severity="info">
+                          CIM-Basisinventur ohne Remote-Shell: Betriebssystem und gespeicherte
+                          Hotfix-Einträge sind erfasst. Installierte Software und fehlende Updates
+                          bleiben ungeprüft. Für eine weitergehende Bewertung wird eine zusätzliche
+                          freigegebene Datenquelle benötigt.
+                        </Alert>
+                      )}
                       <Box
                         sx={{
                           display: "grid",
@@ -403,18 +424,22 @@ export function HostStatusDialog({
                   {tab === "updates" && windows && (
                     <Stack spacing={2}>
                       <Typography component="h3" variant="h6">
-                        {host.platform === "windows_client"
-                          ? "Windows-Updateangebote"
-                          : "Windows-Build und Zielstand"}
+                        {cim
+                          ? "Patchstatus ungeprüft"
+                          : host.platform === "windows_client"
+                            ? "Windows-Updateangebote"
+                            : "Windows-Build und Zielstand"}
                       </Typography>
                       <WindowsStatus host={host} />
                       <Typography variant="body2" color="text.secondary">
-                        {host.platform === "windows_client"
-                          ? "Die konfigurierte Windows Update-/WSUS-Quelle bestimmt das Angebot. Eine Abfrage gilt höchstens 24 Stunden. Keine Angebote bestätigen keine vollständige Patchfreigabe; optionale Updates bleiben eine eigene Entscheidung."
-                          : "Der installierte OS-Build wird mit der Microsoft-Katalogbaseline verglichen. Andere Windows-Komponenten und installierte Programme werden separat betrachtet."}
+                        {cim
+                          ? "Die CIM-Basisinventur enthält keine vollständige Buildrevision oder Updateangebote. Gespeicherte Hotfix-Einträge belegen nicht, welche Updates fehlen. Die Remote-Shell-Sperre bleibt bestehen."
+                          : host.platform === "windows_client"
+                            ? "Die konfigurierte Windows Update-/WSUS-Quelle bestimmt das Angebot. Eine Abfrage gilt höchstens 24 Stunden. Keine Angebote bestätigen keine vollständige Patchfreigabe; optionale Updates bleiben eine eigene Entscheidung."
+                            : "Der installierte OS-Build wird mit der Microsoft-Katalogbaseline verglichen. Andere Windows-Komponenten und installierte Programme werden separat betrachtet."}
                       </Typography>
                       <Stack direction="row" useFlexGap sx={{ flexWrap: "wrap", gap: 1 }}>
-                        {host.platform === "windows_client" && (
+                        {host.platform === "windows_client" && !cim && (
                           <Button
                             variant="outlined"
                             disabled={busy || Boolean(pending)}
@@ -469,14 +494,20 @@ export function HostStatusDialog({
                         </Paper>
                       ))}
                       <Typography variant="body2" color="text.secondary">
-                        Abgedeckt sind ausgewählte Edge-spezifische Meldungen und die kuratierte
-                        7-Zip-Regel. Weitere Programme und CVEs bleiben ungeprüft.
-                        Versionszuordnungen belegen keine Ausnutzbarkeit.
+                        {cim ? (
+                          "Die CIM-Basisinventur liest keine Liste installierter Programme. Daher ist keine Softwarebewertung möglich."
+                        ) : (
+                          <>
+                            Abgedeckt sind ausgewählte Edge-spezifische Meldungen und die kuratierte
+                            7-Zip-Regel. Weitere Programme und CVEs bleiben ungeprüft.
+                            Versionszuordnungen belegen keine Ausnutzbarkeit.
+                          </>
+                        )}
                       </Typography>
                       <Stack direction="row" useFlexGap sx={{ flexWrap: "wrap", gap: 1 }}>
                         <Button
                           variant="outlined"
-                          disabled={busy || Boolean(pending)}
+                          disabled={busy || Boolean(pending) || cim}
                           onClick={() => navigate(assessSoftware)}
                         >
                           Software jetzt bewerten
@@ -506,7 +537,7 @@ export function HostStatusDialog({
                             disabled={busy || Boolean(pending)}
                             onClick={() => navigate(collect)}
                           >
-                            Inventur aktualisieren
+                            {cim ? "CIM-Basisinventur aktualisieren" : "Inventur aktualisieren"}
                           </Button>
                         )}
                       </Stack>

@@ -267,6 +267,78 @@ def test_new_inventory_never_inherits_older_assessment(secured, customer, db):
     assert host["windows_assessment"] is None and host["software_assessment"] is None
 
 
+def cim_inventory():
+    data = inventory(product_type="1")
+    data["collection_method"] = "cim"
+    data["os"] = {
+        "family": "Windows",
+        "name": "Microsoft Windows 11 Pro",
+        "hostname": "SYNTHETIC-CIM-CLIENT",
+        "version": "10.0.26300",
+        "kernel": "26300",
+        "architecture": "64-bit",
+        "product_type": "1",
+        "sku": "48",
+    }
+    data["packages"] = {"status": "not_requested", "source": "none", "items": []}
+    data["hotfixes"] = {
+        "status": "complete",
+        "source": "Win32_QuickFixEngineering",
+        "items": [{"id": "KB9999999", "description": "Synthetic recorded hotfix"}],
+    }
+    return data
+
+
+def test_cim_identity_is_visible_but_cannot_inherit_a_prior_patch_verdict(secured, customer, db):
+    snapshots(db)
+    first = run(
+        db, customer["id"], evidence=inventory(), created=datetime.now(UTC) - timedelta(hours=1)
+    )
+    assess_windows(first.id, None, db)
+    assess_software(first.id, None, db)
+    newer = run(
+        db,
+        customer["id"],
+        evidence=cim_inventory(),
+        mode="cim_inventory",
+        existing_asset=db.get(Asset, first.asset_id),
+    )
+    host = get(secured, customer["id"])["hosts"][0]
+    assert host["platform"] == "windows_client"
+    assert host["inventory"]["id"] == newer.id
+    assert host["inventory"]["collection_method"] == "cim"
+    assert host["inventory"]["os"]["hostname"] == "SYNTHETIC-CIM-CLIENT"
+    assert host["inventory"]["os"]["kernel"] == "26300"
+    assert host["inventory"]["package_status"] == "not_requested"
+    assert host["inventory"]["hotfix_count"] == 1
+    assert host["windows_assessment"] is None and host["software_assessment"] is None
+    assert "cim_inventory_limited" in host["issues"]
+    assert "inventory_missing" not in host["issues"]
+    assert "windows_client_update_query_required" in host["issues"]
+
+
+@pytest.mark.parametrize("path", ["assess", "assess-software"])
+def test_cim_assessment_requests_stop_before_any_evaluation(secured, customer, db, path):
+    audit = run(db, customer["id"], evidence=cim_inventory(), mode="cim_inventory")
+    response = secured.post(f"/api/v1/host-audits/{audit.id}/{path}", json={})
+    assert response.status_code == 422
+    assert "CIM base inventory" in response.json()["detail"]
+    assert db.query(HostAssessment).count() == 0
+    assert db.query(SoftwareAssessment).count() == 0
+
+
+def test_saved_assessments_cannot_bless_an_inventory_reclassified_as_cim(secured, customer, db):
+    snapshots(db)
+    audit = run(db, customer["id"], evidence=inventory())
+    assess_windows(audit.id, None, db)
+    assess_software(audit.id, None, db)
+    audit.mode = "cim_inventory"
+    db.commit()
+    host = get(secured, customer["id"])["hosts"][0]
+    assert host["windows_assessment"] is None and host["software_assessment"] is None
+    assert "cim_inventory_limited" in host["issues"]
+
+
 @pytest.mark.parametrize("mutation", ["evidence", "engine", "expired", "future", "catalog"])
 def test_stale_or_changed_basis_cannot_appear_current(secured, customer, db, mutation):
     snapshots(db)

@@ -57,12 +57,20 @@ def _windows_inventory():
     return _stage(
         "limited",
         "hostinventory-winrm",
-        "OS-Identität, maschinenweite Uninstall-Registry und Get-HotFix.",
+        (
+            "CIM-Basisinventur: OS-Identität und QFE-Hotfixeinträge. "
+            "WinRS: zusätzlich Uninstall-Registry."
+        ),
         (
             "Freigegebenes Konto und Ziel",
             "WinRM/NTLM mit geprüftem HTTPS oder verschlüsselten HTTP-Nachrichten",
+            "CIM: freigegebene WMI-Leseabfragen; WinRS: erlaubte Remote-Shell",
         ),
-        ("Keine vollständige Softwareinventur; portable und benutzerbezogene Programme fehlen.",),
+        (
+            "CIM erfasst keine Softwareversionen, Updateangebote oder vollständige Buildrevision.",
+            "QFE-Einträge sind kein vollständiger Patchnachweis.",
+            "Auch WinRS erfasst keine vollständige Softwareinventur; portable Programme fehlen.",
+        ),
     )
 
 
@@ -73,6 +81,7 @@ def _windows_software():
         "Exakte Produkt-/Herstellerzuordnung: ausgewählte Edge-Meldungen und 7-Zip CVE-2025-55188.",
         (
             "Aktuelle Registry-Inventur mit Hersteller- und Versionsdaten",
+            "WinRS-Inventur; die CIM-Basisinventur enthält keine Softwaredaten",
             "Aktueller Softwarekatalog",
         ),
         (
@@ -93,6 +102,7 @@ def _offered_updates():
         (
             "Expliziter Inventurmodus windows_updates",
             "Freigegebener WinRM-Zugang",
+            "Erlaubte Remote-Shell (WinRS); nicht mit CIM-Basisinventur verfügbar",
             "Funktionsfähiger Windows Update Agent und konfigurierte Quelle",
         ),
         (

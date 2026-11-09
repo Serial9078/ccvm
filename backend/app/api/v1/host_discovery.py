@@ -217,7 +217,7 @@ def _inventories(db, customer_id, asset_ids):
         .filter(
             HostAudit.customer_id == customer_id,
             HostAudit.asset_id.in_(asset_ids),
-            HostAudit.mode.in_(["inventory", "windows_updates"]),
+            HostAudit.mode.in_(["inventory", "windows_updates", "cim_inventory"]),
         )
         .subquery()
     )

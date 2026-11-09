@@ -1460,7 +1460,7 @@ print('Synthetic guard finished without executing a plugin')
     )
 
 
-def verify_secure_login_update(source, target, operation):
+def verify_secure_login_update(source, target, operation, *, retain_auth_ownership=False):
     """Add sessions onto populated retained evidence and test actual TLS cookies."""
     import base64
     import secrets
@@ -1707,14 +1707,414 @@ print(json.dumps({'login':True,'mfa':True,'cookie':True,'restore':True,'csrf':Tr
         )
     finally:
         # Only this disposable fixture owns this synthetic root-created directory.
-        run(
-            "sudo",
-            "-n",
-            "chown",
-            "-R",
-            f"{os.getuid()}:{os.getgid()}",
-            str(source / "backend/.ccvm-auth"),
+        # The following CIM stage exercises the real root-owned policy boundary.
+        # Its outer fixture cleanup restores ownership after containers stop.
+        if not retain_auth_ownership:
+            run(
+                "sudo",
+                "-n",
+                "chown",
+                "-R",
+                f"{os.getuid()}:{os.getgid()}",
+                str(source / "backend/.ccvm-auth"),
+            )
+
+
+def verify_windows_cim_update(source, target, operation):
+    """Publish CIM modes onto active login and evidence without contacting a host."""
+    previous_head = run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip()
+    assert previous_head == SECURE_LOGIN_RELEASE
+    assert not (source / ".git/ccvm-auth-enrollment-update.json").exists()
+    run("git", "update-ref", "refs/remotes/origin/" + load_operator().BRANCH, target, cwd=source)
+    script = run("git", "show", f"{target}:scripts/update-windows-cim.py", cwd=REPOSITORY).stdout
+    marker = source / ".git/ccvm-windows-cim-deployment.json"
+
+    # These rows are fixture evidence, never a queued host operation. The active
+    # session complements the preceding native password/MFA login/logout checks.
+    fixture = json.loads(seed_inventory("""import json,secrets
+from datetime import timedelta
+from sqlalchemy import select
+from app.database.session import SessionLocal
+from app.models.auth import AuthSession,AuthUser
+from app.models.asset import Asset
+from app.models.host_audit import AuditCredential,HostAudit
+from app.models.job import Job
+from app.services.auth_session import csrf_token,digest,now
+with SessionLocal() as db:
+ user=db.scalar(select(AuthUser).where(AuthUser.enabled.is_(True)))
+ assert user is not None
+ raw=secrets.token_urlsafe(32);csrf=csrf_token(raw);moment=now()
+ db.add(AuthSession(token_hash=digest(raw),user_id=user.id,csrf_hash=digest(csrf),
+     created_at=moment,last_seen_at=moment,expires_at=moment+timedelta(hours=4)))
+ credential=db.scalar(select(AuditCredential).where(
+     AuditCredential.kind=='winrm',AuditCredential.enabled.is_(True)))
+ assert credential is not None
+ asset=Asset(customer_id=credential.customer_id,type='ip',target='192.0.2.90',
+     ip_address='192.0.2.90',name='CIM retained fixture',exposure='internal')
+ db.add(asset);db.flush()
+ job=Job(asset_id=asset.id,plugin='hostinventory',status='finished',progress=100,
+     message='Synthetic retained CIM evidence; no host connection')
+ db.add(job);db.flush()
+ audit=HostAudit(customer_id=credential.customer_id,asset_id=asset.id,
+     credential_id=credential.id,job_id=job.id,target=asset.target,port=5985,
+     winrm_transport='http_ntlm',mode='cim_inventory',scope_sha256='0'*64,
+     completed_at=moment,inventory={
+       'schema_version':1,'collection_method':'cim',
+       'os':{'family':'Windows','name':'Microsoft Windows 11 Pro','version':'10.0.26300',
+             'kernel':'26300','architecture':'64-bit','hostname':'CIM-RETAINED',
+             'product_type':'1','sku':'48'},
+       'packages':{'status':'not_requested','source':'none','items':[]},
+       'hotfixes':{'status':'complete','source':'Win32_QuickFixEngineering',
+                  'items':[{'id':'KB5000001','description':'Synthetic QFE evidence'}]}})
+ db.add(audit);db.commit()
+ print(json.dumps({'customer_id':credential.customer_id,'audit_id':audit.id,
+     'cookie':'__Host-ccvm_session='+raw,'csrf':csrf}))
+"""))
+
+    snapshot = """import hashlib,json
+from sqlalchemy import inspect
+from app.database.session import engine
+def stable(value):
+ if isinstance(value,(bytes,bytearray,memoryview)):return {'bytes_hex':bytes(value).hex()}
+ return str(value)
+with engine.connect() as c:
+ c.exec_driver_sql('SET TRANSACTION READ ONLY')
+ c.exec_driver_sql(\"SET LOCAL statement_timeout='5s'\")
+ tables={}
+ for name in sorted(inspect(c).get_table_names()):
+  quoted=engine.dialect.identifier_preparer.quote(name)
+  rows=[dict(row) for row in c.exec_driver_sql('SELECT * FROM '+quoted).mappings()]
+  encoded=sorted(json.dumps(row,sort_keys=True,default=stable) for row in rows)
+  tables[name]={'count':len(rows),'sha256':hashlib.sha256(json.dumps(encoded).encode()).hexdigest()}
+ # Native PostgreSQL definitions prove absence of DDL independently of Alembic.
+ schema={}
+ for name,query in {
+  'columns':(
+   "SELECT c.relname,a.attnum,a.attname,"
+   "pg_catalog.format_type(a.atttypid,a.atttypmod) AS type,"
+   "a.attnotnull,a.attidentity,a.attgenerated,"
+   "pg_get_expr(d.adbin,d.adrelid) AS default_value FROM pg_class c "
+   "JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid "
+   "LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum "
+   "WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m') "
+   "AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum"),
+  'constraints':(
+   "SELECT c.relname,k.conname,pg_get_constraintdef(k.oid,true) AS definition "
+   "FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid "
+   "JOIN pg_namespace n ON n.oid=c.relnamespace "
+   "WHERE n.nspname='public' ORDER BY c.relname,k.conname"),
+  'indexes':("SELECT tablename,indexname,indexdef FROM pg_indexes "
+   "WHERE schemaname='public' ORDER BY tablename,indexname"),
+  'sequences':("SELECT sequencename,data_type,start_value,min_value,max_value,"
+   "increment_by,cycle,cache_size FROM pg_sequences "
+   "WHERE schemaname='public' ORDER BY sequencename"),
+ }.items():schema[name]=[dict(row) for row in c.exec_driver_sql(query).mappings()]
+ sessions=[dict(row) for row in c.exec_driver_sql(
+     'SELECT token_hash,user_id,csrf_hash,created_at,expires_at,revoked_at '
+     'FROM auth_sessions ORDER BY token_hash').mappings()]
+ print(json.dumps({'tables':tables,'revision':c.exec_driver_sql(
+     'SELECT version_num FROM alembic_version').scalar_one(),
+     'schema_sha256':hashlib.sha256(json.dumps(schema,sort_keys=True,default=stable).encode()).hexdigest(),
+     'session_identity_sha256':hashlib.sha256(json.dumps(sessions,sort_keys=True,default=stable).encode()).hexdigest()}))
+"""
+
+    def capture():
+        return json.loads(docker("exec", "ccvm-backend", "python", "-c", snapshot))
+
+    names = (
+        "ccvm-backend",
+        "ccvm-worker",
+        "ccvm-frontend",
+        "ccvm-postgres",
+        "ccvm-audit-gateway",
+        "haproxy-edge",
+    )
+    identities = {name: inspect(name)["Id"] for name in names}
+    gateway = inspect("ccvm-audit-gateway")
+    gateway_identity = tuple(gateway["State"][key] for key in ("Pid", "StartedAt"))
+    gateway_restarts = gateway["RestartCount"]
+    socket_path = str(Path(operation["socket_dir"]) / "gateway.sock")
+    socket_identity = run("sudo", "-n", "stat", "--format=%d:%i:%u:%g:%a", socket_path).stdout
+    paths = [
+        source / name
+        for name in (
+            "docker-compose.yml",
+            "docker-compose.network.yml",
+            "docker-compose.authenticated.yml",
+            "fixture.env",
+            "frontend/default.conf",
+            ".git/ccvm-authenticated-deployment.json",
+            ".git/ccvm-host-inventory-update.json",
+            ".git/ccvm-windows-patch-deployment.json",
+            ".git/ccvm-software-assessment-deployment.json",
+            ".git/ccvm-inventory-overview-deployment.json",
+            ".git/ccvm-windows-clients-deployment.json",
+            ".git/ccvm-host-workspace-deployment.json",
+            ".git/ccvm-secure-login-deployment.json",
         )
+    ]
+    paths += [
+        Path(operation["private"]) / name for name in ("vault.env", "operator.env", "gateway.conf")
+    ]
+    paths += [Path(operation["edge_path"])]
+    paths += sorted(Path(operation["certificate_dir"]).glob("*.pem"))
+    retained = {path: path.read_bytes() for path in paths}
+    policy_path = source / "backend/.ccvm-auth/auth-policy.json"
+    policy_bytes = run("sudo", "-n", "cat", str(policy_path)).stdout
+    auth_identity = run(
+        "sudo", "-n", "stat", "--format=%d:%i:%u:%g:%a", str(policy_path.parent), str(policy_path)
+    ).stdout
+    retained_assets = {
+        path.relative_to(source / "frontend/dist")
+        .as_posix(): hashlib.sha256(path.read_bytes())
+        .hexdigest()
+        for path in (source / "frontend/dist").rglob("*")
+        if path.is_file() and path.name != "index.html"
+    }
+
+    def retained_runtime():
+        assert retained == {path: path.read_bytes() for path in paths}
+        assert identities == {name: inspect(name)["Id"] for name in names}
+        current = inspect("ccvm-audit-gateway")
+        assert tuple(current["State"][key] for key in ("Pid", "StartedAt")) == gateway_identity
+        assert current["RestartCount"] == gateway_restarts
+        assert (
+            run("sudo", "-n", "stat", "--format=%d:%i:%u:%g:%a", socket_path).stdout
+            == socket_identity
+        )
+        assert run("sudo", "-n", "cat", str(policy_path)).stdout == policy_bytes
+        assert (
+            run(
+                "sudo",
+                "-n",
+                "stat",
+                "--format=%d:%i:%u:%g:%a",
+                str(policy_path.parent),
+                str(policy_path),
+            ).stdout
+            == auth_identity
+        )
+        assert not (source / ".git/ccvm-auth-enrollment-update.json").exists()
+
+    original_index = (source / "frontend/dist/index.html").read_bytes()
+
+    def unpublished():
+        assert (source / "frontend/dist/index.html").read_bytes() == original_index
+        assert retained_assets == {
+            path.relative_to(source / "frontend/dist")
+            .as_posix(): hashlib.sha256(path.read_bytes())
+            .hexdigest()
+            for path in (source / "frontend/dist").rglob("*")
+            if path.is_file() and path.name != "index.html"
+        }
+
+    def update(*flags, expected_success=True):
+        result = run(
+            sys.executable,
+            "-",
+            "--target",
+            target,
+            "--host",
+            socket.gethostname().split(".")[0],
+            *flags,
+            cwd=source,
+            data=script,
+            timeout=900,
+            success=False,
+            stream=True,
+        )
+        if expected_success and result.returncode and marker.is_file():
+            log = Path(json.loads(marker.read_text())["backup"]) / "last-command.log"
+            if log.is_file():
+                print(log.read_text(errors="replace")[-10000:], flush=True)
+        assert (result.returncode == 0) is expected_success
+
+    # A queued child of a running fixture parent is valid pending work and cannot
+    # be claimed by the idle worker. Neither row ever invokes a plugin.
+    guards = json.loads(seed_inventory("""import json
+from app.database.session import SessionLocal
+from app.models.job import Job
+with SessionLocal() as db:
+ parent=Job(plugin='dummy',status='running',progress=1,message='Synthetic active CIM guard')
+ db.add(parent);db.flush()
+ child=Job(plugin='dummy',status='queued',parent_job_id=parent.id,progress=0,
+     message='Synthetic pending CIM guard')
+ db.add(child);db.commit();print(json.dumps([parent.id,child.id]))
+"""))
+    busy = capture()
+    update("--apply", expected_success=False)
+    assert not marker.exists() and capture() == busy
+    assert run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip() == previous_head
+    retained_runtime()
+    unpublished()
+    seed_inventory("""from app.database.session import SessionLocal
+from app.models.job import Job
+with SessionLocal() as db:
+ for identity in %r:
+  job=db.get(Job,identity);job.status='finished';job.progress=100
+  job.message='Completed synthetic guard without running a plugin'
+ db.commit()
+print('Synthetic running and queued guards finished')
+""" % guards)
+    before = capture()
+    assert before["revision"] == "e7b5c9d2a401"
+    assert before["tables"]["auth_users"]["count"] == 1
+    assert before["tables"]["auth_sessions"]["count"] >= 2
+    assert before["tables"]["host_assessments"]["count"] >= 2
+    assert before["tables"]["software_assessments"]["count"] >= 1
+    enrollment = load_operator(
+        run("git", "show", f"{target}:scripts/update-auth-enrollment.py", cwd=REPOSITORY).stdout
+    )
+    with enrollment.AdminLock(source, create=True):
+        update("--apply", expected_success=False)
+        assert not marker.exists() and capture() == before
+        retained_runtime()
+        unpublished()
+
+    def unchanged():
+        assert capture() == before
+        retained_runtime()
+
+    update()
+    assert not marker.exists()
+    assert run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip() == previous_head
+    unchanged()
+    unpublished()
+    update("--apply")
+    unchanged()
+    record = json.loads(marker.read_text())
+    assert record["version"] == "1.0.0" and record["phase"] == "verified"
+    assert record["base"] == SECURE_LOGIN_RELEASE and record["target"] == target
+    database_backup = Path(record["attempt_dir"]) / "database.dump"
+    assert database_backup.stat().st_mode & 0o777 == 0o600
+    with database_backup.open("rb") as backup:
+        assert backup.read(5) == b"PGDMP"
+    assert run("git", "rev-parse", "HEAD", cwd=source).stdout.decode().strip() == target
+    installed = {
+        path.relative_to(source / "frontend/dist")
+        .as_posix(): hashlib.sha256(path.read_bytes())
+        .hexdigest()
+        for path in (source / "frontend/dist").rglob("*")
+        if path.is_file()
+    }
+    assert record["artifacts"]["frontend/dist"].items() <= installed.items()
+    assert retained_assets.items() <= installed.items()
+    published_js = "\n".join(
+        (source / "frontend/dist" / name).read_text()
+        for name in record["artifacts"]["frontend/dist"]
+        if name.endswith(".js")
+    )
+    assert "cim_inventory" in published_js and "CIM-Basisinventur" in published_js
+    record["phase"] = "services"
+    load_operator().write_json(marker, record)
+    docker("stop", "--time", "20", "ccvm-backend", "ccvm-worker")
+    update("--apply", "--resume")
+    unchanged()
+    verified_journal = marker.read_bytes()
+    update("--apply")
+    update("--apply", "--resume")
+    update()
+    unchanged()
+    assert marker.read_bytes() == verified_journal
+
+    checks = r"""
+import hashlib,http.client,json,re,socket,ssl,sys
+p=json.load(sys.stdin);ctx=ssl.create_default_context()
+def request(path,method='GET',cookie=None,csrf=None,origin=None):
+ raw=socket.create_connection(('127.0.0.1',p['port']),timeout=8)
+ raw.sendall(f"PROXY TCP4 192.0.2.1 127.0.0.1 12345 {p['port']}\r\n".encode())
+ with ctx.wrap_socket(raw,server_hostname=p['hostname']) as tls:
+  headers=[f'{method} {path} HTTP/1.1',f"Host: {p['hostname']}",'Connection: close']
+  if method!='GET':
+   headers+=['Content-Type: application/json','Content-Length: 2','X-CCVM-Request: 1']
+  if cookie:headers.append('Cookie: '+cookie)
+  if csrf:headers.append('X-CSRF-Token: '+csrf)
+  if origin:headers.append('Origin: '+origin)
+  tls.sendall(('\r\n'.join(headers)+'\r\n\r\n').encode()+(b'{}' if method!='GET' else b''))
+  reply=http.client.HTTPResponse(tls);reply.begin();content=reply.read(4*1024*1024)
+  assert reply.getheader('X-CCVM-Route')==p['marker']
+  if path.startswith('/api/v1'):assert reply.getheader('Cache-Control')=='no-store'
+  return reply.status,content
+def api(path,method='GET',**headers):
+ status,content=request(path,method,**headers)
+ return status,json.loads(content) if content else None
+assert api('/api/v1/host-audits?customer_id='+str(p['customer_id']))[0]==401
+status,session=api('/api/v1/auth/session',cookie=p['cookie'])
+assert status==200 and session['authenticated'] and session['csrf_token']==p['csrf']
+assert api('/api/v1/customers',cookie=p['cookie'])[0]==200
+status,detail=api('/api/v1/host-audits/'+str(p['audit_id']),cookie=p['cookie'])
+assert status==200 and detail['mode']=='cim_inventory'
+assert detail['inventory']['collection_method']=='cim'
+assert detail['inventory']['packages']=={'status':'not_requested','source':'none','items':[]}
+for suffix in ('assess','assess-software'):
+ path='/api/v1/host-audits/'+str(p['audit_id'])+'/'+suffix
+ assert api(path,'POST',cookie=p['cookie'],origin=p['origin'])[0]==403
+ assert api(path,'POST',cookie=p['cookie'],csrf=p['csrf'],origin='https://sibling.example.test')[0]==403
+ status,data=api(path,'POST',cookie=p['cookie'],csrf=p['csrf'],origin=p['origin'])
+ assert status==422 and 'CIM' in data['detail']
+status,html=request('/')
+assert status==200 and hashlib.sha256(html).hexdigest()==p['index_sha256']
+assets=re.findall(r'(?:src|href)="([^\"]+\.js)"',html.decode())
+assert assets
+served=[]
+for asset in assets:
+ assert asset.startswith('/assets/')
+ status,body=request(asset);assert status==200
+ assert hashlib.sha256(body).hexdigest()==p['assets'][asset.lstrip('/')]
+ served.append(body)
+assert any(b'cim_inventory' in body for body in served)
+assert any('CIM-Basisinventur'.encode() in body for body in served)
+print(json.dumps({'session_restored':True,'csrf_preserved':True,
+ 'cim_evidence_retained':True,'assessment_refused':True,'reviewed_assets_served':True}))
+"""
+    payload = {
+        **fixture,
+        "hostname": operation["hostname"],
+        "port": operation["tls_port"],
+        "marker": operation["target"][:12],
+        "origin": "https://" + operation["hostname"],
+        "index_sha256": installed["index.html"],
+        "assets": installed,
+    }
+    verified = json.loads(
+        docker(
+            "run",
+            "-i",
+            "--rm",
+            "--pull=never",
+            "--network",
+            "container:haproxy-edge",
+            "--entrypoint",
+            "python",
+            operation["images"]["backend"],
+            "-I",
+            "-c",
+            checks,
+            data=json.dumps(payload).encode(),
+        )
+    )
+    assert all(verified.values()) and len(verified) == 5
+    # Authorized HTTP reads refresh exactly this fixture session's last_seen_at.
+    # Assessment rejection must leave all evidence and assessment rows unchanged.
+    after_api = capture()
+    assert {
+        name: value for name, value in after_api["tables"].items() if name != "auth_sessions"
+    } == {name: value for name, value in before["tables"].items() if name != "auth_sessions"}
+    assert (
+        after_api["tables"]["auth_sessions"]["count"] == before["tables"]["auth_sessions"]["count"]
+    )
+    assert after_api["schema_sha256"] == before["schema_sha256"]
+    assert after_api["session_identity_sha256"] == before["session_identity_sha256"]
+    retained_runtime()
+    old_application(operation["images"]["backend"])
+    print(
+        "VERIFIED: CIM publication from retained secure login, unchanged PostgreSQL schema/rows, "
+        "running/queued work and root account-lock refusal, stopped-service resume, idempotency, "
+        "retained accounts/cookies/CSRF/secrets/gateway/socket, "
+        "limited evidence and served UI assets; "
+        "no customer host connections",
+        flush=True,
+    )
 
 
 def main():
@@ -1727,6 +2127,7 @@ def main():
         ["--windows-clients-update"],
         ["--host-workspace-update"],
         ["--secure-login-update"],
+        ["--windows-cim-update"],
     ):
         raise RuntimeError("Unknown disposable deployment fixture mode")
     update_mode = bool(sys.argv[1:])
@@ -1737,6 +2138,7 @@ def main():
         ["--windows-clients-update"],
         ["--host-workspace-update"],
         ["--secure-login-update"],
+        ["--windows-cim-update"],
     )
     software_mode = sys.argv[1:] in (
         ["--software-assessment-update"],
@@ -1744,20 +2146,28 @@ def main():
         ["--windows-clients-update"],
         ["--host-workspace-update"],
         ["--secure-login-update"],
+        ["--windows-cim-update"],
     )
     overview_mode = sys.argv[1:] in (
         ["--inventory-overview-update"],
         ["--windows-clients-update"],
         ["--host-workspace-update"],
         ["--secure-login-update"],
+        ["--windows-cim-update"],
     )
     windows_clients_mode = sys.argv[1:] in (
         ["--windows-clients-update"],
         ["--host-workspace-update"],
         ["--secure-login-update"],
+        ["--windows-cim-update"],
     )
-    workspace_mode = sys.argv[1:] in (["--host-workspace-update"], ["--secure-login-update"])
-    secure_login_mode = sys.argv[1:] == ["--secure-login-update"]
+    workspace_mode = sys.argv[1:] in (
+        ["--host-workspace-update"],
+        ["--secure-login-update"],
+        ["--windows-cim-update"],
+    )
+    secure_login_mode = sys.argv[1:] in (["--secure-login-update"], ["--windows-cim-update"])
+    windows_cim_mode = sys.argv[1:] == ["--windows-cim-update"]
     if os.environ.get("GITHUB_ACTIONS") != "true" or not re.fullmatch(
         r"[1-9][0-9]+", os.environ.get("GITHUB_RUN_ID", "")
     ):
@@ -1987,8 +2397,13 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                 )
             if secure_login_mode:
                 verify_secure_login_update(
-                    source, SECURE_LOGIN_RELEASE, json.loads(journal.read_text())
+                    source,
+                    SECURE_LOGIN_RELEASE,
+                    json.loads(journal.read_text()),
+                    retain_auth_ownership=windows_cim_mode,
                 )
+            if windows_cim_mode:
+                verify_windows_cim_update(source, reviewed_target, json.loads(journal.read_text()))
         finally:
             with contextlib.suppress(Exception):
                 compose(

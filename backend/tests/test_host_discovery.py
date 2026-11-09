@@ -196,6 +196,20 @@ def test_registry_is_explicit_coverage_not_host_verdict(secured):
     assert scanner_capabilities.capabilities() == original
 
 
+def test_cim_discovery_shows_partial_coverage_after_successful_identity_read(secured, customer, db):
+    row = scan(secured, customer, db)
+    observation = observe(db, row)
+    audit = inventory(
+        db,
+        db.get(Asset, observation.asset_id),
+        mode="cim_inventory",
+        evidence=evidence(packages={"status": "not_requested", "items": []}),
+    )
+    device = get(secured, customer["id"])["items"][0]
+    assert device["host_audit_id"] == audit.id
+    assert device["inventory_status"] == "partial"
+
+
 def test_only_positive_network_observations_are_devices(secured, customer, db):
     row = scan(secured, customer, db)
     positive = observe(db, row, services=[service(3389, service="ms-wbt-server")])

@@ -134,6 +134,11 @@ def create_assessment(
     )
 
     audit = checked_audit(db, audit_id, lock=True)
+    if audit.mode == "cim_inventory":
+        raise HTTPException(
+            status_code=422,
+            detail="CIM base inventory does not provide Windows patch assessment evidence",
+        )
     if (
         audit.mode not in {"inventory", "windows_updates"}
         or not isinstance(audit.inventory, dict)
