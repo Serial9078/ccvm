@@ -40,18 +40,34 @@ if ($null -eq $inputData -or $inputData -isnot [pscustomobject]) {
 }
 """
 
-STDIN_PROBE = "$ErrorActionPreference='Stop';try {\n" + READ_INPUT + r"""
+STDIN_PROBE = "$ErrorActionPreference='Stop';$stage='input';try {\n" + READ_INPUT + r"""
 if ($inputData.password -isnot [string] -or $inputData.password.Length -lt 32) {
     throw 'Disposable fixture input property is missing'
 }
+$stage = 'security_module'
+Import-Module -Name Microsoft.PowerShell.Security -ErrorAction Stop
+$command = Get-Command -Name ConvertTo-SecureString -CommandType Cmdlet -ErrorAction Stop
+$module = $command.Module
+$homePath = [IO.Path]::GetFullPath($PSHOME)
+$modulePath = [IO.Path]::GetFullPath($module.ModuleBase)
+$comparison = [StringComparison]::OrdinalIgnoreCase
+$fromHome = $modulePath.Equals($homePath, $comparison) -or
+    $modulePath.StartsWith($homePath + [IO.Path]::DirectorySeparatorChar, $comparison)
+$stage = 'secure_string'
+$secure = ConvertTo-SecureString -String $inputData.password -AsPlainText -Force
+try {
+    if ($secure.Length -ne $inputData.password.Length) { throw 'Secure input length differs' }
+} finally { $secure.Dispose() }
 $bytes = [Text.Encoding]::UTF8.GetBytes($rawInput)
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $digest = [BitConverter]::ToString($sha.ComputeHash($bytes)) }
 finally { $sha.Dispose() }
-@{bytes=$bytes.Length;sha256=$digest.Replace('-','').ToLowerInvariant()} |
+@{bytes=$bytes.Length;sha256=$digest.Replace('-','').ToLowerInvariant();
+  ps_major=[int]$PSVersionTable.PSVersion.Major;security_module=[string]$module.Name;
+  security_version=[string]$module.Version;security_from_pshome=[bool]$fromHome} |
     ConvertTo-Json -Compress
 } catch {
-    @{status='failed';setup_stage='input';hresult=[int64]$_.Exception.HResult;
+    @{status='failed';setup_stage=$stage;hresult=[int64]$_.Exception.HResult;
       script_line=[int]$_.InvocationInfo.ScriptLineNumber;setting_index=0;
       cleanup_failed=$false} | ConvertTo-Json -Compress
     exit 1
@@ -115,6 +131,10 @@ try {
         $inputData.password.Length -lt 32 -or $inputData.password.Length -gt 128) {
         throw 'Disposable fixture password input is missing or invalid'
     }
+    $stage = 'secure_string'
+    $password = ConvertTo-SecureString -String $inputData.password -AsPlainText -Force
+    if ($password.Length -ne $inputData.password.Length) { throw 'Secure input length differs' }
+    $inputData.password = $null; $rawInput = $null
     $stage = 'service_state'
     $service = Get-Service -Name WinRM
     $state.ServiceWasRunning = $service.Status -eq 'Running'
@@ -157,7 +177,6 @@ try {
     $state.AccountSid = $account[0].SID.Value
     $state.AccountEnabled = [bool]$account[0].Enabled
     $stage = 'reset_account'
-    $password = ConvertTo-SecureString -String $inputData.password -AsPlainText -Force
     Set-LocalUser -SID $account[0].SID -Password $password
     Enable-LocalUser -SID $account[0].SID
     $stage = 'read_os'
@@ -175,7 +194,8 @@ try {
         script_line=[int]$_.InvocationInfo.ScriptLineNumber;
         setting_index=$settingIndex}
 } finally {
-    $inputData = $null; $password = $null
+    if ($password -is [Security.SecureString]) { $password.Dispose() }
+    $inputData = $null; $password = $null; $rawInput = $null
     if (-not $complete) {
         try { Restore-CcvmFixture $state }
         catch { $cleanupFailed = $true }
@@ -223,6 +243,8 @@ def setup_diagnostics(output):
     fields = {"status", "setup_stage", "hresult", "script_line", "setting_index", "cleanup_failed"}
     stages = {
         "input",
+        "security_module",
+        "secure_string",
         "service_state",
         "service_start",
         "read_settings",
@@ -292,6 +314,11 @@ def powershell(source, payload=None):
                 str(script),
             ],
             input=data,
+            # pwsh 7 -> Python -> Windows PowerShell 5 otherwise inherits Core
+            # module paths and can autoload an incompatible Security module.
+            env={
+                key: value for key, value in os.environ.items() if key.casefold() != "psmodulepath"
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=90,
@@ -314,9 +341,31 @@ def verify_stdin_channel():
     payload = {"password": "Input9!" + secrets.token_urlsafe(36)}
     expected = json.dumps(payload).encode("utf-8")
     result = powershell(STDIN_PROBE, payload)
-    if result != {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}:
+    if (
+        not isinstance(result, dict)
+        or set(result)
+        != {
+            "bytes",
+            "sha256",
+            "ps_major",
+            "security_module",
+            "security_version",
+            "security_from_pshome",
+        }
+        or result.get("bytes") != len(expected)
+        or result.get("sha256") != hashlib.sha256(expected).hexdigest()
+        or result.get("ps_major") != 5
+        or result.get("security_module") != "Microsoft.PowerShell.Security"
+        or result.get("security_from_pshome") is not True
+        or not isinstance(result.get("security_version"), str)
+        or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", result["security_version"])
+    ):
         raise NativeCheckError("Disposable PowerShell input handshake failed")
-    print("PowerShell stdin JSON handshake verified before Windows fixture changes")
+    print(
+        "PowerShell 5 stdin JSON and Security "
+        + result["security_version"]
+        + " from Windows PowerShell home verified before fixture changes"
+    )
 
 
 def protocol_session(username, password):
