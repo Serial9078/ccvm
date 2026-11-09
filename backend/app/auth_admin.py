@@ -5,6 +5,8 @@ import fcntl
 import getpass
 import json
 import os
+import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -31,6 +33,12 @@ from app.services.auth_session import (
     validate_password,
     verify_totp,
 )
+from app.services.enrollment_qr import render_qr
+
+ENROLLMENT_UI_VERSION = 2
+MAX_PASSWORD_ATTEMPTS = 5
+MAX_CODE_ATTEMPTS = 5
+MAX_SETUP_COMMANDS = 15
 
 
 def require_root():
@@ -95,25 +103,130 @@ def admin_lock():
         os.close(descriptor)
 
 
+def read_username():
+    for _attempt in range(MAX_PASSWORD_ATTEMPTS):
+        answer = input("Benutzername (Q = abbrechen): ").strip()
+        if answer.casefold() == "q":
+            raise KeyboardInterrupt
+        try:
+            return normalize_username(answer)
+        except ValueError as error:
+            print(f"Bitte korrigieren: {error}")
+    raise ValueError("Zu viele ungültige Eingaben; es wurde nichts gespeichert")
+
+
+def read_password(username):
+    print("\n1/3 · Passwort festlegen")
+    print("Passwörter bleiben beim Tippen unsichtbar. Der Bestätigungscode später ist sichtbar.")
+    for _attempt in range(MAX_PASSWORD_ATTEMPTS):
+        password = getpass.getpass("Neues Passwort (15–128 Zeichen): ")
+        repeated = getpass.getpass("Passwort wiederholen: ")
+        if password != repeated:
+            print("Die Passwörter stimmen nicht überein. Bitte beide erneut eingeben.")
+            continue
+        try:
+            validate_password(password, username)
+            return password
+        except ValueError as error:
+            print(f"Bitte korrigieren: {error}")
+    raise ValueError("Zu viele ungültige Passworteingaben; es wurde nichts gespeichert")
+
+
+@contextmanager
+def private_setup_screen():
+    # A separate terminal screen prevents the QR/manual seed from remaining in
+    # the ordinary scrollback on supported terminals. It cannot undo screenshots.
+    terminal = os.environ.get("TERM", "")
+    alternate = sys.stdout.isatty() and terminal.startswith(
+        (
+            "xterm",
+            "screen",
+            "tmux",
+            "rxvt",
+            "vte",
+            "konsole",
+            "alacritty",
+            "kitty",
+            "wezterm",
+            "foot",
+        )
+    )
+    if alternate:
+        print("\x1b[?1049h\x1b[2J\x1b[H", end="", flush=True)
+    try:
+        yield alternate
+    finally:
+        if alternate:
+            print("\x1b[0m\x1b[2J\x1b[H\x1b[?1049l", end="", flush=True)
+
+
+def show_authenticator_qr(uri, username):
+    print("\n2/3 · Authenticator verbinden")
+    print(f"Konto: {username}")
+    print("In deiner Authenticator-App ein Konto per QR-Code hinzufügen und hier scannen.")
+    print("QR-Code und manuellen Schlüssel privat halten; keine Screenshots davon teilen.")
+    try:
+        qr = render_qr(uri)
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        required_columns = max(80, qr.columns)
+        if size.columns < required_columns or size.lines < qr.rows + 10:
+            print(
+                f"Terminal zum Scannen vergrößern: mindestens {required_columns} Spalten und "
+                f"{qr.rows + 10} Zeilen. Danach R eingeben; mit M geht es manuell."
+            )
+            return
+        print(qr.text, flush=True)
+    except (UnicodeError, ValueError):
+        print(
+            "Der QR-Code kann hier nicht angezeigt werden. Mit M die manuelle Einrichtung wählen."
+        )
+
+
 def enrollment(username, origin):
-    password = getpass.getpass("Neues Passwort (15–128 Zeichen): ")
-    if password != getpass.getpass("Passwort wiederholen: "):
-        raise ValueError("Passwörter stimmen nicht überein")
-    validate_password(password, username)
+    password = read_password(username)
     secret = generate_totp_secret()
     issuer = "CCVM " + urlsplit(origin).hostname
     uri = (
         f"otpauth://totp/{quote(issuer + ':' + username, safe='')}"
         f"?secret={secret}&issuer={quote(issuer, safe='')}&algorithm=SHA1&digits=6&period=30"
     )
-    print("Authenticator jetzt privat einrichten; diese Angaben nicht weitergeben oder posten.")
-    print(f"Kontoname: {username}")
-    print(f"Einrichtungsschlüssel: {secret}")
-    print(f"Authenticator-URI: {uri}")
-    code = getpass.getpass("Sechsstelligen Authenticator-Code zur Bestätigung eingeben: ").strip()
-    step = verify_totp(secret, code)
-    if step is None:
-        raise ValueError("Authenticator-Code ungültig; es wurde nichts gespeichert")
+    failures = 0
+    with private_setup_screen() as alternate:
+
+        def display():
+            if alternate:
+                print("\x1b[0m\x1b[2J\x1b[H", end="", flush=True)
+            show_authenticator_qr(uri, username)
+            print("3/3 · Verbindung bestätigen")
+            print("Sechsstelligen Code sichtbar eingeben und Enter drücken.")
+            print("M = manueller Schlüssel · R = QR erneut anzeigen · Q = abbrechen")
+
+        display()
+        for _command in range(MAX_SETUP_COMMANDS):
+            answer = input("Bestätigungscode (sichtbar): ").strip()
+            if answer.casefold() == "q":
+                raise KeyboardInterrupt
+            if answer.casefold() == "m":
+                print("Manuelle Einrichtung: zeitbasiertes Konto, 6 Stellen, 30 Sekunden.")
+                print(f"Einrichtungsschlüssel: {secret}")
+                continue
+            if answer.casefold() == "r":
+                display()
+                continue
+            code = "".join(answer.split())
+            step = verify_totp(secret, code) if re.fullmatch(r"[0-9]{6}", code) else None
+            if step is not None:
+                break
+            failures += 1
+            if failures >= MAX_CODE_ATTEMPTS:
+                raise ValueError("Fünf ungültige Codes; Einrichtung beendet, nichts gespeichert")
+            print(
+                "Code ungültig. Denselben Authenticator-Eintrag verwenden und den nächsten "
+                f"Code versuchen. Noch {MAX_CODE_ATTEMPTS - failures} Versuche."
+            )
+        else:
+            raise ValueError("Einrichtung beendet: zu viele Eingaben; nichts gespeichert")
+    print("Authenticator bestätigt. Einrichtung wird gespeichert …")
     return password, secret, step
 
 
@@ -125,7 +238,8 @@ def bootstrap(origin):
     with SessionLocal() as db:
         if db.scalar(select(func.count()).select_from(AuthUser)):
             raise ValueError("Ein Operator ist bereits vorhanden; bootstrap wird nicht wiederholt")
-        username = normalize_username(input("Benutzername: "))
+        print("CCVM-Konto einrichten · Mit Strg+C jederzeit abbrechen")
+        username = read_username()
         password, secret, step = enrollment(username, origin)
         create_operator(db, username, password, secret, confirmed_step=step)
         db.commit()
