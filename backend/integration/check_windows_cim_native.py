@@ -53,7 +53,7 @@ function Restore-CcvmFixture($state) {
             else { Disable-LocalUser -SID $state.AccountSid }
         } catch { $ok = $false }
     }
-    if (-not $state.ServiceWasRunning) {
+    if ($state.ServiceCaptured -and -not $state.ServiceWasRunning) {
         try { Stop-Service -Name WinRM -Force }
         catch { $ok = $false }
     }
@@ -65,21 +65,33 @@ SETUP = RESTORE + r"""
 $ErrorActionPreference = 'Stop'
 $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $state = @{Settings=@();CreatedListener=$false;AccountSid=$null;AccountEnabled=$false;
-           ServiceWasRunning=((Get-Service -Name WinRM).Status -eq 'Running')}
+           ServiceCaptured=$false}
 $complete = $false
+$failure = $null
+$cleanupFailed = $false
+$stage = 'service_state'
+$settingIndex = 0
 try {
+    $service = Get-Service -Name WinRM
+    $state.ServiceWasRunning = $service.Status -eq 'Running'
+    $state.ServiceCaptured = $true
+    $stage = 'service_start'
     Start-Service -Name WinRM
+    $stage = 'read_settings'
     foreach ($path in @('WSMan:\localhost\Service\Auth\Negotiate',
                          'WSMan:\localhost\Service\Auth\Basic',
                          'WSMan:\localhost\Service\AllowUnencrypted',
                          'WSMan:\localhost\Shell\AllowRemoteShellAccess')) {
         $value = [Convert]::ToBoolean([string](Get-Item -LiteralPath $path).Value)
         $state.Settings += @{Path=$path;Value=$value}
+        $settingIndex += 1
     }
+    $stage = 'configure_auth'
     Set-Item WSMan:\localhost\Service\Auth\Negotiate -Value $true -Force
     Set-Item WSMan:\localhost\Service\Auth\Basic -Value $false -Force
     Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $false -Force
     Set-Item WSMan:\localhost\Shell\AllowRemoteShellAccess -Value $false -Force
+    $stage = 'read_listeners'
     $listeners = @(Get-WSManInstance -ResourceURI winrm/config/Listener -Enumerate)
     $state.Listeners = @($listeners | Select-Object Address,Transport,Port,Enabled,
         Hostname,CertificateThumbprint,URLPrefix | Sort-Object Address,Transport)
@@ -89,18 +101,22 @@ try {
         $_.Address -in @('*','IP:127.0.0.1')
     })
     if ($usable.Count -eq 0) {
+        $stage = 'create_listener'
         New-WSManInstance -ResourceURI winrm/config/Listener `
             -SelectorSet @{Address='IP:127.0.0.1';Transport='HTTP'} `
             -ValueSet @{Enabled=$true;Port=5985} | Out-Null
         $state.CreatedListener = $true
     }
+    $stage = 'select_account'
     $account = @(Get-LocalUser | Where-Object {$_.SID.Value -match '-500$'})
     if ($account.Count -ne 1) { throw 'Expected exactly one built-in administrator' }
     $state.AccountSid = $account[0].SID.Value
     $state.AccountEnabled = [bool]$account[0].Enabled
+    $stage = 'reset_account'
     $password = ConvertTo-SecureString -String $inputData.password -AsPlainText -Force
     Set-LocalUser -SID $account[0].SID -Password $password
     Enable-LocalUser -SID $account[0].SID
+    $stage = 'read_os'
     $native = Get-CimInstance -ClassName Win32_OperatingSystem
     $state.Username = $env:COMPUTERNAME + [char]92 + $account[0].Name
     $state.OS = @{name=[string]$native.Caption;version=[string]$native.Version;
@@ -109,9 +125,22 @@ try {
         sku=[string]$native.OperatingSystemSKU;family='Windows'}
     $state | ConvertTo-Json -Depth 6 -Compress
     $complete = $true
+} catch {
+    $failure = @{status='failed';setup_stage=$stage;
+        hresult=[int64]$_.Exception.HResult;
+        script_line=[int]$_.InvocationInfo.ScriptLineNumber;
+        setting_index=$settingIndex}
 } finally {
     $inputData = $null; $password = $null
-    if (-not $complete) { Restore-CcvmFixture $state }
+    if (-not $complete) {
+        try { Restore-CcvmFixture $state }
+        catch { $cleanupFailed = $true }
+    }
+}
+if ($null -ne $failure) {
+    $failure.cleanup_failed = $cleanupFailed
+    $failure | ConvertTo-Json -Compress
+    exit 1
 }
 """
 
@@ -135,7 +164,45 @@ $hotfixes = @(Get-CimInstance -ClassName Win32_QuickFixEngineering | ForEach-Obj
 
 
 class NativeCheckError(RuntimeError):
-    pass
+    def __init__(self, message, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+def setup_diagnostics(output):
+    """Extract only fixed setup stages and numeric metadata, never PS errors."""
+    try:
+        value = json.loads(output.decode("utf-8-sig"))
+    except (UnicodeError, ValueError):
+        return {}
+    fields = {"status", "setup_stage", "hresult", "script_line", "setting_index", "cleanup_failed"}
+    stages = {
+        "service_state",
+        "service_start",
+        "read_settings",
+        "configure_auth",
+        "read_listeners",
+        "create_listener",
+        "select_account",
+        "reset_account",
+        "read_os",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("status") != "failed"
+        or not isinstance(value.get("setup_stage"), str)
+        or value.get("setup_stage") not in stages
+        or type(value.get("hresult")) is not int
+        or not -(2**31) <= value["hresult"] <= 2**32 - 1
+        or type(value.get("script_line")) is not int
+        or not 0 <= value["script_line"] <= 10000
+        or type(value.get("setting_index")) is not int
+        or not 0 <= value["setting_index"] <= 4
+        or type(value.get("cleanup_failed")) is not bool
+    ):
+        return {}
+    return {key: value[key] for key in fields - {"status"}}
 
 
 def hosted_windows_only():
@@ -170,8 +237,12 @@ def powershell(source, payload=None):
         timeout=90,
         check=False,
     )
-    if result.returncode or len(result.stdout) > 65536:
+    if len(result.stdout) > 65536:
         raise NativeCheckError("Disposable Windows fixture command failed")
+    if result.returncode:
+        raise NativeCheckError(
+            "Disposable Windows fixture command failed", setup_diagnostics(result.stdout)
+        )
     try:
         return json.loads(result.stdout.decode("utf-8-sig"))
     except (UnicodeError, ValueError):
@@ -328,6 +399,8 @@ if __name__ == "__main__":
         main()
     except (Exception, KeyboardInterrupt) as error:
         result = {"status": "failed", "phase": PHASE, "error_type": type(error).__name__}
+        if isinstance(error, NativeCheckError):
+            result.update(error.diagnostics)
         for field in ("wsman_fault_code", "wmierror_code", "code"):
             value = getattr(error, field, None)
             if type(value) is int and -(2**31) <= value <= 2**32 - 1:

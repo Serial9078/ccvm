@@ -23,6 +23,7 @@ try {
   page.on("pageerror", (error) => errors.push(String(error)));
   let credentials = [];
   let runs = [];
+  const nextRunId = () => Math.max(0, ...runs.map((run) => run.id)) + 1;
   let rejectSave = false;
   let modes = [];
   const submissions = [];
@@ -850,8 +851,9 @@ try {
           assert.equal(Object.hasOwn(payload, "winrm_transport"), false);
           assert.equal(payload.ssh_fingerprint, "SHA256:" + "A".repeat(43));
         }
+        const runId = nextRunId();
         const run = {
-          id: runs.length + 1,
+          id: runId,
           customer_id: 1,
           asset_id: payload.target === "192.0.2.30" ? 106 : 1,
           credential_id: credential.id,
@@ -870,7 +872,7 @@ try {
           completed_at: now,
           cancel_requested: false,
           job: {
-            id: runs.length + 1,
+            id: runId,
             status: "finished",
             progress: 100,
             message: "Fixture inventory finished",
@@ -1660,18 +1662,24 @@ try {
   partialHost.windows_assessment = null;
   partialHost.software_assessment = null;
   partialHost.issues = ["latest_collection_failed", "inventory_partial"];
+  const failedRunId = nextRunId();
   runs.unshift({
     ...structuredClone(runs[0]),
-    id: 6,
+    id: failedRunId,
     failedNoEvidence: true,
     mode: "inventory",
     job: {
-      id: 6,
+      id: failedRunId,
       status: "failed",
       progress: 100,
       message: "Fixture failed collector: no evidence",
     },
   });
+  assert.equal(
+    new Set(runs.map((run) => run.id)).size,
+    runs.length,
+    "Saved audit identities are unique",
+  );
   overviewExtras = [
     needsPatch,
     baselineHost,
@@ -1693,7 +1701,7 @@ try {
   const hostRow = (ip) => overview.getByRole("row").filter({ hasText: ip });
   await hostRow("192.0.2.20").waitFor();
   await openHistory();
-  const failedRun = page.getByTestId("run-card-6");
+  const failedRun = page.getByTestId(`run-card-${failedRunId}`);
   await failedRun.getByText("Fixture failed collector: no evidence", { exact: true }).waitFor();
   for (const name of ["Assess Windows patches", "Assess installed software"]) {
     const button = failedRun.getByRole("button", { name, exact: true });
