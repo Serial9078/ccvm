@@ -351,16 +351,36 @@ def test_bootstrap_is_private_interactive_and_one_time(environment, monkeypatch,
     monkeypatch.setattr(auth_admin.sys.stdout, "isatty", lambda: True)
     secret = auth.generate_totp_secret()
     monkeypatch.setattr(auth_admin, "generate_totp_secret", lambda: secret)
-    monkeypatch.setattr("builtins.input", lambda prompt: "Operator")
-    answers = iter([PASSWORD, PASSWORD, auth.totp_code(secret)])
+    visible = iter(["Operator", auth.totp_code(secret)])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(visible))
+    answers = iter([PASSWORD, PASSWORD])
     monkeypatch.setattr(auth_admin.getpass, "getpass", lambda prompt: next(answers))
     assert auth_admin.main(["bootstrap", "--origin", ORIGIN]) == 0
     output = capsys.readouterr().out
-    assert PASSWORD not in output and secret in output
+    assert PASSWORD not in output and secret not in output
+    assert "otpauth://" not in output
+    assert "Bestätigungscode später ist sichtbar" in output
     assert auth.auth_policy().origin == ORIGIN
     assert environment.policy.stat().st_mode & 0o777 == 0o600
     assert auth_admin.main(["bootstrap", "--origin", ORIGIN]) == 1
     assert "bereits vorhanden" in capsys.readouterr().err
+
+
+def test_aborted_bootstrap_does_not_create_an_account_or_policy(environment, monkeypatch):
+    monkeypatch.setattr(auth_admin, "require_root", lambda: None)
+    monkeypatch.setattr(auth_admin, "admin_lock", __import__("contextlib").nullcontext)
+    monkeypatch.setattr(auth_admin.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(auth_admin.sys.stdout, "isatty", lambda: False)
+    # Call bootstrap directly: main deliberately refuses a non-TTY output.
+    monkeypatch.setattr(
+        "builtins.input", lambda prompt: "operator" if "Benutzername" in prompt else "q"
+    )
+    monkeypatch.setattr(auth_admin.getpass, "getpass", lambda prompt: PASSWORD)
+    with pytest.raises(KeyboardInterrupt):
+        auth_admin.bootstrap(ORIGIN)
+    with environment.factory() as db:
+        assert db.scalar(select(func.count()).select_from(AuthUser)) == 0
+    assert not environment.policy.exists()
 
 
 def test_local_reset_revokes_all_sessions_without_deleting_evidence(environment, monkeypatch):
@@ -378,6 +398,22 @@ def test_local_reset_revokes_all_sessions_without_deleting_evidence(environment,
     with environment.factory() as db:
         assert db.get(AuthUser, user_id).enabled
         assert db.scalar(select(func.count()).select_from(AuthUser)) == 1
+
+
+def test_aborted_reset_keeps_existing_mfa_password_and_session(environment, monkeypatch):
+    user_id, secret = seed(environment)
+    assert login(environment, secret).status_code == 200
+    with environment.factory() as db:
+        user = db.get(AuthUser, user_id)
+        before = (user.password_hash, user.totp_ciphertext, user.totp_last_step)
+    monkeypatch.setattr(auth_admin.getpass, "getpass", lambda prompt: PASSWORD)
+    monkeypatch.setattr("builtins.input", lambda prompt: "q")
+    with pytest.raises(KeyboardInterrupt):
+        auth_admin.reset("operator")
+    with environment.factory() as db:
+        user = db.get(AuthUser, user_id)
+        assert (user.password_hash, user.totp_ciphertext, user.totp_last_step) == before
+    assert environment.client.get("/private").status_code == 200
 
 
 def test_cli_refuses_noninteractive_or_unprivileged_enrollment(environment, monkeypatch, capsys):

@@ -31,6 +31,7 @@ SOFTWARE_RELEASE = "69706bff65dad6436af59aceec45fa325f01630e"
 OVERVIEW_RELEASE = "6c6474e27179998fe2d82815c0a826ca6de0a2e9"
 WINDOWS_CLIENTS_RELEASE = "175910ed72717385d2bf75bacf59894671db8251"
 HOST_WORKSPACE_RELEASE = "41f3071d877521da8b9d80e80408a40245835eeb"
+SECURE_LOGIN_RELEASE = "51c9e544102900c0efb5070358c1c9da2f9942db"
 
 
 def run(*args, cwd=None, data=None, timeout=600, success=True, stream=False):
@@ -1985,7 +1986,9 @@ RUN for tool in subfinder dnsx httpx naabu katana nuclei; do \\
                     json.loads(journal.read_text()),
                 )
             if secure_login_mode:
-                verify_secure_login_update(source, reviewed_target, json.loads(journal.read_text()))
+                verify_secure_login_update(
+                    source, SECURE_LOGIN_RELEASE, json.loads(journal.read_text())
+                )
         finally:
             with contextlib.suppress(Exception):
                 compose(

@@ -12,7 +12,29 @@ Host beschränkt. Es gibt keine Speicherung von Passwörtern, Sitzungsschlüssel
 Operator-Tokens in Local Storage oder Session Storage. Mutierende API-Aufrufe benötigen
 zusätzlich den CSRF-Wert und den exakten konfigurierten HTTPS-Ursprung.
 
-## Veröffentlichung auf dem bestehenden Neptun
+## Terminal-Assistent aktualisieren
+
+Auf einer bereits veröffentlichten Anmeldung ab Release `51c9e544` wird nur der
+Einrichtungsassistent aktualisiert. Eine noch offene Einrichtung zuerst mit Strg+C
+beenden. Der Updater prüft die laufende Anwendung und hält während der Veröffentlichung
+deren lokale Verwaltungssperre. Datenbank, Schlüssel, Sitzungen, Container und
+Weboberfläche werden nicht verändert; ein Neustart ist nicht erforderlich.
+
+```bash
+cd /opt/ccvm
+CCVM_ENROLLMENT_TARGET='<REVIEWED_ENROLLMENT_MERGE_SHA>'
+git fetch origin sprint-1.0.2-feature-architecture
+sudo -v
+git show "${CCVM_ENROLLMENT_TARGET}:scripts/update-auth-enrollment.py" |
+  python3 - --target "$CCVM_ENROLLMENT_TARGET" --host neptun --apply
+```
+
+Ohne `--apply` wird ausschließlich geprüft. Nach einer unterbrochenen Veröffentlichung
+denselben SHA mit `--apply --resume` verwenden. Ein noch unvollständiges vorheriges
+Login-Deployment wird ausdrücklich abgewiesen und muss zuerst abgeschlossen werden.
+Anschließend die unten stehende interaktive Kontoeinrichtung starten.
+
+## Erstveröffentlichung der sicheren Anmeldung
 
 Voraussetzung ist eine vollständig verifizierte Host-Workspace-Veröffentlichung samt ihren
 sechs erhaltenen Vorgänger-Journalen. Der neue Updater verlangt einen untätigen Worker,
@@ -25,7 +47,7 @@ Den vollständigen geprüften Merge-SHA verwenden:
 
 ```bash
 cd /opt/ccvm
-CCVM_LOGIN_TARGET='<REVIEWED_MERGE_SHA>'
+CCVM_LOGIN_TARGET='51c9e544102900c0efb5070358c1c9da2f9942db'
 git fetch origin sprint-1.0.2-feature-architecture
 sudo -v
 git show "${CCVM_LOGIN_TARGET}:scripts/update-secure-login.py" |
@@ -44,16 +66,34 @@ Nach `VERIFIED` diesen Befehl **einzeln im privaten interaktiven Terminal auf Ne
 ausführen. Nicht in einen Here-Document-Block oder eine Pipe einbauen:
 
 ```bash
-sudo docker exec -it --user 0 --workdir /app ccvm-backend \
+sudo docker exec -it --user 0 --env TERM=xterm-256color --workdir /app ccvm-backend \
   python -m app.auth_admin bootstrap --origin https://ccvm.cloudcollab.de
 ```
 
-Das Werkzeug fragt einen frei gewählten CCVM-Benutzernamen und ein Passwort mit
-15–128 Zeichen ab. Der angezeigte Einrichtungsschlüssel wird einmalig in einer
-Authenticator-App angelegt und anschließend durch einen aktuellen Code bestätigt.
-Passwort, Einrichtungsschlüssel, URI und Authenticator-Codes nicht in Chats oder
-Diagnoseausgaben kopieren. Es gibt kein Standardpasswort und keine öffentliche
-Registrierung. Dieses CCVM-Konto ist unabhängig von den Windows-/SSH-Scan-Zugangsdaten.
+Der Terminal-Assistent führt durch drei Schritte:
+
+1. Einen frei gewählten CCVM-Benutzernamen und ein Passwort mit 15–128 Zeichen
+   festlegen. Bei Passwörtern werden keine Zeichen angezeigt; der Assistent erklärt
+   das vor der Eingabe. Tippfehler lassen sich direkt korrigieren.
+2. In der Authenticator-App ein Konto per QR-Code hinzufügen und den lokal
+   angezeigten QR-Code scannen. Den Terminalbereich dafür gegebenenfalls vergrößern.
+3. Den sechsstelligen Bestätigungscode **sichtbar** eintippen und Enter drücken.
+   Ein falscher Code kann direkt korrigiert werden; derselbe QR-Code und derselbe
+   Authenticator-Eintrag bleiben während des Vorgangs gültig. Nach fünf ungültigen
+   Codes endet die Einrichtung ohne Speicherung.
+
+Mit `M` lässt sich der Einrichtungsschlüssel ausdrücklich zur manuellen Eingabe
+anzeigen; mit `R` derselbe QR-Code erneut darstellen. `Q` oder Strg+C bricht die
+Einrichtung ohne neues Konto ab. Auch wiederholte Menübefehle sind begrenzt.
+QR-Code und Schlüssel werden ausschließlich lokal erzeugt. Es wird kein externer
+QR-Dienst verwendet und keine URI automatisch ausgegeben. Auf unterstützten
+Terminals schließt der Assistent seinen gesonderten Bildschirm nach Bestätigung
+oder Abbruch; bereits angefertigte Screenshots kann er dadurch nicht zurücknehmen.
+
+Passwort, QR-Code, Einrichtungsschlüssel und Authenticator-Codes privat halten und
+nicht in Chats oder Diagnoseausgaben kopieren. Es gibt kein Standardpasswort und
+keine öffentliche Registrierung. Dieses CCVM-Konto ist unabhängig von den
+Windows-/SSH-Scan-Zugangsdaten.
 
 Erst nach erfolgreicher Einrichtung und Speicherung aktiviert die CLI die lokale
 Anmeldung. Danach die CCVM-Seite neu laden und für die erste Anmeldung den **nächsten
@@ -79,7 +119,7 @@ Bei vergessenem Passwort oder verlorenem Authenticator kann ein Administrator mi
 root-Zugriff das bestehende Konto im privaten Terminal erneuern:
 
 ```bash
-sudo docker exec -it --user 0 --workdir /app ccvm-backend \
+sudo docker exec -it --user 0 --env TERM=xterm-256color --workdir /app ccvm-backend \
   python -m app.auth_admin reset --username '<CCVM-BENUTZERNAME>'
 ```
 
