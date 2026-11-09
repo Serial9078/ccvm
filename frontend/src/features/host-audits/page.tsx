@@ -31,7 +31,6 @@ import { auditRequest, canUseAuditApi } from "./api";
 import { useAuth } from "../../shared/auth/context";
 import type {
   Credential,
-  AuditMode,
   HostAssessment,
   HostAudit,
   InventorySection,
@@ -43,6 +42,13 @@ import { SoftwareAssessmentDialog, SoftwareCatalogPanel } from "./software-asses
 import { HostOverviewPanel } from "./overview";
 import { platformNames, matchesPlatform, freshWindowsUpdateQuery } from "./overview-state";
 import { HostStatusDialog } from "./host-status-dialog";
+import {
+  auditModeLabel,
+  collectionAuditMode,
+  isCimMode,
+  savedWindowsMethod,
+} from "./collection-state";
+import type { CollectionPurpose, WindowsCollectionMethod } from "./collection-state";
 import { CapabilitiesPanel } from "./capabilities-panel";
 import { DiscoveredDevicesPanel } from "./discovered-devices";
 import type { HostOverview, HostPlatformFilter, OverviewHost } from "./overview-state";
@@ -152,8 +158,8 @@ function AuditPanel({
   const [overviewLoaded, setOverviewLoaded] = useState(false);
   const [overviewDetail, setOverviewDetail] = useState<OverviewHost | null>(null);
   const [collectOpen, setCollectOpen] = useState(false);
-  const [collectionMode, setCollectionMode] =
-    useState<Exclude<AuditMode, "connection">>("inventory");
+  const [collectionMode, setCollectionMode] = useState<CollectionPurpose>("inventory");
+  const [windowsMethod, setWindowsMethod] = useState<WindowsCollectionMethod>("cim");
   const [updateQueryConfirm, setUpdateQueryConfirm] = useState(false);
   const [form, setForm] = useState(emptyCredential);
   const [createOpen, setCreateOpen] = useState(false);
@@ -185,6 +191,7 @@ function AuditPanel({
     setCollectOpen(false);
     setUpdateQueryConfirm(false);
     setCollectionMode("inventory");
+    setWindowsMethod("cim");
     setOverviewDetail(null);
     setDetail(null);
     setAssessmentView(null);
@@ -268,6 +275,7 @@ function AuditPanel({
             : { password: form.password }),
         });
         setCredentialId(String(result.id));
+        setWindowsMethod("cim");
         setWinrmTransport("https");
         setPort("");
         setFingerprint("");
@@ -334,8 +342,11 @@ function AuditPanel({
     setPort(String(host.latest_run.port));
     setFingerprint(host.latest_run.ssh_fingerprint ?? "");
     setWinrmTransport(host.latest_run.winrm_transport);
-    setCollectionMode(
-      mode ?? (host.latest_run.mode === "windows_updates" ? "windows_updates" : "inventory"),
+    const purpose =
+      mode ?? (host.latest_run.mode === "windows_updates" ? "windows_updates" : "inventory");
+    setCollectionMode(purpose);
+    setWindowsMethod(
+      purpose === "windows_updates" ? "winrs" : savedWindowsMethod(host.latest_run.mode),
     );
     setUpdateQueryConfirm(false);
     setOverviewDetail(null);
@@ -383,7 +394,11 @@ function AuditPanel({
           <Typography variant="body2" color="text.secondary">
             {auth.session?.mode === "local" ? "Angemeldet" : "Operatorzugang aktiv"}
           </Typography>
-          {auth.session?.mode !== "local" && <Button size="small" startIcon={<LockOutlinedIcon />} onClick={lock}>Sperren</Button>}
+          {auth.session?.mode !== "local" && (
+            <Button size="small" startIcon={<LockOutlinedIcon />} onClick={lock}>
+              Sperren
+            </Button>
+          )}
         </Stack>
         <Box sx={{ flexGrow: 1 }} />
         <Button
@@ -392,6 +407,7 @@ function AuditPanel({
           disabled={busy || platform === "vmware"}
           onClick={() => {
             setCollectionMode("inventory");
+            setWindowsMethod("cim");
             setCollectOpen(true);
           }}
         >
@@ -403,6 +419,7 @@ function AuditPanel({
             disabled={busy}
             onClick={() => {
               setCollectionMode("windows_updates");
+              setWindowsMethod("winrs");
               if (selected?.kind !== "winrm") setCredentialId("");
               setCollectOpen(true);
             }}
@@ -479,6 +496,7 @@ function AuditPanel({
             setFingerprint("");
             setWinrmTransport("https");
             setCollectionMode("inventory");
+            setWindowsMethod("cim");
             setUpdateQueryConfirm(false);
             setCollectOpen(true);
           }}
@@ -508,14 +526,18 @@ function AuditPanel({
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             {collectionMode === "windows_updates"
               ? "Windows-Inventur und explizite Onlineabfrage der am Gerät konfigurierten Windows Update-/WSUS-Quelle."
-              : "Betriebssystem und installierte Software erfassen. Die Inventur liest Daten und installiert keine Updates."}
+              : selected?.kind === "winrm" && windowsMethod === "cim"
+                ? "CIM-Basisinventur: Betriebssystem und gespeicherte Hotfix-Einträge lesen. Installierte Software und fehlende Updates bleiben ungeprüft."
+                : "Betriebssystem und installierte Software erfassen. Die Inventur liest Daten und installiert keine Updates."}
           </Typography>
           {collectionMode === "windows_updates" && (
-            <Alert severity="info" sx={{ mb: 2 }}>
-              Die Abfrage kontaktiert die konfigurierte Updatequelle und kann Metadaten
-              herunterladen sowie den lokalen Updatecache verändern. Sie installiert keine Updates
-              und startet das Gerät nicht neu. Keine Änderung der Updatequelle oder Richtlinien.
-              Laufzeit bis zu 180 Sekunden.
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              Diese Windows-Updateabfrage verwendet WinRS und benötigt erlaubte Remote-Shells. Bei
+              gesperrten Remote-Shells die CIM-Basisinventur verwenden; diese bestimmt keine
+              fehlenden Updates. Die Abfrage kontaktiert die konfigurierte Updatequelle und kann
+              Metadaten herunterladen sowie den lokalen Updatecache verändern. Sie installiert keine
+              Updates und startet das Gerät nicht neu. Keine Änderung der Updatequelle oder
+              Richtlinien. Laufzeit bis zu 180 Sekunden.
             </Alert>
           )}
           <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2 }}>
@@ -525,6 +547,7 @@ function AuditPanel({
               value={credentialId}
               onChange={(e) => {
                 setCredentialId(e.target.value);
+                setWindowsMethod("cim");
                 setWinrmTransport("https");
                 setPort("");
                 setFingerprint("");
@@ -554,6 +577,18 @@ function AuditPanel({
               onChange={(e) => setTarget(e.target.value)}
               helperText="One address inside the customer credential scope"
             />
+            {selected?.kind === "winrm" && collectionMode !== "windows_updates" && (
+              <TextField
+                select
+                label="Windows-Erfassung"
+                value={windowsMethod}
+                onChange={(e) => setWindowsMethod(e.target.value as WindowsCollectionMethod)}
+                helperText="Erfassungsmethode und verschlüsselte Verbindung werden getrennt gewählt"
+              >
+                <MenuItem value="cim">CIM-Basisinventur · ohne Remote-Shell</MenuItem>
+                <MenuItem value="winrs">WinRS-Inventur · Remote-Shell erforderlich</MenuItem>
+              </TextField>
+            )}
             {selected?.kind === "winrm" && (
               <TextField
                 select
@@ -596,6 +631,15 @@ function AuditPanel({
               Credential scope: {selected.allowed_cidrs.join(", ")}
             </Typography>
           )}
+          {selected?.kind === "winrm" &&
+            collectionMode !== "windows_updates" &&
+            windowsMethod === "winrs" && (
+              <Alert severity="warning" sx={{ mt: 2 }}>
+                WinRS führt die festen Inventurbefehle in einer Remote-Shell aus. Nur verwenden,
+                wenn eure Richtlinie Remote-Shells ausdrücklich erlaubt. Es gibt keinen
+                automatischen Wechsel der Methode.
+              </Alert>
+            )}
           {selected?.kind === "winrm" && (
             <Alert severity={winrmTransport === "http_ntlm" ? "warning" : "info"} sx={{ mt: 2 }}>
               {winrmTransport === "http_ntlm"
@@ -604,7 +648,18 @@ function AuditPanel({
             </Alert>
           )}
           <Stack direction="row" spacing={2} useFlexGap sx={{ mt: 2, flexWrap: "wrap" }}>
-            <Button disabled={!valid || busy} onClick={() => queue("connection")}>
+            <Button
+              disabled={!valid || busy}
+              onClick={() =>
+                queue(
+                  collectionAuditMode(
+                    selected?.kind,
+                    collectionMode === "windows_updates" ? "winrs" : windowsMethod,
+                    "connection",
+                  ),
+                )
+              }
+            >
               Test connection
             </Button>
             <Button
@@ -617,19 +672,25 @@ function AuditPanel({
               onClick={() =>
                 collectionMode === "windows_updates"
                   ? setUpdateQueryConfirm(true)
-                  : queue("inventory")
+                  : queue(collectionAuditMode(selected?.kind, windowsMethod, "inventory"))
               }
             >
               {collectionMode === "windows_updates"
                 ? "Updateabfrage vorbereiten"
-                : "Collect inventory"}
+                : selected?.kind === "winrm" && windowsMethod === "cim"
+                  ? "CIM-Basisinventur starten"
+                  : "Collect inventory"}
             </Button>
             <Button
               disabled={busy}
               onClick={() => {
                 setForm({
                   ...emptyCredential,
-                  kind: collectionMode === "windows_updates" ? "winrm" : emptyCredential.kind,
+                  kind:
+                    collectionMode === "windows_updates" ||
+                    ["windows-server", "windows-client"].includes(platform)
+                      ? "winrm"
+                      : emptyCredential.kind,
                 });
                 fileGeneration.current++;
                 setError("");
@@ -706,11 +767,13 @@ function AuditPanel({
                 <PatchCatalogPanel token={token} />
                 <SoftwareCatalogPanel token={token} />
                 <Alert severity="info">
-                  Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is required. Windows:
-                  OS build, machine-wide uninstall registry and Get-HotFix. Completed Windows
-                  inventories can be assessed against Microsoft OS build baselines and the listed
-                  software advisory ranges. Software coverage is limited to supported product rules.
-                  Linux patch assessment and per-user software are not included.
+                  CIM-Basisinventur unter Windows: Betriebssystem und gespeicherte Hotfix-Einträge;
+                  keine installierte Software und keine fehlenden Updates. WinRS benötigt erlaubte
+                  Remote-Shells. Linux: OS, kernel and installed dpkg/RPM packages; Python 3 is
+                  required. WinRS: OS build, machine-wide uninstall registry and Get-HotFix.
+                  Completed WinRS inventories can be assessed against Microsoft OS build baselines
+                  and the listed software advisory ranges. Software coverage is limited to supported
+                  product rules. Linux patch assessment and per-user software are not included.
                 </Alert>
               </Stack>
             </AccordionDetails>
@@ -745,12 +808,7 @@ function AuditPanel({
                         {run.target}:{run.port}
                       </Typography>
                       <Typography variant="body2" color="text.secondary">
-                        {run.mode === "connection"
-                          ? "Connection test"
-                          : run.mode === "windows_updates"
-                            ? "Windows-Updateabfrage mit Inventur"
-                            : "Host inventory"}{" "}
-                        · {new Date(run.created_at).toLocaleString()}
+                        {auditModeLabel(run.mode)} · {new Date(run.created_at).toLocaleString()}
                       </Typography>
                       {credentials.find((credential) => credential.id === run.credential_id)
                         ?.kind === "winrm" && (
@@ -1161,6 +1219,14 @@ function AuditPanel({
             )}
           {detail?.inventory ? (
             <>
+              {isCimMode(detail.mode) && (
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  {detail.mode === "cim_connection"
+                    ? "CIM-Verbindungstest · ohne Remote-Shell. Geprüft wird nur die Betriebssystemidentität."
+                    : "CIM-Basisinventur · ohne Remote-Shell. Prüfumfang: Betriebssystem und gespeicherte Hotfix-Einträge; die Verfügbarkeit steht bei den erfassten Daten."}{" "}
+                  Installierte Software und fehlende Updates wurden nicht erfasst oder bewertet.
+                </Alert>
+              )}
               <Typography variant="h6">{detail.inventory.os.name}</Typography>
               <Typography color="text.secondary">
                 Version {detail.inventory.os.version} · Kernel / build {detail.inventory.os.kernel}{" "}
@@ -1190,20 +1256,24 @@ function AuditPanel({
                   were not passed.
                 </Alert>
               )}
-              <Section
-                title="Packages"
-                section={detail.inventory.packages}
-                columns={
-                  detail.inventory.os.family === "Windows"
-                    ? ["name", "version", "publisher", "architecture"]
-                    : ["name", "version", "architecture"]
-                }
-              />
-              <Section
-                title="Hotfixes"
-                section={detail.inventory.hotfixes}
-                columns={["id", "description"]}
-              />
+              {!isCimMode(detail.mode) && (
+                <Section
+                  title="Packages"
+                  section={detail.inventory.packages}
+                  columns={
+                    detail.inventory.os.family === "Windows"
+                      ? ["name", "version", "publisher", "architecture"]
+                      : ["name", "version", "architecture"]
+                  }
+                />
+              )}
+              {detail.mode !== "cim_connection" && (
+                <Section
+                  title={isCimMode(detail.mode) ? "Gespeicherte Hotfix-Einträge" : "Hotfixes"}
+                  section={detail.inventory.hotfixes}
+                  columns={["id", "description"]}
+                />
+              )}
             </>
           ) : (
             <Typography>No inventory evidence was collected. {detail?.job.message}</Typography>
@@ -1280,7 +1350,9 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
   };
   const activeCustomer = queryCustomer || customer;
   const activeSession = normalLogin
-    ? (activeCustomer ? { token: `cookie-session-${auth.generation}`, customerId: Number(activeCustomer) } : null)
+    ? activeCustomer
+      ? { token: `cookie-session-${auth.generation}`, customerId: Number(activeCustomer) }
+      : null
     : session;
   return (
     <Stack spacing={3}>
@@ -1297,11 +1369,23 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
         </Typography>
       </Box>
       {normalLogin && (
-        <TextField select label="Kunde" value={activeCustomer} sx={{ maxWidth: 360 }} onChange={(event) => {
-          setCustomer(event.target.value);
-          setQuery(event.target.value ? { customer_id: event.target.value } : {}, { replace: true });
-        }}>
-          {customers.map((entry) => <MenuItem key={entry.id} value={String(entry.id)}>{entry.name}</MenuItem>)}
+        <TextField
+          select
+          label="Kunde"
+          value={activeCustomer}
+          sx={{ maxWidth: 360 }}
+          onChange={(event) => {
+            setCustomer(event.target.value);
+            setQuery(event.target.value ? { customer_id: event.target.value } : {}, {
+              replace: true,
+            });
+          }}
+        >
+          {customers.map((entry) => (
+            <MenuItem key={entry.id} value={String(entry.id)}>
+              {entry.name}
+            </MenuItem>
+          ))}
         </TextField>
       )}
       {activeSession ? (
@@ -1316,13 +1400,18 @@ export function HostAudits({ platform = "all" }: { platform?: HostPlatformFilter
             customerId={activeSession.customerId}
             platform={platform}
             lock={() => {
-              if (normalLogin) { void auth.logout(); return; }
+              if (normalLogin) {
+                void auth.logout();
+                return;
+              }
               setSession(null);
               setInput("");
             }}
           />
         </>
-      ) : normalLogin ? <Alert severity="info">Wähle einen Kunden, um die Systeme anzuzeigen.</Alert> : (
+      ) : normalLogin ? (
+        <Alert severity="info">Wähle einen Kunden, um die Systeme anzuzeigen.</Alert>
+      ) : (
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ mb: 2 }}>
             Operator access

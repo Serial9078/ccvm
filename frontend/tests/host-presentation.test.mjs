@@ -1,12 +1,43 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hostPresentation, collectionFailure } from "../src/features/host-audits/host-presentation.ts";
+import {
+  hostPresentation,
+  collectionFailure,
+} from "../src/features/host-audits/host-presentation.ts";
 
 test("fixed transport failures show a specific next step without guessing unknown failures", () => {
-  assert.equal(collectionFailure("The target rejected authentication").label, "Zugangsdaten prüfen");
-  assert.equal(collectionFailure("The network operation timed out; verify the service, firewall and VPN route").label, "VPN & Firewall prüfen");
-  assert.equal(collectionFailure("WinRM denied access; verify account permissions and endpoint policy").label, "Berechtigungen prüfen");
+  assert.equal(
+    collectionFailure("The target rejected authentication").label,
+    "Zugangsdaten prüfen",
+  );
+  assert.equal(
+    collectionFailure("The network operation timed out; verify the service, firewall and VPN route")
+      .label,
+    "VPN & Firewall prüfen",
+  );
+  assert.equal(
+    collectionFailure("WinRM denied access; verify account permissions and endpoint policy").label,
+    "Berechtigungen prüfen",
+  );
   assert.equal(collectionFailure("Unclassified failure"), null);
+});
+
+test("CIM response and service faults retain distinct neutral diagnostics", () => {
+  const cases = [
+    ["The CIM provider returned invalid or mismatched read-only evidence", "CIM-Antwort prüfen"],
+    ["The CIM provider could not complete the bounded OS query", "CIM-Abfrage unvollständig"],
+    [
+      "WinRM returned a service fault; verify endpoint policy and service limits",
+      "WinRM-Dienstfehler prüfen",
+    ],
+  ];
+  for (const [message, label] of cases) {
+    const failure = collectionFailure(message);
+    assert.equal(failure.label, label);
+    assert.doesNotMatch(failure.description, /VPN|Firewall|aktivieren|freigeben/);
+  }
+  assert.match(collectionFailure(cases[1][0]).description, /Zeitbudget/);
+  assert.match(collectionFailure(cases[2][0]).description, /genaue Ursache ist noch offen/);
 });
 
 function assessment(status) {
@@ -231,4 +262,25 @@ test("zero client offers stays neutral and optional offers are not called requir
   assert.match(hostPresentation(value).description, /Andere Updateangebote bleiben separat/);
   value.windows_assessment.result.windows_updates.summary.actionable = 2;
   assert.equal(hostPresentation(value).status, "updates");
+});
+
+test("CIM basis evidence remains unknown without a repeated shell or update query loop", () => {
+  for (const platform of ["windows_server", "windows_client"]) {
+    const value = host();
+    value.platform = platform;
+    value.latest_run.mode = "cim_inventory";
+    value.inventory = { id: 1, mode: "cim_inventory", package_status: "not_requested" };
+    value.windows_assessment = null;
+    value.software_assessment = null;
+    value.issues = ["cim_inventory_limited"];
+    const result = hostPresentation(value);
+    assert.equal(result.status, "unsupported");
+    assert.match(result.label, /CIM-Basisinventur erfasst.*Patchstatus offen/);
+    assert.match(
+      result.description,
+      /Installierte Software und fehlende Updates bleiben ungeprüft/,
+    );
+    assert.equal(result.action, null);
+    assert.notEqual(result.tone, "success");
+  }
 });

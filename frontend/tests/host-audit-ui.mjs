@@ -23,6 +23,7 @@ try {
   page.on("pageerror", (error) => errors.push(String(error)));
   let credentials = [];
   let runs = [];
+  const nextRunId = () => Math.max(0, ...runs.map((run) => run.id)) + 1;
   let rejectSave = false;
   let modes = [];
   const submissions = [];
@@ -568,6 +569,20 @@ try {
           },
         }
       : { schema_version: 1, ...evidence };
+    if (["cim_connection", "cim_inventory"].includes(run.mode)) {
+      data.mode = run.mode;
+      data.collection_method = "cim";
+      data.os.kernel = "20348";
+      data.packages = { status: "not_requested", source: "none", items: [] };
+      data.hotfixes = {
+        status: run.mode === "cim_connection" ? "not_requested" : "complete",
+        source: "Win32_QuickFixEngineering",
+        items:
+          run.mode === "cim_connection"
+            ? []
+            : [{ id: "KB0000001", description: "Recorded CBS update" }],
+      };
+    }
     if (run.mode === "windows_updates") {
       data.os = {
         ...data.os,
@@ -603,7 +618,7 @@ try {
       const selected = runs.find(
         (run) =>
           run.target === target &&
-          ["inventory", "windows_updates"].includes(run.mode) &&
+          ["inventory", "windows_updates", "cim_inventory"].includes(run.mode) &&
           !run.failedNoEvidence,
       );
       if (!selected) continue;
@@ -634,6 +649,7 @@ try {
         inventory: {
           id: selected.id,
           mode: selected.mode,
+          collection_method: collected.collection_method,
           completed_at: selected.completed_at,
           os: collected.os,
           package_count: collected.packages.items.length,
@@ -835,8 +851,9 @@ try {
           assert.equal(Object.hasOwn(payload, "winrm_transport"), false);
           assert.equal(payload.ssh_fingerprint, "SHA256:" + "A".repeat(43));
         }
+        const runId = nextRunId();
         const run = {
-          id: runs.length + 1,
+          id: runId,
           customer_id: 1,
           asset_id: payload.target === "192.0.2.30" ? 106 : 1,
           credential_id: credential.id,
@@ -855,7 +872,7 @@ try {
           completed_at: now,
           cancel_requested: false,
           job: {
-            id: runs.length + 1,
+            id: runId,
             status: "finished",
             progress: 100,
             message: "Fixture inventory finished",
@@ -1055,11 +1072,14 @@ try {
   const connection = page.getByRole("combobox", { name: "WinRM connection", exact: true });
   await connection.waitFor();
   assert.equal(await connection.innerText(), "HTTPS / NTLM · verified certificate");
+  const collection = page.getByRole("combobox", { name: "Windows-Erfassung", exact: true });
+  assert.equal(await collection.innerText(), "CIM-Basisinventur · ohne Remote-Shell");
   assert.equal(await page.getByLabel("Approved SSH fingerprint", { exact: true }).count(), 0);
   await page.getByText("Default 5986 · HTTPS / NTLM", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await page.getByText("HTTPS / NTLM · certificate validation required", { exact: true }).waitFor();
   assert.equal(submissions.at(-1).winrm_transport, "https");
+  assert.equal(submissions.at(-1).mode, "cim_connection");
   assert.equal(Object.hasOwn(submissions.at(-1), "port"), false);
   await openInventory();
   await page.getByLabel("Port (optional)", { exact: true }).fill("5990");
@@ -1076,8 +1096,87 @@ try {
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await page.getByText("HTTP / NTLM · message encryption required", { exact: true }).waitFor();
   assert.equal(submissions.at(-1).winrm_transport, "http_ntlm");
+  assert.equal(submissions.at(-1).mode, "cim_connection");
   assert.equal(Object.hasOwn(submissions.at(-1), "port"), false);
+  const queriesBeforeCim = wuaQueryRequests;
   await openInventory();
+  await page.getByRole("button", { name: "CIM-Basisinventur starten", exact: true }).click();
+  await page.getByTestId("inventory-form-dialog").waitFor({ state: "hidden" });
+  assert.equal(submissions.at(-1).mode, "cim_inventory");
+  assert.equal(submissions.at(-1).winrm_transport, "http_ntlm");
+  assert.equal(wuaQueryRequests, queriesBeforeCim, "CIM never silently starts WUA or WinRS");
+  await openHistory();
+  const cimCard = page.getByTestId(`run-card-${runs[0].id}`);
+  await cimCard.getByText("CIM-Basisinventur · ohne Remote-Shell", { exact: false }).waitFor();
+  assert.equal(
+    await cimCard.getByRole("button", { name: "Assess installed software", exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await cimCard.getByRole("button", { name: "Assess Windows patches", exact: true }).count(),
+    0,
+  );
+  await cimCard.getByRole("button", { name: "View evidence", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByText(/Installierte Software und fehlende Updates.*nicht erfasst oder bewertet/)
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("dialog")
+      .getByRole("heading", { name: /^Packages/ })
+      .count(),
+    0,
+  );
+  await page
+    .getByRole("dialog")
+    .getByText(/Win32_QuickFixEngineering/)
+    .waitFor();
+  await page.getByRole("button", { name: "Close evidence", exact: true }).click();
+  await workspaceTab("Systeme");
+  await page.getByRole("button", { name: "Host öffnen: 192.0.2.1", exact: true }).click();
+  const cimDetails = page.getByRole("dialog", { name: "Host-Status · 192.0.2.1", exact: true });
+  await cimDetails
+    .getByText("CIM-Basisinventur erfasst · Patchstatus offen", { exact: true })
+    .waitFor();
+  await cimDetails.getByRole("tab", { name: "Systemupdates", exact: true }).click();
+  assert.equal(
+    await cimDetails.getByRole("button", { name: "Windows-Updates abfragen", exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await cimDetails
+      .getByRole("button", { name: "Windows jetzt bewerten", exact: true })
+      .isDisabled(),
+    true,
+  );
+  await cimDetails.getByRole("tab", { name: "Software", exact: true }).click();
+  assert.equal(
+    await cimDetails
+      .getByRole("button", { name: "Software jetzt bewerten", exact: true })
+      .isDisabled(),
+    true,
+  );
+  await cimDetails.getByRole("tab", { name: "Prüfdetails", exact: true }).click();
+  await cimDetails
+    .getByRole("button", { name: "CIM-Basisinventur aktualisieren", exact: true })
+    .click();
+  await page.getByTestId("inventory-form-dialog").waitFor();
+  assert.equal(await collection.innerText(), "CIM-Basisinventur · ohne Remote-Shell");
+  assert.equal(await connection.innerText(), "HTTP / NTLM · encrypted messages");
+  assert.equal(await page.getByLabel("Port (optional)", { exact: true }).inputValue(), "5985");
+  await closeInventory();
+  await openHistory();
+  await openInventory();
+  await collection.click();
+  await page
+    .getByRole("option", { name: "WinRS-Inventur · Remote-Shell erforderlich", exact: true })
+    .click();
+  assert.equal(
+    await connection.innerText(),
+    "HTTP / NTLM · encrypted messages",
+    "Collection choice preserves selected transport",
+  );
   await page.getByLabel("Port (optional)", { exact: true }).fill("5991");
   await page.getByRole("button", { name: "Collect inventory", exact: true }).click();
   await page.getByText("192.0.2.1:5991", { exact: true }).waitFor();
@@ -1563,18 +1662,24 @@ try {
   partialHost.windows_assessment = null;
   partialHost.software_assessment = null;
   partialHost.issues = ["latest_collection_failed", "inventory_partial"];
+  const failedRunId = nextRunId();
   runs.unshift({
     ...structuredClone(runs[0]),
-    id: 6,
+    id: failedRunId,
     failedNoEvidence: true,
     mode: "inventory",
     job: {
-      id: 6,
+      id: failedRunId,
       status: "failed",
       progress: 100,
       message: "Fixture failed collector: no evidence",
     },
   });
+  assert.equal(
+    new Set(runs.map((run) => run.id)).size,
+    runs.length,
+    "Saved audit identities are unique",
+  );
   overviewExtras = [
     needsPatch,
     baselineHost,
@@ -1596,7 +1701,7 @@ try {
   const hostRow = (ip) => overview.getByRole("row").filter({ hasText: ip });
   await hostRow("192.0.2.20").waitFor();
   await openHistory();
-  const failedRun = page.getByTestId("run-card-6");
+  const failedRun = page.getByTestId(`run-card-${failedRunId}`);
   await failedRun.getByText("Fixture failed collector: no evidence", { exact: true }).waitFor();
   for (const name of ["Assess Windows patches", "Assess installed software"]) {
     const button = failedRun.getByRole("button", { name, exact: true });
@@ -1823,8 +1928,11 @@ try {
       await clientDetail.waitFor({ state: "hidden" });
       const queryForm = page.getByRole("dialog", { name: "Windows-Updates abfragen", exact: true });
       await queryForm.waitFor();
-      assert.equal(await page.getByRole("dialog").count(), 1,
-        "The inventory form replaces host details rather than stacking another active dialog");
+      assert.equal(
+        await page.getByRole("dialog").count(),
+        1,
+        "The inventory form replaces host details rather than stacking another active dialog",
+      );
       assert.equal(
         await queryForm.getByLabel("Target IP", { exact: true }).inputValue(),
         "192.0.2.30",
@@ -1864,8 +1972,11 @@ try {
         exact: true,
       });
       await updateDialog.getByText("Updates angeboten", { exact: true }).waitFor();
-      assert.equal(await page.getByRole("dialog").count(), 1,
-        "The assessment report replaces host details rather than stacking another active dialog");
+      assert.equal(
+        await page.getByRole("dialog").count(),
+        1,
+        "The assessment report replaces host details rather than stacking another active dialog",
+      );
       for (const text of [
         "Sicherheitsupdates: 1",
         "Qualitätsupdates: 1",
@@ -1952,8 +2063,9 @@ try {
   assert.deepEqual(modes, [
     "connection",
     "inventory",
-    "connection",
-    "connection",
+    "cim_connection",
+    "cim_connection",
+    "cim_inventory",
     "inventory",
     "windows_updates",
   ]);
@@ -2039,7 +2151,10 @@ try {
   });
   await page.keyboard.press("Escape");
   await mobileDetail.waitFor({ state: "hidden" });
-  await page.getByTestId("host-mobile-108").getByRole("button", { name: /Host öffnen/ }).waitFor();
+  await page
+    .getByTestId("host-mobile-108")
+    .getByRole("button", { name: /Host öffnen/ })
+    .waitFor();
   assert.deepEqual(errors, []);
   console.log(
     "Host audit UI passed: patch priorities and explicit fixes, scoped baselines, failed/stale/unknown coverage, separate platform routes, customer context, responsive navigation, volatile secrets, encrypted inventory and retained histories",
@@ -2047,11 +2162,13 @@ try {
 } catch (error) {
   await mkdir("test-artifacts", { recursive: true });
   // Retain the last observed UI for diagnosis; this is not a passing-state screenshot.
-  await page?.screenshot({
-    path: "test-artifacts/host-workspace-last-state.png",
-    fullPage: true,
-    animations: "disabled",
-  }).catch(() => {});
+  await page
+    ?.screenshot({
+      path: "test-artifacts/host-workspace-last-state.png",
+      fullPage: true,
+      animations: "disabled",
+    })
+    .catch(() => {});
   console.error(
     await page?.locator(".MuiMenu-root").evaluateAll((elements) =>
       elements.map((element) => ({

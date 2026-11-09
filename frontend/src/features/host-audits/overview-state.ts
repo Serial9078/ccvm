@@ -37,6 +37,7 @@ export interface OverviewHost {
     hotfix_count: number;
     hotfix_status: string;
     mode?: string;
+    collection_method?: string;
     windows_updates?:
       | (Pick<
           WindowsUpdateEvidence,
@@ -156,7 +157,7 @@ export function hostState(host: OverviewHost) {
       "inventory_stale",
     ].includes(issue),
   );
-  const baseline = baselineMatch && !collectionIssue;
+  const baseline = baselineMatch && !collectionIssue && !hasCimInventory(host);
   const windowsUnknown =
     !current(windows) ||
     !(
@@ -176,9 +177,21 @@ export function hostState(host: OverviewHost) {
     needsSoftware,
     baseline,
     attention: Boolean(needsWindows || needsSoftware),
-    unknown: !host.inventory || collectionIssue || windowsUnknown || softwareIncomplete,
+    unknown:
+      !host.inventory ||
+      hasCimInventory(host) ||
+      collectionIssue ||
+      windowsUnknown ||
+      softwareIncomplete,
     collectionIssue,
   };
+}
+
+export function hasCimInventory(host: OverviewHost | null | undefined) {
+  return Boolean(
+    host?.inventory &&
+    (host.inventory.mode === "cim_inventory" || host.inventory.collection_method === "cim"),
+  );
 }
 export function assessmentWarning(
   assessment: OverviewHost["windows_assessment"] | OverviewHost["software_assessment"],

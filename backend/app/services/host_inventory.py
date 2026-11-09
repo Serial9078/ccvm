@@ -63,6 +63,8 @@ ERRORS = {
     ),
     "output_limit": "Inventory exceeded the output limit",
     "redirect_rejected": "WinRM redirect was rejected",
+    "cim_invalid_response": "The CIM provider returned invalid or mismatched read-only evidence",
+    "cim_incomplete_response": "The CIM provider could not complete the bounded OS query",
 }
 
 
@@ -75,7 +77,7 @@ class CollectionCancelled(CollectionError):
 
 
 def collect(payload, cancelled=lambda: False):
-    timeout = 45 if payload["mode"] == "connection" else 180
+    timeout = 45 if payload["mode"] in {"connection", "cim_connection"} else 180
     script = Path(__file__).with_name("host_audit_transport.py")
     # No inherited DB passwords, vault keys, tokens, agents, proxies, netrc, or
     # Python search-path settings in the transport process.
@@ -312,6 +314,11 @@ def normalize_inventory(data, kind, mode):
         raise CollectionError("Unsupported inventory format")
     if mode == "windows_updates" and kind != "winrm":
         raise CollectionError("Windows update searches require WinRM")
+    cim = mode in {"cim_connection", "cim_inventory"}
+    if cim:
+        return normalize_cim_inventory(data, kind, mode)
+    if "collection_method" in data:
+        raise CollectionError("Inventory collection method does not match the frozen mode")
     os_data = data.get("os")
     family = "Windows" if kind == "winrm" else "Linux"
     if not isinstance(os_data, dict) or os_data.get("family") != family:
@@ -398,4 +405,81 @@ def normalize_inventory(data, kind, mode):
             # A malformed or unavailable update provider never erases the
             # independently collected OS, registry and hotfix snapshot.
             result["windows_updates"] = _unavailable_windows_updates()
+    return result
+
+
+def normalize_cim_inventory(data, kind, mode):
+    """Preserve only facts requested by the fixed shell-free CIM provider."""
+    if (
+        kind != "winrm"
+        or mode not in {"cim_connection", "cim_inventory"}
+        or type(data.get("schema_version")) is not int
+        or data["schema_version"] != 1
+        or data.get("collection_method") != "cim"
+        or set(data) != {"schema_version", "collection_method", "os", "packages", "hotfixes"}
+    ):
+        raise CollectionError("CIM collection method does not match the frozen mode")
+    os_data = data.get("os")
+    fields = {
+        "family",
+        "name",
+        "version",
+        "kernel",
+        "architecture",
+        "hostname",
+        "product_type",
+        "sku",
+    }
+    if not isinstance(os_data, dict) or set(os_data) != fields:
+        raise CollectionError("Invalid CIM operating system evidence")
+    result = {
+        "schema_version": 1,
+        "collection_method": "cim",
+        "os": {key: _update_text(value) for key, value in os_data.items()},
+    }
+    os_data = result["os"]
+    version = re.fullmatch(r"[0-9]{1,5}\.[0-9]{1,5}\.([0-9]{1,10})", os_data["version"])
+    if (
+        os_data["family"] != "Windows"
+        or os_data["product_type"] not in {"1", "2", "3"}
+        or any(not os_data[key] for key in fields)
+        or any(
+            not re.fullmatch(r"[0-9]{1,10}", os_data[key]) or int(os_data[key]) > 4294967295
+            for key in ("kernel", "sku")
+        )
+        or version is None
+        or int(version.group(1)) != int(os_data["kernel"])
+    ):
+        raise CollectionError("Invalid CIM operating system evidence")
+    packages = data.get("packages")
+    if packages != {"status": "not_requested", "source": "none", "items": []}:
+        raise CollectionError("CIM basic inventory does not collect installed software")
+    result["packages"] = {"status": "not_requested", "source": "none", "items": []}
+    hotfixes = data.get("hotfixes")
+    if (
+        not isinstance(hotfixes, dict)
+        or set(hotfixes) != {"status", "source", "items"}
+        or hotfixes["source"] != "Win32_QuickFixEngineering"
+        or not isinstance(hotfixes["status"], str)
+        or hotfixes["status"]
+        not in (
+            {"not_requested"}
+            if mode == "cim_connection"
+            else {"complete", "unavailable", "truncated"}
+        )
+        or not isinstance(hotfixes["items"], list)
+        or len(hotfixes["items"]) > 10000
+    ):
+        raise CollectionError("Invalid CIM hotfix coverage")
+    rows = []
+    for row in hotfixes["items"]:
+        if not isinstance(row, dict) or set(row) != {"id", "description"}:
+            raise CollectionError("Invalid CIM hotfix evidence")
+        item = {key: _update_text(value) for key, value in row.items()}
+        if not item["id"]:
+            raise CollectionError("Invalid CIM hotfix evidence")
+        rows.append(item)
+    if hotfixes["status"] in {"unavailable", "not_requested"} and rows:
+        raise CollectionError("CIM hotfix rows contradict coverage status")
+    result["hotfixes"] = {"status": hotfixes["status"], "source": hotfixes["source"], "items": rows}
     return result

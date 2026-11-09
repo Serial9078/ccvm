@@ -23,6 +23,7 @@ import {
   current,
   date,
   hostState,
+  hasCimInventory,
   matchesPlatform,
   assessmentWarning,
   softwareFix,
@@ -37,6 +38,15 @@ import type { HostAction } from "./host-presentation";
 export function WindowsStatus({ host }: { host: OverviewHost }) {
   const assessment = host.windows_assessment;
   const state = hostState(host);
+  if (hasCimInventory(host) && !state.needsWindows)
+    return (
+      <Stack spacing={0.5}>
+        <Typography variant="body2">Patchstatus ungeprüft</Typography>
+        <Typography variant="caption" color="text.secondary">
+          CIM-Basisinventur · keine vollständige Build- oder Updatebewertung
+        </Typography>
+      </Stack>
+    );
   if (host.platform === "windows_client") {
     const query = assessment?.result.windows_updates;
     const fresh = current(assessment) && !state.collectionIssue;
@@ -127,6 +137,12 @@ export function WindowsStatus({ host }: { host: OverviewHost }) {
 export function SoftwareStatus({ host }: { host: OverviewHost }) {
   const assessment = host.software_assessment;
   const state = hostState(host);
+  if (hasCimInventory(host) && !state.needsSoftware)
+    return (
+      <Typography variant="body2" color="text.secondary">
+        Nicht erfasst · nicht bewertet
+      </Typography>
+    );
   const affected = assessment?.result.products.filter((product) => product.matches_total > 0) ?? [];
   const unavailable =
     assessment?.result.coverage.vendor_catalog.reduce(
@@ -228,21 +244,24 @@ function CompactSystemStatus({ host }: { host: OverviewHost }) {
   const assessment = host.windows_assessment;
   const state = hostState(host);
   const fresh = current(assessment) && !state.collectionIssue;
-  const label = !host.inventory
-    ? "Noch nicht geprüft"
-    : !assessment
-      ? ["windows_client", "windows_server"].includes(host.platform)
-        ? "Bewertung fehlt"
-        : "Noch nicht unterstützt"
-      : !fresh
-        ? "Stand nicht aktuell"
-        : host.platform === "windows_client"
-          ? updateStatusLabels[assessment.status] || "Abfrage unvollständig"
-          : state.needsWindows
-            ? "Update nötig"
-            : state.baseline
-              ? "Build-Baseline erfüllt"
-              : "Nicht bewertet";
+  const label =
+    hasCimInventory(host) && !state.needsWindows
+      ? "Patchstatus ungeprüft"
+      : !host.inventory
+        ? "Noch nicht geprüft"
+        : !assessment
+          ? ["windows_client", "windows_server"].includes(host.platform)
+            ? "Bewertung fehlt"
+            : "Noch nicht unterstützt"
+          : !fresh
+            ? "Stand nicht aktuell"
+            : host.platform === "windows_client"
+              ? updateStatusLabels[assessment.status] || "Abfrage unvollständig"
+              : state.needsWindows
+                ? "Update nötig"
+                : state.baseline
+                  ? "Build-Baseline erfüllt"
+                  : "Nicht bewertet";
   return (
     <Stack spacing={0.5}>
       <Typography
@@ -277,13 +296,15 @@ function CompactSoftwareStatus({ host }: { host: OverviewHost }) {
         sx={{ fontWeight: 600 }}
         color={fresh && summary?.cve_matches ? "error.main" : "text.primary"}
       >
-        {!host.inventory
-          ? "Noch nicht geprüft"
-          : !fresh
-            ? "Bewertung offen"
-            : summary?.cve_matches
-              ? `${summary.matched_product_versions} Versionen prüfen`
-              : "Kein Treffer in geprüften Regeln"}
+        {hasCimInventory(host) && !summary?.cve_matches
+          ? "Nicht erfasst · nicht bewertet"
+          : !host.inventory
+            ? "Noch nicht geprüft"
+            : !fresh
+              ? "Bewertung offen"
+              : summary?.cve_matches
+                ? `${summary.matched_product_versions} Versionen prüfen`
+                : "Kein Treffer in geprüften Regeln"}
       </Typography>
       {fresh && summary && (
         <Typography variant="caption" color="text.secondary">

@@ -24,7 +24,8 @@ def frozen_audit(db, job):
     if asset.type != "ip" or asset.target != audit.target or job.plugin != "hostinventory":
         raise ValueError("Host audit target identity changed")
     if (
-        audit.mode not in {"connection", "inventory", "windows_updates"}
+        audit.mode
+        not in {"connection", "inventory", "windows_updates", "cim_connection", "cim_inventory"}
         or not 1 <= audit.port <= 65535
     ):
         raise ValueError("Invalid frozen host audit parameters")
@@ -32,6 +33,8 @@ def frozen_audit(db, job):
         raise ValueError("Unsupported credential kind")
     if audit.mode == "windows_updates" and credential.kind != "winrm":
         raise ValueError("Windows update searches require WinRM")
+    if audit.mode in {"cim_connection", "cim_inventory"} and credential.kind != "winrm":
+        raise ValueError("CIM inventory requires WinRM credentials")
     if audit.winrm_transport not in {"https", "http_ntlm"} or (
         credential.kind != "winrm" and audit.winrm_transport != "https"
     ):
@@ -66,10 +69,16 @@ def run_hostinventory(db, job):
             "ca_bundle": os.environ.get("CCVM_WINRM_CA_BUNDLE") or None,
         }
         job.progress = 10
+        cim = audit.mode in {"cim_connection", "cim_inventory"}
         job.message = (
-            "Collecting inventory and searching configured Windows update source; no installation"
-            if audit.mode == "windows_updates"
-            else "Authenticating and collecting read-only host evidence"
+            "Reading fixed CIM evidence without a remote shell; no software or patch assessment"
+            if cim
+            else (
+                "Collecting inventory and searching configured Windows update source; "
+                "no installation"
+                if audit.mode == "windows_updates"
+                else "Authenticating and collecting read-only host evidence"
+            )
         )
         db.commit()
 
@@ -112,7 +121,18 @@ def run_hostinventory(db, job):
         if audit.mode == "windows_updates":
             incomplete = incomplete or audit.inventory["windows_updates"]["status"] != "complete"
         job.status = "failed" if incomplete else "finished"
-        if audit.mode == "connection":
+        if cim:
+            job.message = (
+                "CIM connection test finished; OS identity read without a remote shell. "
+                if audit.mode == "cim_connection"
+                else (
+                    "CIM basic inventory incomplete; OS identity retained. "
+                    if incomplete
+                    else "CIM basic inventory finished. "
+                )
+                + f"Recorded QFE hotfixes: {len(audit.inventory['hotfixes']['items'])}. "
+            ) + "Software and patch assessment not performed."
+        elif audit.mode == "connection":
             job.message = "Authenticated connection test finished; OS identity read successfully"
         elif audit.mode == "windows_updates":
             updates = audit.inventory["windows_updates"]

@@ -4,6 +4,7 @@ import {
   assessmentWarning,
   current,
   freshWindowsUpdateQuery,
+  hasCimInventory,
   hostState,
   matchesPlatform,
 } from "../src/features/host-audits/overview-state.ts";
@@ -36,6 +37,18 @@ function host() {
     software_assessment: assessment("no_matches_in_checked_ranges"),
   };
 }
+
+test("CIM inventory is never a passing OS baseline or known complete assessment", () => {
+  const value = host();
+  value.inventory = { id: 1, collection_method: "cim", package_status: "not_requested" };
+  assert.equal(hasCimInventory(value), true);
+  assert.equal(hostState(value).baseline, false);
+  assert.equal(hostState(value).unknown, true);
+  value.inventory = { id: 1, mode: "cim_inventory", package_status: "not_requested" };
+  assert.equal(hasCimInventory(value), true);
+  value.platform = "windows_client";
+  assert.equal(freshWindowsUpdateQuery(value), false);
+});
 
 test("current status requires matching inventory, current rules, current catalog and a future validity", () => {
   assert.equal(current(assessment()), true);

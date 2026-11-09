@@ -28,6 +28,7 @@ class OverviewInventory(BaseModel):
     hotfix_count: int
     hotfix_status: str
     mode: str = "inventory"
+    collection_method: Literal["cim"] | None = None
     windows_updates: dict | None = None
 
 

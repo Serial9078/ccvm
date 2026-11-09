@@ -119,6 +119,8 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
         )
     if payload.mode == "windows_updates" and credential.kind != "winrm":
         raise HTTPException(status_code=422, detail="Windows update searches require WinRM")
+    if payload.mode in {"cim_connection", "cim_inventory"} and credential.kind != "winrm":
+        raise HTTPException(status_code=422, detail="CIM inventory requires WinRM credentials")
     if credential.kind.startswith("ssh_") and not payload.ssh_fingerprint:
         raise HTTPException(
             status_code=422,
@@ -166,12 +168,20 @@ def start_audit(payload: HostAuditCreate, db: Session = Depends(get_db)):
         status="queued",
         progress=0,
         message=(
-            "Configured-source Windows update search queued; update metadata may be refreshed"
-            if payload.mode == "windows_updates"
+            (
+                "CIM connection test queued; no remote shell"
+                if payload.mode == "cim_connection"
+                else "CIM basic inventory queued; no remote shell, software or patch assessment"
+            )
+            if payload.mode in {"cim_connection", "cim_inventory"}
             else (
-                "Authenticated host inventory queued"
-                if payload.mode == "inventory"
-                else "Authenticated connection test queued"
+                "Configured-source Windows update search queued; update metadata may be refreshed"
+                if payload.mode == "windows_updates"
+                else (
+                    "Authenticated host inventory queued"
+                    if payload.mode == "inventory"
+                    else "Authenticated connection test queued"
+                )
             )
         ),
     )

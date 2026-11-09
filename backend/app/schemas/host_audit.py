@@ -58,7 +58,9 @@ class HostAuditCreate(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     ssh_fingerprint: str | None = Field(default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
     winrm_transport: Literal["https", "http_ntlm"] = "https"
-    mode: Literal["connection", "inventory", "windows_updates"] = "inventory"
+    mode: Literal[
+        "connection", "inventory", "windows_updates", "cim_connection", "cim_inventory"
+    ] = "inventory"
 
 
 class HostAuditOut(BaseModel):

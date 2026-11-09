@@ -1,5 +1,6 @@
-import { current, freshWindowsUpdateQuery, hostState } from "./overview-state.ts";
+import { current, freshWindowsUpdateQuery, hasCimInventory, hostState } from "./overview-state.ts";
 import type { OverviewHost } from "./overview-state";
+import { isCimMode } from "./collection-state.ts";
 
 export type HostAction =
   "collect" | "queryWindows" | "assessWindows" | "assessSoftware" | "openWindows" | "openSoftware";
@@ -13,34 +14,64 @@ export interface HostPresentation {
   tone: "error" | "warning" | "success" | "info" | "default";
 }
 
-export function collectionFailure(message: string | undefined): { label: string; description: string } | null {
+export function collectionFailure(
+  message: string | undefined,
+): { label: string; description: string } | null {
   const messages: Record<string, { label: string; description: string }> = {
     "The network operation timed out; verify the service, firewall and VPN route": {
-      label: "VPN & Firewall prüfen", description: "Beim Netzwerkzugriff ist die Wartezeit abgelaufen. Erreichbarkeit, Dienst, VPN und Firewall prüfen.",
+      label: "VPN & Firewall prüfen",
+      description:
+        "Beim Netzwerkzugriff ist die Wartezeit abgelaufen. Erreichbarkeit, Dienst, VPN und Firewall prüfen.",
     },
     "The target network is unreachable; verify routing and the VPN connection": {
-      label: "VPN & Routing prüfen", description: "Das Zielnetz ist nicht erreichbar. VPN-Verbindung und Route zum Ziel prüfen.",
+      label: "VPN & Routing prüfen",
+      description: "Das Zielnetz ist nicht erreichbar. VPN-Verbindung und Route zum Ziel prüfen.",
     },
     "The target refused the connection; verify the selected port and listener": {
-      label: "WinRM-/SSH-Dienst prüfen", description: "Das Ziel hat die Verbindung abgelehnt. Ausgewählten Port und Listener prüfen.",
+      label: "WinRM-/SSH-Dienst prüfen",
+      description: "Das Ziel hat die Verbindung abgelehnt. Ausgewählten Port und Listener prüfen.",
     },
     "The target rejected authentication": {
-      label: "Zugangsdaten prüfen", description: "Das Ziel hat die Anmeldung abgelehnt. Benutzername, Domäne und gespeichertes Kennwort prüfen.",
+      label: "Zugangsdaten prüfen",
+      description:
+        "Das Ziel hat die Anmeldung abgelehnt. Benutzername, Domäne und gespeichertes Kennwort prüfen.",
     },
     "WinRM denied access; verify account permissions and endpoint policy": {
-      label: "Berechtigungen prüfen", description: "WinRM hat den Zugriff verweigert. Kontoberechtigungen und Endpunktrichtlinie prüfen.",
+      label: "Berechtigungen prüfen",
+      description:
+        "WinRM hat den Zugriff verweigert. Kontoberechtigungen und Endpunktrichtlinie prüfen.",
     },
     "The WinRM endpoint is unavailable; verify the port and /wsman listener": {
-      label: "WinRM-Endpunkt prüfen", description: "Der WinRM-Endpunkt ist nicht verfügbar. Port und /wsman-Listener prüfen.",
+      label: "WinRM-Endpunkt prüfen",
+      description: "Der WinRM-Endpunkt ist nicht verfügbar. Port und /wsman-Listener prüfen.",
+    },
+    "The CIM provider returned invalid or mismatched read-only evidence": {
+      label: "CIM-Antwort prüfen",
+      description:
+        "Die WMI-Antwort war ungültig oder passte nicht zur angeforderten Abfrage. Die betroffenen Daten konnten nicht bestätigt werden.",
+    },
+    "The CIM provider could not complete the bounded OS query": {
+      label: "CIM-Abfrage unvollständig",
+      description:
+        "Die begrenzte Betriebssystemabfrage konnte innerhalb des vorgesehenen Prüfumfangs oder Zeitbudgets nicht abgeschlossen werden. WMI-Dienst, Berechtigungen und Dienstlimits prüfen.",
+    },
+    "WinRM returned a service fault; verify endpoint policy and service limits": {
+      label: "WinRM-Dienstfehler prüfen",
+      description:
+        "Windows hat einen WinRM-Dienstfehler gemeldet. Die genaue Ursache ist noch offen; Endpunktrichtlinie, Anbieter und Dienstlimits prüfen.",
     },
     "WinRM TLS certificate validation failed": {
-      label: "WinRM-Zertifikat prüfen", description: "Das TLS-Zertifikat konnte nicht bestätigt werden. Zertifikatsname und Vertrauenskette prüfen.",
+      label: "WinRM-Zertifikat prüfen",
+      description:
+        "Das TLS-Zertifikat konnte nicht bestätigt werden. Zertifikatsname und Vertrauenskette prüfen.",
     },
     "The fixed inventory command failed; verify Python 3 / PowerShell and account permissions": {
-      label: "Inventurerfassung prüfen", description: "Der Inventurbefehl konnte nicht erfolgreich ausgeführt werden. Python 3 beziehungsweise PowerShell und Kontoberechtigungen prüfen.",
+      label: "Inventurerfassung prüfen",
+      description:
+        "Der Inventurbefehl konnte nicht erfolgreich ausgeführt werden. Python 3 beziehungsweise PowerShell und Kontoberechtigungen prüfen.",
     },
   };
-  return message ? messages[message] ?? null : null;
+  return message ? (messages[message] ?? null) : null;
 }
 
 /** One next step for the work queue. Individual assessment facts remain separate. */
@@ -105,6 +136,18 @@ export function hostPresentation(host: OverviewHost): HostPresentation {
     };
   }
 
+  if (hasCimInventory(host) && !failed && !state.collectionIssue) {
+    return {
+      status: "unsupported",
+      label: "CIM-Basisinventur erfasst · Patchstatus offen",
+      description:
+        "Betriebssystem und gespeicherte Hotfix-Einträge sind erfasst. Installierte Software und fehlende Updates bleiben ungeprüft. Für eine Patchbewertung wird eine weitere freigegebene Datenquelle benötigt; eine erneute CIM-Abfrage erweitert diesen Prüfumfang nicht.",
+      action: null,
+      actionLabel: "",
+      tone: "default",
+    };
+  }
+
   if (
     !host.inventory ||
     failed ||
@@ -117,7 +160,7 @@ export function hostPresentation(host: OverviewHost): HostPresentation {
     return {
       status: "collection",
       label: failed
-        ? failure?.label ?? "Verbindung prüfen"
+        ? (failure?.label ?? "Verbindung prüfen")
         : !host.inventory
           ? "Inventur fehlt"
           : partial
@@ -125,14 +168,19 @@ export function hostPresentation(host: OverviewHost): HostPresentation {
             : "Inventur erneuern",
       description: failed
         ? failure
-          ? failure.description + (host.inventory ? " Gespeichert bleibt ein früherer oder unvollständiger Inventurstand." : " Es liegen noch keine Inventurdaten vor.")
+          ? failure.description +
+            (host.inventory
+              ? " Gespeichert bleibt ein früherer oder unvollständiger Inventurstand."
+              : " Es liegen noch keine Inventurdaten vor.")
           : host.inventory
-          ? host.latest_run.id === host.inventory.id
-            ? "Der neueste Versuch hat nur unvollständige Inventurdaten geliefert. Verbindung und Zugang prüfen, danach erneut erfassen."
-            : "Der neueste Versuch ist fehlgeschlagen. Verbindung und Zugang prüfen; gespeichert ist ein älterer Inventurstand."
-          : "Es liegen keine Inventurdaten vor. Verbindung und Zugang prüfen, danach die Inventur starten."
+            ? host.latest_run.id === host.inventory.id
+              ? "Der neueste Versuch hat nur unvollständige Inventurdaten geliefert. Verbindung und Zugang prüfen, danach erneut erfassen."
+              : "Der neueste Versuch ist fehlgeschlagen. Verbindung und Zugang prüfen; gespeichert ist ein älterer Inventurstand."
+            : "Es liegen keine Inventurdaten vor. Verbindung und Zugang prüfen, danach die Inventur starten."
         : !host.inventory
-          ? "Zuerst Betriebssystem und Software erfassen. Ohne Inventur lässt sich der Patchbedarf nicht bewerten."
+          ? isCimMode(host.latest_run.mode)
+            ? "Die CIM-Basisinventur kann Betriebssystem und gespeicherte Hotfix-Einträge erfassen; installierte Software und fehlende Updates bleiben ungeprüft."
+            : "Zuerst Betriebssystem und Software erfassen. Ohne Inventur lässt sich der Patchbedarf nicht bewerten."
           : partial
             ? "Die Softwareliste ist unvollständig. Eine neue Inventur wird für einen belastbaren Abgleich benötigt."
             : "Die gespeicherte Inventur ist nicht aktuell. Vor einer neuen Bewertung den Host erneut erfassen.",
