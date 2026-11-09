@@ -159,7 +159,9 @@ def main():
         raise RuntimeError("Enrollment deployment integration requires a disposable GitHub runner")
     if docker("ps", "--all", "--format", "{{.Names}}").splitlines():
         raise RuntimeError("Enrollment deployment integration requires an empty Docker runner")
-    target = run("git", "rev-parse", "HEAD", cwd=REPOSITORY).stdout.decode().strip()
+    # Exercise the immutable CLI-only release. Its publisher intentionally
+    # rejects unrelated future assets such as the separate CIM readiness probe.
+    target = "7e7c36a9ccc410f7fe282759ae685ef1b15d3f8c"
     if not re.fullmatch(r"[0-9a-f]{40}", target):
         raise RuntimeError("Invalid reviewed fixture source")
     script = run(
